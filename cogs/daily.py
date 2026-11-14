@@ -26,14 +26,17 @@ DIGEST_HOUR = 7    # UTC: 10:00 по Москве
 INACTIVE_DAYS = 5
 
 
-def make_backup(path):
-    """Целостная копия базы (даже если бот в этот момент пишет) → zip в памяти."""
-    tmp = os.path.join(tempfile.gettempdir(), "family_backup.db")
+def make_backup(path, only_gid=None):
+    """Целостная копия базы (даже если бот в этот момент пишет) → zip в памяти.
+    only_gid — оставить только данные этой семьи (владельцу чужого сервера — не вся база бота)."""
+    tmp = os.path.join(tempfile.gettempdir(), f"family_backup_{os.getpid()}_{only_gid or 0}.db")
     src = sqlite3.connect(path)
     try:
         dst = sqlite3.connect(tmp)
         try:
             src.backup(dst)
+            if only_gid:
+                strip_foreign(dst, only_gid)
         finally:
             dst.close()
     finally:
@@ -44,6 +47,20 @@ def make_backup(path):
     os.remove(tmp)
     buf.seek(0)
     return buf
+
+
+def strip_foreign(conn, gid):
+    """Удаляет из копии всё, что не относится к семье gid: чужие семьи, служебное, альянс."""
+    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                                         "AND name NOT LIKE 'sqlite_%'")]
+    for t in tables:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({t})")}
+        if t.startswith("alliance_") or t in ("settings", "ai_usage"):
+            conn.execute(f"DELETE FROM {t}")
+        elif "guild_id" in cols:
+            conn.execute(f"DELETE FROM {t} WHERE guild_id<>?", (gid,))
+    conn.commit()
+    conn.execute("VACUUM")
 
 
 class Daily(commands.Cog):
@@ -81,7 +98,9 @@ class Daily(commands.Cog):
         owner = await self.owner(guild)
         if not owner:
             return False
-        buf = await asyncio.to_thread(make_backup, config.DB_PATH)
+        # домашнему серверу — вся база (для восстановления бота), остальным семьям — только их данные
+        only = None if self.bot.is_home(guild) else guild.id
+        buf = await asyncio.to_thread(make_backup, config.DB_PATH, only)
         size = buf.getbuffer().nbytes
         if size > 9 * 1024 * 1024:
             return await safe_dm(owner, f"💾 База семьи {config.FAMILY} выросла до {size // 1024 // 1024} МБ — в ЛС уже не "
@@ -115,8 +134,10 @@ class Daily(commands.Cog):
     @app_commands.command(name="ошибки", description="Последние ошибки бота из журнала (руководство)")
     @app_commands.default_permissions(administrator=True)
     async def errors_cmd(self, inter: discord.Interaction):
-        if inter.user.id != inter.guild.owner_id and not self.bot.has(inter.user, ["leader", "deputy"]):
-            return await inter.response.send_message("⛔ Только для Главы и заместителя.", ephemeral=True)
+        if not self.bot.is_home(inter.guild) or (inter.user.id != inter.guild.owner_id
+                                                  and not self.bot.has(inter.user, ["leader", "deputy"])):
+            return await inter.response.send_message("⛔ Журнал ошибок общий для всех семей — только для руководства "
+                                                     "домашнего сервера бота.", ephemeral=True)
         try:
             with open(config.ERR_LOG, "rb") as f:
                 f.seek(0, os.SEEK_END)
@@ -205,7 +226,7 @@ class Daily(commands.Cog):
                                          f"💎 Бустов сервера: **{guild.premium_subscription_count or 0}**", inline=False)
         if len(e.fields) == 1 and not flags:
             e.description += "\n\n✅ Всё разобрано: открытых заявок, обращений и просроченных сроков нет."
-        e.set_footer(text=f"Сводка приходит раз в {config.DIGEST_DAYS} сут. · {config.FOOTER}")
+        e.set_footer(text=f"Сводка приходит раз в {config.DIGEST_DAYS} сут. · {bot.brand(guild, config.FOOTER)}")
         return e
 
     async def digest(self, guild):

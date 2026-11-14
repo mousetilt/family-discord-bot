@@ -116,7 +116,7 @@ class Boosts(commands.Cog):
                      "• 💎 в семейном профиле\n• место в «Зале почёта» и запись в летописи")
         hall = self.boosters(guild)
         lines.append("\n**💎 Зал почёта:** " + (", ".join(m.mention for m in hall[:30]) or "пока пусто — стань первым!"))
-        e = discord.Embed(title=f"💎 Поддержи семью {config.FAMILY}", description="\n".join(lines), color=BOOST_COLOR)
+        e = discord.Embed(title=self.bot.brand(guild, f"💎 Поддержи семью {config.FAMILY}"), description="\n".join(lines), color=BOOST_COLOR)
         e.set_footer(text="Бусты делают сервер красивее и удобнее для всей семьи")
         return e
 
@@ -169,7 +169,7 @@ class Boosts(commands.Cog):
         goal = self.next_goal(count)
         left = f" До следующей цели осталось **{goal[0] - count}**: {goal[1]}." if goal else ""
         e = discord.Embed(title="💎 Спасибо за буст!",
-                          description=f"{member.mention} поддержал(а) сервер семьи **{config.FAMILY}**!\n"
+                          description=f"{member.mention} поддержал(а) сервер семьи **{self.bot.family(g)['name']}**!\n"
                                       f"Сейчас бустов: **{count}**.{left}", color=BOOST_COLOR)
         e.set_thumbnail(url=member.display_avatar.url)
         for key in ("boosts", "chat"):
@@ -180,7 +180,7 @@ class Boosts(commands.Cog):
                 except discord.HTTPException:
                     pass
         try:
-            await member.send(f"💎 Спасибо, что забустил(а) сервер семьи {config.FAMILY}! Возьми личную роль со своим "
+            await member.send(f"💎 Спасибо, что забустил(а) сервер семьи {self.bot.family(g)['name']}! Возьми личную роль со своим "
                               "цветом и названием: команда `/буст роль` на сервере.")
         except discord.HTTPException:
             pass

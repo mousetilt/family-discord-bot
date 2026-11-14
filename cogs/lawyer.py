@@ -86,7 +86,7 @@ class Lawyer(commands.Cog):
                    "\n\n".join(f"📄 **{h['title']}**\n{quote(h['text'])}" for h in hits)
             return text, [(h["title"], h["url"]) for h in hits], False
         context, sources, _ = bot.kb.context(gid, question)
-        system = f"{BASE_PROMPT}\n\nЗАДАЧА: {MODES[mode][1]}\n\nДОКУМЕНТЫ:\n{context}"
+        system = f"{bot.brand(gid, BASE_PROMPT)}\n\nЗАДАЧА: {MODES[mode][1]}\n\nДОКУМЕНТЫ:\n{context}"
         reply = await bot.ai.ask(system, question, max_tokens=1600 if mode == "doc" else 900, smart=True, cache=True)
         return reply or "ИИ не дал ответа, попробуй переформулировать.", sources, True
 
@@ -102,7 +102,8 @@ class Lawyer(commands.Cog):
             e = self.bot.embed(title, text, config.COLOR, guild)
             if src:
                 e.add_field(name="Источники", value="\n".join(src)[:1024], inline=False)
-            e.set_footer(text=f"ИИ: {self.bot.ai.name} · проверяй важное по первоисточнику · {config.FOOTER}")
+            e.set_footer(text=f"ИИ: {self.bot.ai.name} · проверяй важное по первоисточнику · "
+                              f"{self.bot.brand(guild, config.FOOTER)}")
             await send(embed=e)
 
     # ---------- команды для всех ----------

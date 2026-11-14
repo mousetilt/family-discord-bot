@@ -116,7 +116,7 @@ class ReplyModal(discord.ui.Modal, title="✉️ Ответ на анонимн�
                 user = None
         e = bot.embed(f"✉️ Ответ руководства на твоё обращение №{self.aid}",
                       f"**Тема:** {row['topic']}\n\n{self.text}", config.COLOR, inter.guild)
-        e.set_footer(text=f"Семья {config.FAMILY} · ответ от руководства (кто именно — не указывается)")
+        e.set_footer(text=f"Семья {bot.family(inter.guild)['name']} · ответ от руководства (кто именно — не указывается)")
         ok = await safe_dm(user, embed=e) if user else False
         await inter.response.send_message(
             embed=bot.embed(None, f"✉️ **Ответ отправлен** ({inter.user.mention}):\n>>> {self.text}", config.GREEN)

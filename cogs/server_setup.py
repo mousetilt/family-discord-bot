@@ -350,7 +350,8 @@ class ServerSetup(commands.Cog):
             except discord.HTTPException:
                 avatar = None
             card = images.welcome_card(avatar, "Добро пожаловать", member.display_name,
-                                       f"Гость №{member.guild.member_count} · семья {config.FAMILY}")
+                                       f"Гость №{member.guild.member_count} · семья "
+                                       f"{self.bot.family(member.guild)['name']}")
             await c.send(content=f"👋 {member.mention}, рады видеть! Хочешь к нам — жми кнопку в "
                                  f"{apply.mention if apply else '#подать-заявку'}. Вопросы — пиши сюда.",
                          file=discord.File(card, filename="welcome.png"))

@@ -77,7 +77,7 @@ class Staff(commands.Cog):
                 text = text[:990].rsplit("\n", 1)[0] + "\n…"
             if len(e.fields) < 25:
                 e.add_field(name=f"{role.name} — {len(people)}", value=text, inline=False)
-        e.title = f"👥 Состав семьи {config.FAMILY} — {total} чел."
+        e.title = f"👥 Состав семьи {bot.family(guild)['name']} — {total} чел."
         e.description = "Обновляется автоматически · 🌙 — в отпуске"
         e.timestamp = now()
         try:

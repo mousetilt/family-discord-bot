@@ -57,11 +57,12 @@ class Maintenance(commands.Cog):
         self.bot = bot
 
     def _allowed(self, inter):
-        return bool(inter.guild) and (inter.user.id == inter.guild.owner_id
+        # бот один на все семьи: перезапуск/обновление — только с домашнего сервера
+        return bool(inter.guild) and self.bot.is_home(inter.guild) and (inter.user.id == inter.guild.owner_id
                                       or self.bot.has(inter.user, ["leader", "deputy"]))
 
     async def _deny(self, inter):
-        await inter.response.send_message("⛔ Только для Главы и заместителя.", ephemeral=True)
+        await inter.response.send_message("⛔ Только для Главы и заместителя домашнего сервера бота.", ephemeral=True)
 
     # ---------- статус ----------
     @app_commands.command(name="статус", description="Состояние бота: ИИ, аптайм, голос (руководство)")

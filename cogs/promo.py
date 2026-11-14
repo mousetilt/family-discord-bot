@@ -124,9 +124,9 @@ class Promo(commands.Cog):
                 "leader": leader.display_name[:28] if leader else "—", "allies": ally_short,
                 "invite": invite.replace("https://", ""), "recruiting": recruiting}
         png = await asyncio.to_thread(images.family_card, data)
-        bb = self.forum_post(g, n, leader, since_txt, allies, invite, recruiting)
+        bb = bot.brand(g, self.forum_post(g, n, leader, since_txt, allies, invite, recruiting))
         await inter.followup.send(
-            content=f"🏛 **Ульяновская Династия** — {'набор открыт, ' if recruiting else ''}вступить: {invite}",
+            content=f"🏛 **{bot.family(g)['title']}** — {'набор открыт, ' if recruiting else ''}вступить: {invite}",
             file=discord.File(png, filename="vizitka_ulyanovy.png"), view=ForumView(bb))
 
 

@@ -181,7 +181,7 @@ class Alliance(commands.Cog):
             for row in self.active():
                 if row["ally_role_id"] and any(r.id == row["ally_role_id"] for r in member.roles):
                     return row["family"]
-            return config.FAMILY
+            return self.bot.family(g)["name"]
         row = self.fam(g.id)
         return row["family"] if row else g.name
 
@@ -486,14 +486,15 @@ class Alliance(commands.Cog):
 
     # ================= команды на серверах союзников =================
     async def sync_foreign(self, guild):
-        """На чужом сервере регистрируем только /альянс."""
-        if self.bot.is_home(guild):
+        """На сервере без семьи регистрируем только /альянс и /семья (подключить семью)."""
+        if self.bot.is_family(guild):
             return
-        cmd = self.bot.tree.get_command("альянс")
-        if not cmd:
+        cmds = [c for c in (self.bot.tree.get_command(n) for n in ("альянс", "семья")) if c]
+        if not cmds:
             return
         self.bot.tree.clear_commands(guild=guild)
-        self.bot.tree.add_command(cmd, guild=guild)
+        for cmd in cmds:
+            self.bot.tree.add_command(cmd, guild=guild)
         try:
             await self.bot.tree.sync(guild=guild)
         except discord.HTTPException as e:
@@ -502,7 +503,7 @@ class Alliance(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         for g in self.bot.guilds:
-            if not self.bot.is_home(g):
+            if not self.bot.is_family(g):
                 await self.sync_foreign(g)
         for row in self.active():
             if row["webhook"]:
@@ -510,7 +511,7 @@ class Alliance(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild):
-        if self.bot.is_home(guild):
+        if self.bot.is_family(guild):
             return
         await self.sync_foreign(guild)
         ch = guild.system_channel or next((c for c in guild.text_channels
@@ -930,14 +931,15 @@ class Alliance(commands.Cog):
             return await inter.response.send_message("Альянс уже создан. `/альянс состав` — кто в нём.", ephemeral=True)
         await inter.response.defer(ephemeral=True, thinking=True)
         self.bot.db.q("INSERT OR REPLACE INTO alliance_families(guild_id, family, status, joined_at, added_by) "
-                      "VALUES(?,?, 'active', ?, ?)", inter.guild.id, config.FAMILY, now_iso(), inter.user.id)
+                      "VALUES(?,?, 'active', ?, ?)", inter.guild.id, self.bot.family(inter.guild)["name"], now_iso(),
+                      inter.user.id)
         row = await self.ensure_channels(self.fam(inter.guild.id))
         if not row:
             return await inter.followup.send("❌ Не получилось создать каналы — проверь права бота.", ephemeral=True)
         news = self.channel(row, "news_id")
         if news:
             await news.send(embed=self.embed(f"🤝 {A}", self.charter()))
-        await self.record(f"🏛 Основан **{A}**. Семья-основатель — {config.FAMILY}.")
+        await self.record(f"🏛 Основан **{A}**. Семья-основатель — {self.bot.family(inter.guild)['name']}.")
         await inter.followup.send(f"✅ {A} создан: категория с каналами готова. Дальше — `/альянс пригласить`.",
                                   ephemeral=True)
 

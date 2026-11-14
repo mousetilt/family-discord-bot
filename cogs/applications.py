@@ -112,7 +112,7 @@ def app_embed(bot, a, user, guild):
         e.add_field(name="Причина отказа", value=a["deny_reason"][:1024], inline=False)
     if user is not None:
         e.set_thumbnail(url=user.display_avatar.url)
-    e.set_footer(text=config.FOOTER)
+    e.set_footer(text=bot.brand(guild, config.FOOTER))
     return e
 
 
@@ -433,7 +433,7 @@ class Applications(commands.Cog):
     async def ai_review(self, guild, app_id, msg, user):
         bot = self.bot
         a = bot.db.one("SELECT * FROM applications WHERE id=?", app_id)
-        system = (f"Ты помощник отдела кадров RP-семьи «{config.FAMILY}» (игра «Россия Онлайн», сервер "
+        system = bot.brand(guild, f"Ты помощник отдела кадров RP-семьи «{config.FAMILY}» (игра «Россия Онлайн», сервер "
                   f"{config.GAME_SERVER}). Оцени кандидата: анкету, тест по правилам и ответы на ситуационные "
                   "вопросы. Будь объективен и краток. Мат и сленг в ответах — не повод для отказа, а грубость, "
                   "желание обманывать, готовность нарушать правила или сливать информацию — повод.\n"
@@ -525,7 +525,7 @@ class Applications(commands.Cog):
             except discord.HTTPException:
                 avatar = None
             card = images.welcome_card(avatar, "Новый член семьи", a["nick"] or member.display_name,
-                                       f"Добро пожаловать в семью {config.FAMILY_GEN}!")
+                                       f"Добро пожаловать в семью {bot.family(g)['gen']}!")
             await chat.send(content=f"🎉 Встречайте нового члена семьи — {member.mention}! Принял: {inter.user.mention}",
                             file=discord.File(card, filename="new_member.png"))
         await bot.log(g, f"✅ {member.mention} принят в семью (заявка №{a['id']}) — {inter.user.mention}", "hrlog",

@@ -393,7 +393,7 @@ class Assistant(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        if not message.guild or not self.bot.is_home(message.guild):
+        if not message.guild or not self.bot.is_family(message.guild):
             return
         self.note(message)
         if message.author.bot:
@@ -434,7 +434,7 @@ class Assistant(commands.Cog):
         persona = self.bot.get_cog("Persona")
         card = (persona.card(ctx.author) + "\n\n") if persona else ""
         try:
-            system = SYSTEM if self.bot.has(ctx.author, USERS) else SYSTEM_LITE
+            system = self.bot.brand(ctx.author.guild, SYSTEM if self.bot.has(ctx.author, USERS) else SYSTEM_LITE)
             data = await self.bot.ai.ask_json(system, f"{self.context(ctx)}\n\n{card}{self.chat(ctx)}{self.history(ctx)}"
                                                       f"Сообщение от {ctx.author.display_name}: {request}",
                                               max_tokens=500)
@@ -837,7 +837,8 @@ class Assistant(commands.Cog):
                     else:
                         ok = 0
                         for m in people:
-                            ok += bool(await safe_dm(m, embed=bot.embed(f"✉️ Сообщение от руководства семьи {config.FAMILY}",
+                            ok += bool(await safe_dm(m, embed=bot.embed(f"✉️ Сообщение от руководства семьи "
+                                                                        f"{bot.family(g)['name']}",
                                                                         text + f"\n\n— {me.display_name}",
                                                                         config.COLOR, g)))
                         out.append(f"✉️ Доставлено в ЛС: {ok} из {len(people)}.")

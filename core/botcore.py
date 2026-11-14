@@ -12,6 +12,7 @@ from discord.ext import commands
 from . import config
 from .ai import AI
 from .db import DB, gid_of as guild_id_of
+from .family import brand as family_brand, profile as family_profile
 from .kb import KnowledgeBase
 
 log = logging.getLogger("family-bot")
@@ -76,15 +77,23 @@ def guarded(fn):
     return wrapper
 
 
+_BRAND = None  # FamilyBot.brand — подставляет профиль семьи в текст ЛС участнику сервера
+
+
 async def safe_dm(user, *args, **kwargs):
     try:
+        if _BRAND and isinstance(user, discord.Member):
+            if args and isinstance(args[0], str):
+                args = (_BRAND(user.guild, args[0]),) + tuple(args[1:])
+            if isinstance(kwargs.get("content"), str):
+                kwargs["content"] = _BRAND(user.guild, kwargs["content"])
         await user.send(*args, **kwargs)
         return True
     except (discord.HTTPException, AttributeError):
         return False
 
 
-FOREIGN_COMMANDS = {"альянс"}  # единственные команды на серверах союзных семей
+FOREIGN_COMMANDS = {"альянс", "семья"}  # единственные команды на серверах, где семья не подключена
 
 
 def event_guild_id(args):
@@ -104,15 +113,15 @@ def event_guild_id(args):
 class FamilyTree(app_commands.CommandTree):
     async def interaction_check(self, inter: discord.Interaction) -> bool:
         bot = inter.client
-        if inter.guild is None or bot.is_home(inter.guild):
+        if inter.guild is None or bot.is_family(inter.guild):
             return True
         cmd = inter.command
         parent = getattr(cmd, "root_parent", None)
         root = parent.name if parent else (cmd.name if cmd else "")
         if root in FOREIGN_COMMANDS:
             return True
-        await inter.response.send_message("Этот бот на вашем сервере работает только для альянса семей.",
-                                          ephemeral=True)
+        await inter.response.send_message("Семья на этом сервере не подключена. Владелец сервера может подключить её "
+                                          "командой `/семья подключить`.", ephemeral=True)
         return False
 
 
@@ -129,6 +138,12 @@ class FamilyBot(commands.Bot):
         self.ai = AI(self.db)
         self.kb = KnowledgeBase(self.db)
         self.voice_sessions = {}
+        # подключённые семьи (кроме домашней) — в памяти, чтобы не лезть в базу на каждое событие
+        self.families = {int(r["guild_id"]) for r in self.db.all(
+            "SELECT guild_id FROM guild_settings WHERE key='family:enabled' AND value='1'")}
+        self._synced_ids = set()
+        global _BRAND
+        _BRAND = self.brand
 
     # ---------- свой сервер и серверы союзников ----------
     @property
@@ -142,18 +157,48 @@ class FamilyBot(commands.Bot):
 
     @property
     def home_guilds(self):
+        """Все серверы, где работает семья (домашний + подключённые). По ним ходят фоновые задачи."""
         if self.home_id is None:
             return list(self.guilds)
-        g = self.get_guild(self.home_id)
-        return [g] if g else []
+        return [g for g in self.guilds if self.is_family_id(g.id)]
 
     def is_home(self, guild):
+        """Главный (домашний) сервер — основатель альянса."""
         return guild is None or self.home_id is None or guild.id == self.home_id
 
+    def is_family_id(self, gid):
+        return self.home_id is None or gid == self.home_id or gid in self.families
+
+    def is_family(self, guild):
+        """Сервер, где работает полный функционал семьи."""
+        return guild is None or self.is_family_id(guild.id)
+
+    def set_family(self, guild, on):
+        self.db.gset(guild, "family:enabled", "1" if on else "0")
+        (self.families.add if on else self.families.discard)(guild.id)
+
+    # ---------- профиль семьи ----------
+    def family(self, guild):
+        """{'name','gen','server','title'} семьи этого сервера."""
+        return family_profile(self.db, guild_id_of(guild) if guild is not None else self.home_id)
+
+    def brand(self, guild, text):
+        """Текст, написанный под семью по умолчанию, → под семью этого сервера."""
+        if guild is None:
+            return text
+        return family_brand(self.db, guild_id_of(guild), text)
+
+    async def sync_commands(self, guild):
+        """Полный набор команд на сервере семьи."""
+        self.tree.clear_commands(guild=guild)
+        self.tree.copy_global_to(guild=guild)
+        await self.tree.sync(guild=guild)
+        self._synced_ids.add(guild.id)
+
     def dispatch(self, event_name, /, *args, **kwargs):
-        """События с серверов союзных семей получает только модуль альянса — семейные функции работают только у нас."""
+        """События с серверов без семьи (союзники по альянсу) получает только модуль альянса."""
         gid = event_guild_id(args)
-        if gid is None or self.home_id is None or gid == self.home_id:
+        if gid is None or self.is_family_id(gid):
             return super().dispatch(event_name, *args, **kwargs)
         ally = self.get_cog("Alliance")
         if not ally:
@@ -179,6 +224,7 @@ class FamilyBot(commands.Bot):
             try:
                 await self.tree.sync(guild=g)
                 self._synced = True
+                self._synced_ids.add(config.GUILD_ID)
             except discord.Forbidden:
                 log.error("Нет доступа к серверу GUILD_ID=%s — после подключения проверю, на каких серверах бот.",
                           config.GUILD_ID)
@@ -187,20 +233,22 @@ class FamilyBot(commands.Bot):
         log.info("Бот запущен как %s (серверов: %d)", self.user, len(self.guilds))
         if self.home_id:
             self.db.adopt_orphans(self.home_id)
-        await self.change_presence(activity=discord.Game(name=f"Россия Онлайн · семья {config.FAMILY}"))
+        name = "Россия Онлайн" if self.families else f"Россия Онлайн · семья {config.FAMILY}"
+        await self.change_presence(activity=discord.Game(name=name))
         print("\n================================================")
         print("Серверы, на которых стоит бот:")
         for g in self.guilds:
             print(f"  • {g.name} — ID {g.id}{'  ✅ (GUILD_ID из .env)' if g.id == config.GUILD_ID else ''}")
         if not self.guilds:
             print("  (ни одного!)\n❌ Бот не добавлен на сервер. Открой ссылку в браузере и добавь его:\n  " + self.invite)
-        elif not self._synced:
+        else:
             for g in self.home_guilds:
+                if g.id in self._synced_ids:
+                    continue
                 try:
-                    self.tree.copy_global_to(guild=g)
-                    await self.tree.sync(guild=g)
+                    await self.sync_commands(g)
                     print(f"✅ Команды зарегистрированы на сервере «{g.name}».")
-                except discord.Forbidden:
+                except discord.HTTPException:
                     print(f"❌ «{g.name}»: нет права на команды. Пригласи бота ещё раз:\n  {self.invite}")
             self._synced = True
             if config.GUILD_ID not in [g.id for g in self.guilds] and len(self.guilds) == 1:
@@ -240,8 +288,8 @@ class FamilyBot(commands.Bot):
     def has(self, member, keys):
         if not isinstance(member, discord.Member):
             return False
-        if not self.is_home(member.guild):
-            return False  # роли семьи есть только на нашем сервере
+        if not self.is_family(member.guild):
+            return False  # роли семьи есть только на серверах семей
         if member.guild_permissions.administrator:
             return True
         ids = self.role_ids(member.guild, keys)
@@ -303,7 +351,9 @@ class FamilyBot(commands.Bot):
     def embed(self, title=None, description=None, color=config.COLOR, guild=None):
         e = discord.Embed(title=title, description=description, color=color)
         icon = guild.icon.url if guild and guild.icon else None
-        e.set_footer(text=config.FOOTER, icon_url=icon)
+        if guild is not None:
+            e.title, e.description = self.brand(guild, e.title), self.brand(guild, e.description)
+        e.set_footer(text=self.brand(guild, config.FOOTER), icon_url=icon)
         return e
 
     async def log(self, guild, text, key="logs", color=0x607D8B):

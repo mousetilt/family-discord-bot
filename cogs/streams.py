@@ -89,7 +89,7 @@ class Streams(commands.Cog):
             if img:
                 e.set_image(url=img)
         e.set_author(name=member.display_name, icon_url=member.display_avatar.url)
-        e.set_footer(text=f"Семья {config.FAMILY} · {'анонс вручную' if row['manual'] else plat}")
+        e.set_footer(text=f"Семья {self.bot.family(member.guild)['name']} · {'анонс вручную' if row['manual'] else plat}")
         e.timestamp = parse_dt(row["started_at"])
         return e
 

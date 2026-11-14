@@ -10,6 +10,7 @@ import discord
 from bs4 import BeautifulSoup
 
 from . import config
+from .family import brand
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/130.0 Safari/537.36")
@@ -65,15 +66,16 @@ class KnowledgeBase:
         self._chunks = {}  # guild_id -> (chunks, df, avg)
 
     # ---------- документы ----------
-    def family_doc(self):
+    def family_doc(self, gid):
         text = re.sub(r"\*\*|`", "", config.RULES_TEXT + "\n\n" + config.WELCOME_TEXT)
-        return {"id": 0, "title": f"Правила семьи {config.FAMILY}", "url": None, "category": "family",
+        text = brand(self.db, gid, text)
+        return {"id": 0, "title": brand(self.db, gid, f"Правила семьи {config.FAMILY}"), "url": None, "category": "family",
                 "content": text}
 
     def docs(self, gid, cats=None):
         """Документы семьи + общие для всех (guild_id=0, правила проекта)."""
         rows = [dict(r) for r in self.db.all("SELECT * FROM kb_docs WHERE guild_id IN (0, ?) ORDER BY id", gid)]
-        rows.append(self.family_doc())
+        rows.append(self.family_doc(gid))
         if cats:
             rows = [r for r in rows if r["category"] in cats]
         return rows

@@ -27,6 +27,7 @@ class Chronicle(commands.Cog):
 
     async def record(self, guild, kind, text, user_id=None, image=None):
         bot = self.bot
+        text = bot.brand(guild, text)
         bot.db.q("INSERT INTO chronicle(guild_id, kind, text, user_id, created_at) VALUES(?,?,?,?,?)", guild.id, kind,
                  text, user_id, now_iso())
         c = bot.ch(guild, "chronicle")
@@ -115,7 +116,7 @@ class Chronicle(commands.Cog):
             events = "\n".join(f"{r['created_at'][:10]} — {r['text']}" for r in rows)
             text = None
             if bot.ai.on:
-                system = (f"Ты летописец семьи «{config.FAMILY}» (RP-проект «Россия Онлайн»). Напиши главу летописи за "
+                system = bot.brand(guild, f"Ты летописец семьи «{config.FAMILY}» (RP-проект «Россия Онлайн»). Напиши главу летописи за "
                           f"{MONTHS_NOM[month - 1].lower()} {year} в торжественном стиле старинной летописи («В лето "
                           f"{year}-е, месяца …»), но живо и понятно, 700-1500 символов. Упомяни события из списка, не "
                           "выдумывай новых. Упоминания вида <@123> оставляй как есть.")

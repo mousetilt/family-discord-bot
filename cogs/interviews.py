@@ -102,6 +102,7 @@ class Interviews(commands.Cog):
                     pass
             text = (f"Здравствуйте, {name}! Добро пожаловать к семье {config.FAMILY_GEN}. "
                     "Рекрутер уже получил уведомление. Как только он освободится, я перенесу вас на собеседование.")
+        text = self.bot.brand(g, text)
         music = self.bot.get_cog("Music")
         if music and waiting:
             await asyncio.sleep(1.5)

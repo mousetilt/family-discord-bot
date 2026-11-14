@@ -147,7 +147,8 @@ class Persona(commands.Cog):
         if not self.bot.ai.on:
             return fallback
         try:
-            text = await asyncio.wait_for(self.bot.ai.ask(VOICE_SYSTEM, f"{self.card(member)}\n\n{task}", max_tokens=90),
+            text = await asyncio.wait_for(self.bot.ai.ask(self.bot.brand(member.guild, VOICE_SYSTEM),
+                                                          f"{self.card(member)}\n\n{task}", max_tokens=90),
                                           timeout=8)
         except Exception:
             return fallback

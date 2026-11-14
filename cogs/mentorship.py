@@ -112,7 +112,7 @@ class Mentorship(commands.Cog):
             f"**Чек-лист** `{bar}` {done}/{total}\n{lines}\n\n"
             f"📊 **За срок:** 🎙 {fmt_hours(voice)} · 📣 сборов: {gatherings} · ⚖️ выговоров: {warns}",
             config.GOLD, guild)
-        e.set_footer(text="Отмечать пункты может наставник или руководство · " + config.FOOTER)
+        e.set_footer(text="Отмечать пункты может наставник или руководство · " + self.bot.brand(guild, config.FOOTER))
         return e
 
     def view(self, row):
