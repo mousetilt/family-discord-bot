@@ -108,7 +108,9 @@ async def build_server(bot, guild, progress):
                 name=name, colour=discord.Colour(color), permissions=discord.Permissions(**perms), hoist=hoist,
                 mentionable=key.startswith("n_") or key in ("recruiter", "hr_head", "member", "mentor", "diplomat"),
                 reason="Авто-настройка сервера")
-        elif key != "leader" and role.permissions != discord.Permissions(**perms) and role < guild.me.top_role:
+        elif key != "leader" and not db.gget(guild, f"rolemap:{key}") \
+                and role.permissions != discord.Permissions(**perms) and role < guild.me.top_role:
+            # роли, которые семья сама привязала в /семья роли, не трогаем — у них свои права
             try:
                 await role.edit(permissions=discord.Permissions(**perms), reason="Права роли по настройке")
             except discord.HTTPException:
@@ -178,6 +180,8 @@ async def build_server(bot, guild, progress):
 
 
 async def apply_branding(bot, guild, progress, force=False):
+    if not bot.is_home(guild):
+        return  # герб и аватар бота — домашней семьи; чужой сервер не трогаем
     if bot.db.gget(guild, "branding_done") and not force:
         return
     emblem = (config.ASSETS / "emblem.png").read_bytes()

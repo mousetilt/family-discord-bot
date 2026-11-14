@@ -223,12 +223,12 @@ class FamilyBot(commands.Bot):
         gid = event_guild_id(args)
         if gid is None or self.is_family_id(gid):
             return super().dispatch(event_name, *args, **kwargs)
-        ally = self.get_cog("Alliance")
-        if not ally:
+        allowed = {c for c in (self.get_cog("Alliance"), self.get_cog("Families")) if c}
+        if not allowed:
             return
         ev = "on_" + event_name
         for fn in self.extra_events.get(ev, []):
-            if getattr(fn, "__self__", None) is ally:
+            if getattr(fn, "__self__", None) in allowed:
                 self._schedule_event(fn, ev, *args, **kwargs)
 
     async def setup_hook(self):
