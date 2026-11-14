@@ -1,0 +1,22 @@
+# секреты и локальные данные — НИКОГДА в репозиторий
+.env
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+errors.log
+*.log
+
+# кэш и установленные пакеты хостинга
+__pycache__/
+*.pyc
+.cache/
+.local/
+.config/
+
+# служебное
+*.bak
+*.flag
+.DS_Store
+
+.venv/
