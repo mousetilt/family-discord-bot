@@ -31,7 +31,9 @@
 
 ## Деплой
 - Хостинг bot-hosting.net: файлы в `/home/container`, секреты — во вкладке «Окружение» (НЕ в .git). Запуск: `pip install -r requirements.txt && python3 -u bot.py`.
-- **Через GitHub (целевой путь):** правим код → `git push` → в Discord `/обновить` (бот делает `git pull --ff-only` + `os.execv`). `start.sh` — pull+pip+run на старте.
+- **Через GitHub:** правим код → `git push` → в Discord `/обновить` (бот делает `git fetch`, показывает список коммитов и перезапускается через `launcher.py`).
+- **`launcher.py`** — стартовый файл на хосте (`STARTUP_FILE=launcher.py` в «Конфигурации запуска»; саму команду запуска хоста не трогаем). На каждом старте: есть git → `fetch` + `reset --hard origin/main` (при первом запуске сам делает `git init` в папке), нет git → качает zip с codeload.github.com. Игнорируемые файлы (`*.db`, `.env`, `.local`) не трогает. Если изменился `requirements.txt` — ставит зависимости. Любая ошибка → стартует на текущем коде. `start.sh` — старый вариант, не используется.
+- Git на этом ПК: `C:\Program Files\Git\cmd\git.exe` (не в PATH у сессии Claude). Авторизация GitHub — через Git Credential Manager, уже выполнена.
 - `.gitignore` исключает `.env`, `*.db`, логи, кэш — секреты в репозиторий не попадают. Репозиторий: `github.com/mousetilt/family-discord-bot` (public).
 - Тест перед деплоем: загрузить все коги на оффлайн-боте (`FamilyBot(presences=False)` + `load_extension` в цикле) — должно быть без ошибок.
 

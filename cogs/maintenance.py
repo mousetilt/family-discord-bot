@@ -5,6 +5,7 @@
 import asyncio
 import datetime as dt
 import os
+import shutil
 import sys
 import time
 
@@ -44,9 +45,11 @@ async def _run(cmd, cwd=ROOT, timeout=120):
     return proc.returncode, (out or b"").decode("utf-8", "replace")
 
 
-def _restart_in_place():
-    """Перезапускает текущий процесс бота на месте (не зависит от авто-рестарта хоста)."""
-    os.execv(sys.executable, [sys.executable, "-u", os.path.join(ROOT, "bot.py")])
+def _restart_in_place(via_launcher=False):
+    """Перезапускает текущий процесс бота на месте (не зависит от авто-рестарта хоста).
+    via_launcher=True — через launcher.py, который перед стартом подтянет код из GitHub."""
+    script = "launcher.py" if via_launcher and os.path.isfile(os.path.join(ROOT, "launcher.py")) else "bot.py"
+    os.execv(sys.executable, [sys.executable, "-u", os.path.join(ROOT, script)])
 
 
 class Maintenance(commands.Cog):
@@ -113,23 +116,35 @@ class Maintenance(commands.Cog):
     async def update_cmd(self, inter: discord.Interaction):
         if not self._allowed(inter):
             return await self._deny(inter)
-        if not os.path.isdir(os.path.join(ROOT, ".git")):
+        has_launcher = os.path.isfile(os.path.join(ROOT, "launcher.py"))
+        has_git = os.path.isdir(os.path.join(ROOT, ".git")) and shutil.which("git")
+        if not has_launcher and not has_git:
             return await inter.response.send_message(
-                "❌ Код на хосте не из GitHub (нет `.git`). Сначала развернём бота как git-клон.", ephemeral=True)
+                "❌ Нет ни `launcher.py`, ни git-репозитория — обновлять неоткуда.", ephemeral=True)
         await inter.response.defer(ephemeral=True)
-        code, out = await _run(["git", "pull", "--ff-only"])
-        tail = out.strip()[-1500:] or "(пусто)"
-        if code != 0:
-            return await inter.followup.send(f"❌ Не смог обновиться:\n```\n{tail}\n```", ephemeral=True)
-        if "Already up to date" in out or "Already up-to-date" in out or "уже актуальна" in out.lower():
-            return await inter.followup.send(f"✅ Уже последняя версия.\n```\n{tail}\n```", ephemeral=True)
-        await inter.followup.send(f"⬇️ Обновил код, перезапускаюсь…\n```\n{tail}\n```", ephemeral=True)
+        msg = "⬇️ Подтягиваю код из GitHub и перезапускаюсь… вернусь через ~20 секунд."
+        if has_git:
+            code, out = await _run(["git", "fetch", "-q", "origin", "main"])
+            if code != 0:
+                return await inter.followup.send(
+                    f"❌ GitHub недоступен:\n```\n{out.strip()[-1500:] or '(пусто)'}\n```", ephemeral=True)
+            _, changes = await _run(["git", "log", "--oneline", "--no-decorate", "HEAD..origin/main"])
+            changes = changes.strip()
+            if not changes:
+                return await inter.followup.send("✅ Уже последняя версия.", ephemeral=True)
+            msg = f"⬇️ Новое в коде:\n```\n{changes[-1500:]}\n```\nОбновляюсь и перезапускаюсь…"
+            if not has_launcher:  # старая схема без загрузчика — обновляем сами
+                code, out = await _run(["git", "reset", "-q", "--hard", "origin/main"])
+                if code != 0:
+                    return await inter.followup.send(f"❌ Не смог обновиться:\n```\n{out[-1500:]}\n```",
+                                                     ephemeral=True)
+        await inter.followup.send(msg, ephemeral=True)
         await asyncio.sleep(1.5)
         try:
             await self.bot.close()
         except Exception:
             pass
-        _restart_in_place()
+        _restart_in_place(via_launcher=True)
 
     # ---------- горячая перезагрузка модуля ----------
     @app_commands.command(name="модуль", description="Перезагрузить один модуль без полного рестарта (руководство)")
