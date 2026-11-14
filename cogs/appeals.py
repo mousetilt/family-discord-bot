@@ -48,7 +48,8 @@ class AppealButton(discord.ui.DynamicItem[discord.ui.Button], template=r"appeal:
         return cls(match["kind"]) if match["kind"] in KINDS else None
 
     async def callback(self, inter: discord.Interaction):
-        last = inter.client.db.one("SELECT created_at FROM appeals WHERE user_id=? ORDER BY id DESC", inter.user.id)
+        last = inter.client.db.one("SELECT created_at FROM appeals WHERE guild_id=? AND user_id=? ORDER BY id DESC",
+                                   inter.guild.id, inter.user.id)
         if last and (now() - parse_dt(last["created_at"])).total_seconds() < COOLDOWN:
             return await inter.response.send_message("⏳ Новое обращение можно отправить через 10 минут после "
                                                      "предыдущего. Дополнить старое — напиши в его ветку.",
@@ -145,8 +146,8 @@ class Appeals(commands.Cog):
         bot, g, user = self.bot, inter.guild, inter.user
         anon = kind == "anon"
         await inter.response.defer(ephemeral=True, thinking=True)
-        cur = bot.db.q("INSERT INTO appeals(user_id, kind, anon, topic, text, created_at) VALUES(?,?,?,?,?,?)",
-                       user.id, kind, int(anon), topic[:80], text[:1800], now_iso())
+        cur = bot.db.q("INSERT INTO appeals(guild_id, user_id, kind, anon, topic, text, created_at) VALUES(?,?,?,?,?,?,?)",
+                       g.id, user.id, kind, int(anon), topic[:80], text[:1800], now_iso())
         row = bot.db.one("SELECT * FROM appeals WHERE id=?", cur.lastrowid)
         if anon:
             desk = bot.ch(g, "council_chat")
@@ -222,13 +223,14 @@ class Appeals(commands.Cog):
     async def list_cmd(self, inter: discord.Interaction):
         if not self.bot.has(inter.user, config.LEAD):
             return await inter.response.send_message("⛔ Только для руководства.", ephemeral=True)
-        rows = self.bot.db.all("SELECT * FROM appeals WHERE status='open' ORDER BY id DESC LIMIT 25")
+        rows = self.bot.db.all("SELECT * FROM appeals WHERE guild_id=? AND status='open' ORDER BY id DESC LIMIT 25",
+                               inter.guild.id)
         lines = []
         for r in rows:
             emoji, name, *_ = KINDS[r["kind"]]
             where = f"<#{r['thread_id']}>" if r["thread_id"] else "в совете (анонимно)"
             lines.append(f"{emoji} **№{r['id']}** {r['topic']} — {where} · <t:{int(parse_dt(r['created_at']).timestamp())}:R>")
-        total = self.bot.db.one("SELECT COUNT(*) n FROM appeals")["n"]
+        total = self.bot.db.one("SELECT COUNT(*) n FROM appeals WHERE guild_id=?", inter.guild.id)["n"]
         await inter.response.send_message(embed=self.bot.embed(
             f"📬 Открытые обращения: {len(rows)}", "\n".join(lines) or "Всё разобрано 👌",
             config.COLOR, inter.guild).set_footer(text=f"Всего обращений за всё время: {total}"), ephemeral=True)

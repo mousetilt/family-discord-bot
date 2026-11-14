@@ -30,7 +30,8 @@ class DiploPanel(discord.ui.View):
                        custom_id="diplo:request")
     async def request(self, inter: discord.Interaction, _):
         db = inter.client.db
-        for r in db.all("SELECT channel_id FROM negotiations WHERE requester_id=? AND status='open'", inter.user.id):
+        for r in db.all("SELECT channel_id FROM negotiations WHERE guild_id=? AND requester_id=? AND status='open'",
+                        inter.guild.id, inter.user.id):
             if inter.guild.get_channel(r["channel_id"]):
                 return await inter.response.send_message(f"У тебя уже открыты переговоры: <#{r['channel_id']}>",
                                                          ephemeral=True)
@@ -122,10 +123,10 @@ class Diplomacy(commands.Cog):
     # ---------- доска отношений ----------
     async def update_board(self, guild):
         bot = self.bot
-        c, mid = bot.ch(guild, "relations"), bot.db.get("panel:relations_board")
+        c, mid = bot.ch(guild, "relations"), bot.db.gget(guild, "panel:relations_board")
         if not c or not mid:
             return
-        rows = bot.db.all("SELECT * FROM relations ORDER BY family")
+        rows = bot.db.all("SELECT * FROM relations WHERE guild_id=? ORDER BY family", guild.id)
         e = bot.embed(f"🌐 Отношения семьи {config.FAMILY_GEN}", None, 0x00ACC1, guild)
         for key, (emoji, name, _) in config.RELATIONS.items():
             fams = [r for r in rows if r["status"] == key]
@@ -133,7 +134,7 @@ class Diplomacy(commands.Cog):
                 e.add_field(name=f"{emoji} {name} ({len(fams)})",
                             value="\n".join(f"**{r['family']}**{' — ' + r['note'] if r['note'] else ''}"
                                             for r in fams)[:1024], inline=False)
-        treaties = bot.db.all("SELECT * FROM treaties WHERE active=1 ORDER BY id DESC LIMIT 10")
+        treaties = bot.db.all("SELECT * FROM treaties WHERE guild_id=? AND active=1 ORDER BY id DESC LIMIT 10", guild.id)
         if treaties:
             e.add_field(name="📜 Действующие договоры",
                         value="\n".join(f"`№{t['id']}` {t['title']} — **{t['family']}**"
@@ -154,10 +155,11 @@ class Diplomacy(commands.Cog):
     @staff_only(config.DIPLO)
     async def rel_set(self, inter: discord.Interaction, family: str, status: app_commands.Choice[str], note: str = None):
         db = self.bot.db
-        old = db.one("SELECT status FROM relations WHERE lower(family)=lower(?)", family)
-        db.q("DELETE FROM relations WHERE lower(family)=lower(?)", family)
-        db.q("INSERT INTO relations(family, status, note, updated_by, updated_at) VALUES(?,?,?,?,?)",
-             family, status.value, note, inter.user.id, now_iso())
+        gid = inter.guild.id
+        old = db.one("SELECT status FROM relations WHERE guild_id=? AND lower(family)=lower(?)", gid, family)
+        db.q("DELETE FROM relations WHERE guild_id=? AND lower(family)=lower(?)", gid, family)
+        db.q("INSERT INTO relations(guild_id, family, status, note, updated_by, updated_at) VALUES(?,?,?,?,?,?)",
+             gid, family, status.value, note, inter.user.id, now_iso())
         await self.update_board(inter.guild)
         emoji, name, color = config.RELATIONS[status.value]
         await self.bot.log(inter.guild, f"{emoji} Отношения с **{family}**: {name} ({inter.user.mention})"
@@ -170,7 +172,7 @@ class Diplomacy(commands.Cog):
     @app_commands.rename(family="семья")
     @staff_only(config.DIPLO)
     async def rel_del(self, inter: discord.Interaction, family: str):
-        self.bot.db.q("DELETE FROM relations WHERE lower(family)=lower(?)", family)
+        self.bot.db.q("DELETE FROM relations WHERE guild_id=? AND lower(family)=lower(?)", inter.guild.id, family)
         await self.update_board(inter.guild)
         await inter.response.send_message("🗑 Убрано.", ephemeral=True)
 
@@ -189,8 +191,8 @@ class Diplomacy(commands.Cog):
                 ow[r] = PO(view_channel=True, send_messages=True, read_message_history=True)
         ch = await g.create_text_channel(f"🤝・{slug(family)}", category=cat, overwrites=ow,
                                          topic=f"Переговоры с {family} · {who}")
-        bot.db.q("INSERT INTO negotiations(channel_id, family, requester_id, purpose, created_at) VALUES(?,?,?,?,?)",
-                 ch.id, family, inter.user.id, purpose, now_iso())
+        bot.db.q("INSERT INTO negotiations(channel_id, guild_id, family, requester_id, purpose, created_at) "
+                 "VALUES(?,?,?,?,?,?)", ch.id, g.id, family, inter.user.id, purpose, now_iso())
         v = discord.ui.View(timeout=None)
         v.add_item(CloseButton(ch.id))
         dip = bot.role(g, "diplomat")
@@ -258,8 +260,8 @@ class Diplomacy(commands.Cog):
     async def create_treaty(self, inter, family, title, terms, days):
         bot = self.bot
         until = (now() + dt.timedelta(days=days)).isoformat() if days else None
-        cur = bot.db.q("INSERT INTO treaties(family, title, terms, until, created_by, created_at) VALUES(?,?,?,?,?,?)",
-                       family, title, terms, until, inter.user.id, now_iso())
+        cur = bot.db.q("INSERT INTO treaties(guild_id, family, title, terms, until, created_by, created_at) "
+                       "VALUES(?,?,?,?,?,?,?)", inter.guild.id, family, title, terms, until, inter.user.id, now_iso())
         tid = cur.lastrowid
         e = bot.embed(f"📜 Договор №{tid}: {title}",
                       f"**Стороны:** семья {config.FAMILY} и **{family}**\n**Срок:** "
@@ -278,7 +280,7 @@ class Diplomacy(commands.Cog):
     @app_commands.rename(tid="номер", reason="причина")
     @staff_only(config.DIPLO)
     async def treaty_end(self, inter: discord.Interaction, tid: int, reason: str):
-        t = self.bot.db.one("SELECT * FROM treaties WHERE id=?", tid)
+        t = self.bot.db.one("SELECT * FROM treaties WHERE guild_id=? AND id=?", inter.guild.id, tid)
         if not t or not t["active"]:
             return await inter.response.send_message("Нет такого действующего договора.", ephemeral=True)
         self.bot.db.q("UPDATE treaties SET active=0 WHERE id=?", tid)
@@ -291,7 +293,7 @@ class Diplomacy(commands.Cog):
 
     @treaty.command(name="список", description="Действующие договоры")
     async def treaty_list(self, inter: discord.Interaction):
-        rows = self.bot.db.all("SELECT * FROM treaties WHERE active=1 ORDER BY id DESC")
+        rows = self.bot.db.all("SELECT * FROM treaties WHERE guild_id=? AND active=1 ORDER BY id DESC", inter.guild.id)
         text = "\n".join(f"`№{t['id']}` **{t['title']}** — {t['family']}"
                          f"{' (до ' + discord.utils.format_dt(parse_dt(t['until']), 'd') + ')' if t['until'] else ''}"
                          for t in rows)
@@ -303,7 +305,7 @@ class Diplomacy(commands.Cog):
     async def expire(self):
         for t in self.bot.db.all("SELECT * FROM treaties WHERE active=1 AND until IS NOT NULL AND until<?", now_iso()):
             self.bot.db.q("UPDATE treaties SET active=0 WHERE id=?", t["id"])
-            for g in self.bot.home_guilds:
+            for g in filter(None, [self.bot.get_guild(t["guild_id"])]):
                 c = self.bot.ch(g, "treaties")
                 if c:
                     try:

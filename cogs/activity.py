@@ -38,7 +38,7 @@ class Activity(commands.Cog):
         if start:
             sec = int((now() - start).total_seconds())
             if sec > 0:
-                self.bot.db.touch(member.id, voice=sec)
+                self.bot.db.touch(member.guild, member.id, voice=sec)
 
     def flush_all(self, guild):
         for uid in list(self.bot.voice_sessions):
@@ -69,7 +69,7 @@ class Activity(commands.Cog):
     async def on_message(self, message):
         if message.author.bot or not message.guild:
             return
-        self.bot.db.touch(message.author.id, msgs=1)
+        self.bot.db.touch(message.guild, message.author.id, msgs=1)
 
     @commands.Cog.listener()
     async def on_member_remove(self, member):
@@ -85,10 +85,12 @@ class Activity(commands.Cog):
         self.flush(member)
         if member.voice and self.counted(inter.guild, member.voice.channel):
             bot.voice_sessions[member.id] = now()
-        a = db.one("SELECT * FROM activity WHERE user_id=?", member.id)
-        w = db.one("SELECT COUNT(*) n FROM warns WHERE user_id=? AND active=1", member.id)["n"]
-        app = db.one("SELECT * FROM applications WHERE user_id=? AND status='accepted' ORDER BY id DESC", member.id)
-        ms = db.one("SELECT mentor_id FROM mentorships WHERE newbie_id=? ORDER BY id DESC", member.id)
+        gid = member.guild.id
+        a = db.one("SELECT * FROM activity WHERE guild_id=? AND user_id=?", gid, member.id)
+        w = db.one("SELECT COUNT(*) n FROM warns WHERE guild_id=? AND user_id=? AND active=1", gid, member.id)["n"]
+        app = db.one("SELECT * FROM applications WHERE guild_id=? AND user_id=? AND status='accepted' ORDER BY id DESC",
+                     gid, member.id)
+        ms = db.one("SELECT mentor_id FROM mentorships WHERE guild_id=? AND newbie_id=? ORDER BY id DESC", gid, member.id)
         mentor = inter.guild.get_member(ms["mentor_id"]) if ms else None
         joined = parse_dt(app["decided_at"] or app["created_at"]) if app else member.joined_at
         rank = plain(bot.rank_name(member)) or "Гость"
@@ -115,11 +117,11 @@ class Activity(commands.Cog):
         extra = ""
         if a:
             extra = f"За неделю: 🎙 {fmt_hours(a['week_voice'])} · 💬 {a['week_messages']}"
-        streams = db.one("SELECT COUNT(*) n FROM streams WHERE user_id=?", member.id)["n"]
+        streams = db.one("SELECT COUNT(*) n FROM streams WHERE guild_id=? AND user_id=?", gid, member.id)["n"]
         if streams:
             extra = (extra + " · " if extra else "") + f"📺 Эфиров: {streams}"
         gat = bot.get_cog("Gatherings")
-        came, total = gat.attendance(member.id) if gat else (0, 0)
+        came, total = gat.attendance(member) if gat else (0, 0)
         if total:
             extra = (extra + " · " if extra else "") + f"📣 Сборы: пришёл на {came} из {total}"
         if getattr(member, "premium_since", None):
@@ -134,8 +136,8 @@ class Activity(commands.Cog):
         week = not period or period.value == "week"
         self.flush_all(inter.guild)
         vcol, mcol = ("week_voice", "week_messages") if week else ("voice_seconds", "messages")
-        rows = self.bot.db.all(f"SELECT user_id, {vcol} v, {mcol} m FROM activity "
-                               f"ORDER BY ({vcol}/60 + {mcol}*2) DESC LIMIT 15")
+        rows = self.bot.db.all(f"SELECT user_id, {vcol} v, {mcol} m FROM activity WHERE guild_id=? "
+                               f"ORDER BY ({vcol}/60 + {mcol}*2) DESC LIMIT 15", inter.guild.id)
         medals = ["🥇", "🥈", "🥉"]
         lines = [f"{medals[i] if i < 3 else f'`{i + 1}.`'} <@{r['user_id']}> — 🎙 {fmt_hours(r['v'])} · 💬 {r['m']}"
                  for i, r in enumerate(rows)]
@@ -155,7 +157,7 @@ class Activity(commands.Cog):
         for m in bot.family_members(inter.guild):
             if (vac and vac in m.roles) or m.voice:
                 continue
-            a = bot.db.one("SELECT last_seen FROM activity WHERE user_id=?", m.id)
+            a = bot.db.one("SELECT last_seen FROM activity WHERE guild_id=? AND user_id=?", inter.guild.id, m.id)
             last = parse_dt(a["last_seen"]) if a and a["last_seen"] else None
             if not last or last < border:
                 out.append((last, m))
@@ -171,13 +173,15 @@ class Activity(commands.Cog):
         self.flush_all(guild)
         rows = []
         for m in bot.family_members(guild):
-            a = db.one("SELECT * FROM activity WHERE user_id=?", m.id)
+            a = db.one("SELECT * FROM activity WHERE guild_id=? AND user_id=?", guild.id, m.id)
             rows.append({"name": m.display_name, "voice_h": round((a["week_voice"] if a else 0) / 3600, 1),
                          "msgs": a["week_messages"] if a else 0,
-                         "warns": db.one("SELECT COUNT(*) n FROM warns WHERE user_id=? AND active=1", m.id)["n"]})
+                         "warns": db.one("SELECT COUNT(*) n FROM warns WHERE guild_id=? AND user_id=? AND active=1",
+                                         guild.id, m.id)["n"]})
         week = (now() - dt.timedelta(days=7)).isoformat()
         apps = {r["status"]: r["n"] for r in
-                db.all("SELECT status, COUNT(*) n FROM applications WHERE created_at>? GROUP BY status", week)}
+                db.all("SELECT status, COUNT(*) n FROM applications WHERE guild_id=? AND created_at>? GROUP BY status",
+                       guild.id, week)}
         rows.sort(key=lambda r: r["voice_h"] * 60 + r["msgs"] * 2, reverse=True)
         if bot.ai.on:
             system = (f"Ты аналитик семьи «{config.FAMILY}». По данным за неделю напиши отчёт для руководства по-русски: "
@@ -202,15 +206,15 @@ class Activity(commands.Cog):
         if t.weekday() != 6 or t.hour < 18:  # воскресенье вечером (UTC)
             return
         key = f"report:{t.date()}"
-        if self.bot.db.get(key):
-            return
         for g in self.bot.home_guilds:
+            if self.bot.db.gget(g, key):
+                continue
             c = self.bot.ch(g, "reports")
             if c:
                 text = await self.build_report(g)
                 await c.send(embed=self.bot.embed("📊 Отчёт за неделю", text[:4000], config.GOLD, g))
-        self.bot.db.set(key, 1)
-        self.bot.db.q("UPDATE activity SET week_voice=0, week_messages=0")
+            self.bot.db.gset(g, key, 1)
+            self.bot.db.q("UPDATE activity SET week_voice=0, week_messages=0 WHERE guild_id=?", g.id)
 
     @weekly.before_loop
     async def _before(self):

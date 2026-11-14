@@ -113,13 +113,14 @@ class ContextMenus(commands.Cog):
         bot, db = self.bot, self.bot.db
         if not bot.has(inter.user, config.HR + config.MENTORS + config.DIPLO):
             return await inter.response.send_message("⛔ Досье видит только состав с должностью.", ephemeral=True)
-        apps = db.all("SELECT * FROM applications WHERE user_id=? ORDER BY id DESC", member.id)
+        gid = inter.guild.id
+        apps = db.all("SELECT * FROM applications WHERE guild_id=? AND user_id=? ORDER BY id DESC", gid, member.id)
         last = apps[0] if apps else None
-        a = db.one("SELECT * FROM activity WHERE user_id=?", member.id)
-        warns = db.all("SELECT * FROM warns WHERE user_id=? AND active=1 ORDER BY id DESC", member.id)
-        ms = db.one("SELECT * FROM mentorships WHERE newbie_id=? ORDER BY id DESC", member.id)
-        vac = db.one("SELECT * FROM vacations WHERE user_id=?", member.id)
-        bl = bot.blacklist_find(discord_id=member.id, static=last["static_id"] if last else None,
+        a = db.one("SELECT * FROM activity WHERE guild_id=? AND user_id=?", gid, member.id)
+        warns = db.all("SELECT * FROM warns WHERE guild_id=? AND user_id=? AND active=1 ORDER BY id DESC", gid, member.id)
+        ms = db.one("SELECT * FROM mentorships WHERE guild_id=? AND newbie_id=? ORDER BY id DESC", gid, member.id)
+        vac = db.one("SELECT * FROM vacations WHERE guild_id=? AND user_id=?", gid, member.id)
+        bl = bot.blacklist_find(inter.guild, discord_id=member.id, static=last["static_id"] if last else None,
                                 nick=last["nick"] if last else None)
         e = bot.embed(f"📋 Досье: {member.display_name}", None, config.COLOR, inter.guild)
         e.set_thumbnail(url=member.display_avatar.url)
@@ -194,7 +195,8 @@ class ContextMenus(commands.Cog):
             return await inter.followup.send(f"✅ {role.name}: {'выдана' if added else 'снята'}", ephemeral=True)
         if kind == "mentor":
             ms = bot.get_cog("Mentorship")
-            row = bot.db.one("SELECT * FROM mentorships WHERE newbie_id=? AND status='active'", target.id)
+            row = bot.db.one("SELECT * FROM mentorships WHERE guild_id=? AND newbie_id=? AND status='active'", g.id,
+                             target.id)
             await inter.response.defer(ephemeral=True)
             if row:
                 bot.db.q("UPDATE mentorships SET mentor_id=? WHERE id=?", inter.user.id, row["id"])
@@ -228,9 +230,10 @@ class ContextMenus(commands.Cog):
         if kind == "blacklist":
             async def done(i, reason):
                 await i.response.defer(ephemeral=True)
-                app = bot.db.one("SELECT static_id, nick FROM applications WHERE user_id=? ORDER BY id DESC", target.id)
-                bot.db.q("INSERT INTO blacklist(discord_id, static_id, nick, reason, added_by, created_at) VALUES(?,?,?,?,?,?)",
-                         target.id, app["static_id"] if app else None, app["nick"] if app else None, reason, i.user.id,
+                app = bot.db.one("SELECT static_id, nick FROM applications WHERE guild_id=? AND user_id=? ORDER BY id DESC",
+                                 g.id, target.id)
+                bot.db.q("INSERT INTO blacklist(guild_id, discord_id, static_id, nick, reason, added_by, created_at) "
+                         "VALUES(?,?,?,?,?,?,?)", g.id, target.id, app["static_id"] if app else None, app["nick"] if app else None, reason, i.user.id,
                          now_iso())
                 if bot.in_family(target):
                     await bot.expel(target, i.user, f"Чёрный список: {reason}")
@@ -276,7 +279,7 @@ class ContextMenus(commands.Cog):
             return await inter.response.send_message(f"⏳ Подожди {left} сек.", ephemeral=True)
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
-            answer, sources, _ = await law.answer(text, "case")
+            answer, sources, _ = await law.answer(inter.guild.id, text, "case")
         except Exception as e:
             answer, sources = f"⚠️ {e}", []
 

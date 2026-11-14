@@ -25,7 +25,8 @@ class VoiceRooms(commands.Cog):
         ow[member] = discord.PermissionOverwrite(**OWNER_PERMS)
         ch = await guild.create_voice_channel(f"🔊 {member.display_name}"[:100], category=category, overwrites=ow,
                                                 bitrate=int(guild.bitrate_limit))
-        bot.db.q("INSERT OR REPLACE INTO temp_voice(channel_id, owner_id) VALUES(?,?)", ch.id, member.id)
+        bot.db.q("INSERT OR REPLACE INTO temp_voice(channel_id, guild_id, owner_id) VALUES(?,?,?)", ch.id, guild.id,
+                 member.id)
         try:
             await member.move_to(ch)
         except discord.HTTPException:

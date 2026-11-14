@@ -116,8 +116,8 @@ class Streams(commands.Cog):
         ch = bot.ch(g, "streams") or bot.ch(g, "chat")
         if not ch:
             return None
-        cur = bot.db.q("INSERT INTO streams(user_id, platform, title, url, game, started_at, manual) VALUES(?,?,?,?,?,?,?)",
-                       member.id, platform, (title or "")[:200], url, (game or "")[:100], now_iso(), int(manual))
+        cur = bot.db.q("INSERT INTO streams(guild_id, user_id, platform, title, url, game, started_at, manual) "
+                       "VALUES(?,?,?,?,?,?,?,?)", g.id, member.id, platform, (title or "")[:200], url, (game or "")[:100], now_iso(), int(manual))
         row = dict(bot.db.one("SELECT * FROM streams WHERE id=?", cur.lastrowid))
         row["_twitch"] = twitch_name
         ping = bot.role(g, "n_streams")
@@ -160,7 +160,8 @@ class Streams(commands.Cog):
                 t.cancel()
             if uid in self.live:
                 return
-            last = self.bot.db.one("SELECT * FROM streams WHERE user_id=? AND manual=0 ORDER BY id DESC", uid)
+            last = self.bot.db.one("SELECT * FROM streams WHERE guild_id=? AND user_id=? AND manual=0 ORDER BY id DESC",
+                                   member.guild.id, uid)
             if last and last["url"] == st.url and (
                     last["ended_at"] is None or (now() - parse_dt(last["ended_at"])).total_seconds() < RESUME_WINDOW):
                 # тот же эфир (перезапуск или рестарт бота) — без повторного анонса
@@ -199,7 +200,7 @@ class Streams(commands.Cog):
     async def on_ready(self):
         # восстанавливаем состояние после перезапуска
         for row in self.bot.db.all("SELECT * FROM streams WHERE ended_at IS NULL AND manual=0"):
-            for g in self.bot.home_guilds:
+            for g in filter(None, [self.bot.get_guild(row["guild_id"])]):
                 m = g.get_member(row["user_id"])
                 if m:
                     if self.streaming(m):
@@ -265,8 +266,8 @@ class Streams(commands.Cog):
         url = url.strip()
         if not re.match(r"https?://\S+\.\S+", url):
             return await inter.response.send_message("Нужна ссылка вида https://twitch.tv/ник", ephemeral=True)
-        last = self.bot.db.one("SELECT started_at FROM streams WHERE user_id=? AND manual=1 ORDER BY id DESC",
-                               inter.user.id)
+        last = self.bot.db.one("SELECT started_at FROM streams WHERE guild_id=? AND user_id=? AND manual=1 "
+                               "ORDER BY id DESC", inter.guild.id, inter.user.id)
         if last and (now() - parse_dt(last["started_at"])).total_seconds() < MANUAL_COOLDOWN and \
                 not self.bot.has(inter.user, config.LEAD):
             return await inter.response.send_message("⏳ Ручной анонс — не чаще раза в час.", ephemeral=True)
@@ -288,7 +289,7 @@ class Streams(commands.Cog):
                 now_live.append(f"🔴 **{m.display_name}** — [{row['title'] or 'эфир'}]({row['url']}) · {fmt_dur(dur)}")
         rows = db.all("SELECT user_id, COUNT(*) n, SUM(CASE WHEN manual=0 AND ended_at IS NOT NULL THEN "
                       "(julianday(ended_at)-julianday(started_at))*86400 ELSE 0 END) s FROM streams "
-                      "GROUP BY user_id ORDER BY n DESC LIMIT 10")
+                      "WHERE guild_id=? GROUP BY user_id ORDER BY n DESC LIMIT 10", g.id)
         top = []
         for i, r in enumerate(rows, 1):
             m = g.get_member(r["user_id"])

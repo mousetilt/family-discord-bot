@@ -55,7 +55,7 @@ class Staff(commands.Cog):
     async def update_roster(self, guild):
         bot = self.bot
         c = bot.ch(guild, "roster")
-        mid = bot.db.get("panel:roster")
+        mid = bot.db.gget(guild, "panel:roster")
         if not c or not mid:
             return
         vac = bot.role(guild, "vacation")
@@ -186,7 +186,8 @@ class Staff(commands.Cog):
         member = member or inter.user
         if member != inter.user and not self.bot.has(inter.user, config.LEAD + ["hr_head"]):
             return await inter.response.send_message("⛔ Чужие выговоры видит только руководство.", ephemeral=True)
-        rows = self.bot.db.all("SELECT * FROM warns WHERE user_id=? ORDER BY id DESC LIMIT 15", member.id)
+        rows = self.bot.db.all("SELECT * FROM warns WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 15",
+                               inter.guild.id, member.id)
         text = "\n".join(f"{'🔴' if r['active'] else '⚪'} №{r['id']} · {r['created_at'][:10]} · {r['reason']}" for r in rows)
         await inter.response.send_message(embed=self.bot.embed(f"Выговоры — {member.display_name}", text or "Чисто ✨",
                                                                config.COLOR, inter.guild), ephemeral=True)
@@ -196,7 +197,7 @@ class Staff(commands.Cog):
     @app_commands.rename(warn_id="номер")
     @staff_only(config.LEAD)
     async def unwarn(self, inter: discord.Interaction, warn_id: int):
-        r = self.bot.db.one("SELECT * FROM warns WHERE id=?", warn_id)
+        r = self.bot.db.one("SELECT * FROM warns WHERE guild_id=? AND id=?", inter.guild.id, warn_id)
         if not r:
             return await inter.response.send_message("Не найден.", ephemeral=True)
         self.bot.db.q("UPDATE warns SET active=0 WHERE id=?", warn_id)
@@ -226,8 +227,8 @@ class Staff(commands.Cog):
         if not self.bot.in_family(inter.user):
             return await inter.response.send_message("Только для членов семьи.", ephemeral=True)
         until = now() + dt.timedelta(days=days)
-        self.bot.db.q("INSERT OR REPLACE INTO vacations(user_id, until, reason) VALUES(?,?,?)", inter.user.id,
-                      until.isoformat(), reason)
+        self.bot.db.q("INSERT OR REPLACE INTO vacations(guild_id, user_id, until, reason) VALUES(?,?,?,?)",
+                      inter.guild.id, inter.user.id, until.isoformat(), reason)
         await inter.response.send_message(f"🌙 Отпуск до {discord.utils.format_dt(until, 'D')}. Отдыхай!", ephemeral=True)
         r = self.bot.role(inter.guild, "vacation")
         if r:
@@ -240,7 +241,7 @@ class Staff(commands.Cog):
 
     @app_commands.command(name="вернулся", description="Вернуться из отпуска")
     async def back(self, inter: discord.Interaction):
-        self.bot.db.q("DELETE FROM vacations WHERE user_id=?", inter.user.id)
+        self.bot.db.q("DELETE FROM vacations WHERE guild_id=? AND user_id=?", inter.guild.id, inter.user.id)
         r = self.bot.role(inter.guild, "vacation")
         if r and r in inter.user.roles:
             await inter.user.remove_roles(r)
@@ -250,7 +251,7 @@ class Staff(commands.Cog):
     @guarded
     async def vacation_loop(self):
         for row in self.bot.db.all("SELECT * FROM vacations WHERE until<?", now_iso()):
-            for g in self.bot.home_guilds:
+            for g in filter(None, [self.bot.get_guild(row["guild_id"])]):
                 m = g.get_member(row["user_id"])
                 r = self.bot.role(g, "vacation")
                 if m and r and r in m.roles:
@@ -259,7 +260,7 @@ class Staff(commands.Cog):
                     except discord.HTTPException:
                         continue  # не вышло снять роль — запись оставляем, попробуем через час
                     await safe_dm(m, f"🌙 Твой отпуск в семье {config.FAMILY} закончился. Ждём в игре!")
-            self.bot.db.q("DELETE FROM vacations WHERE user_id=?", row["user_id"])
+            self.bot.db.q("DELETE FROM vacations WHERE guild_id=? AND user_id=?", row["guild_id"], row["user_id"])
 
     @vacation_loop.before_loop
     async def _before(self):

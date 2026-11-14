@@ -11,7 +11,7 @@ from discord.ext import commands
 
 from . import config
 from .ai import AI
-from .db import DB
+from .db import DB, gid_of as guild_id_of
 from .kb import KnowledgeBase
 
 log = logging.getLogger("family-bot")
@@ -125,7 +125,7 @@ class FamilyBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!!ulyanov!!", intents=intents, help_command=None, tree_cls=FamilyTree)
         self.presences_on = presences
-        self.db = DB(config.DB_PATH)
+        self.db = DB(config.DB_PATH, config.GUILD_ID)
         self.ai = AI(self.db)
         self.kb = KnowledgeBase(self.db)
         self.voice_sessions = {}
@@ -185,6 +185,8 @@ class FamilyBot(commands.Bot):
 
     async def on_ready(self):
         log.info("Бот запущен как %s (серверов: %d)", self.user, len(self.guilds))
+        if self.home_id:
+            self.db.adopt_orphans(self.home_id)
         await self.change_presence(activity=discord.Game(name=f"Россия Онлайн · семья {config.FAMILY}"))
         print("\n================================================")
         print("Серверы, на которых стоит бот:")
@@ -224,16 +226,16 @@ class FamilyBot(commands.Bot):
 
     # ---------- роли и каналы ----------
     def role(self, guild, key):
-        rid = self.db.get(f"role:{key}")
+        rid = self.db.gget(guild, f"role:{key}")
         r = guild.get_role(int(rid)) if rid else None
         return r or discord.utils.get(guild.roles, name=config.ROLE_NAMES.get(key, ""))
 
     def ch(self, guild, key):
-        cid = self.db.get(f"ch:{key}")
+        cid = self.db.gget(guild, f"ch:{key}")
         return guild.get_channel(int(cid)) if cid else None
 
-    def role_ids(self, keys):
-        return {int(self.db.get(f"role:{k}") or 0) for k in keys} - {0}
+    def role_ids(self, guild, keys):
+        return {int(self.db.gget(guild, f"role:{k}") or 0) for k in keys} - {0}
 
     def has(self, member, keys):
         if not isinstance(member, discord.Member):
@@ -242,17 +244,17 @@ class FamilyBot(commands.Bot):
             return False  # роли семьи есть только на нашем сервере
         if member.guild_permissions.administrator:
             return True
-        ids = self.role_ids(keys)
+        ids = self.role_ids(member.guild, keys)
         return any(r.id in ids for r in member.roles)
 
     def in_family(self, member):
         if not isinstance(member, discord.Member):
             return False
-        ids = self.role_ids(config.FAMILY_RANKS)
+        ids = self.role_ids(member.guild, config.FAMILY_RANKS)
         return any(r.id in ids for r in member.roles)
 
     def family_members(self, guild):
-        ids = self.role_ids(config.FAMILY_RANKS)
+        ids = self.role_ids(guild, config.FAMILY_RANKS)
         return [m for m in guild.members if not m.bot and any(r.id in ids for r in m.roles)]
 
     def rank_index(self, member):
@@ -263,7 +265,7 @@ class FamilyBot(commands.Bot):
             return 99
         if member.id == member.guild.owner_id:
             return -1
-        ids = [self.db.get(f"role:{k}") for k in config.ROSTER_ORDER]
+        ids = [self.db.gget(member.guild, f"role:{k}") for k in config.ROSTER_ORDER]
         have = {str(r.id) for r in member.roles}
         for i, rid in enumerate(ids):
             if rid and rid in have:
@@ -317,8 +319,8 @@ class FamilyBot(commands.Bot):
         c = self.ch(guild, channel_key)
         if not c:
             return None
-        old = self.db.get(f"panel:{key}")
-        old_ver = int(self.db.get(f"panelv:{key}") or 0)
+        old = self.db.gget(guild, f"panel:{key}")
+        old_ver = int(self.db.gget(guild, f"panelv:{key}") or 0)
         if old:
             try:
                 msg = await c.fetch_message(int(old))
@@ -329,8 +331,8 @@ class FamilyBot(commands.Bot):
                 pass
         kwargs = await make_kwargs() if callable(make_kwargs) else make_kwargs
         msg = await c.send(**kwargs)
-        self.db.set(f"panel:{key}", msg.id)
-        self.db.set(f"panelv:{key}", version)
+        self.db.gset(guild, f"panel:{key}", msg.id)
+        self.db.gset(guild, f"panelv:{key}", version)
         return msg
 
     # ---------- общие действия ----------
@@ -369,9 +371,9 @@ class FamilyBot(commands.Bot):
         self.emit(g, "expelled", member=member, by=by, reason=reason)
 
     async def give_warn(self, guild, member, moderator, reason):
-        self.db.q("INSERT INTO warns(user_id, moderator_id, reason, created_at) VALUES(?,?,?,?)",
-                  member.id, moderator.id, reason, now_iso())
-        n = self.db.one("SELECT COUNT(*) n FROM warns WHERE user_id=? AND active=1", member.id)["n"]
+        self.db.q("INSERT INTO warns(guild_id, user_id, moderator_id, reason, created_at) VALUES(?,?,?,?,?)",
+                  guild.id, member.id, moderator.id, reason, now_iso())
+        n = self.db.one("SELECT COUNT(*) n FROM warns WHERE guild_id=? AND user_id=? AND active=1", guild.id, member.id)["n"]
         e = self.embed(f"⚖️ Выговор ({n}/3)",
                        f"**Кому:** {member.mention}\n**Выдал:** {moderator.mention}\n**Причина:** {reason}",
                        config.RED, guild)
@@ -385,9 +387,9 @@ class FamilyBot(commands.Bot):
                 await council.send(f"🚨 У {member.mention} **{n} активных выговора**. Рассмотрите исключение.")
         return n
 
-    def blacklist_find(self, discord_id=None, static=None, nick=None):
+    def blacklist_find(self, guild, discord_id=None, static=None, nick=None):
         """Активная запись ЧС по Discord ID, Static ID или нику."""
-        rows = self.db.all("SELECT * FROM blacklist WHERE active=1")
+        rows = self.db.all("SELECT * FROM blacklist WHERE guild_id=? AND active=1", guild_id_of(guild))
         n = norm_nick(nick) if nick else None
         t = now()
         for r in rows:

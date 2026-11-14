@@ -28,8 +28,9 @@ TOPIC_BY_CAT = {"ooc": "проект", "laws": "законы", "family": "сем
 
 
 # ─────────────────────────────── вопросы ───────────────────────────────
-def seed_questions(db):
-    if db.one("SELECT COUNT(*) n FROM exam_questions")["n"]:
+def seed_questions(db, gid):
+    """Базовые вопросы из data/exam_questions.json — каждой семье свой набор (его можно править)."""
+    if db.one("SELECT COUNT(*) n FROM exam_questions WHERE guild_id=?", gid)["n"]:
         return
     try:
         data = json.loads((config.DATA / "exam_questions.json").read_text(encoding="utf-8"))
@@ -37,12 +38,13 @@ def seed_questions(db):
         log.exception("Не удалось загрузить data/exam_questions.json")
         return
     for q in data:
-        db.q("INSERT INTO exam_questions(question, options, answer, topic, source, created_at) VALUES(?,?,?,?,?,?)",
-             q["q"], json.dumps(q["options"], ensure_ascii=False), 0, q.get("topic", "проект"), "builtin", now_iso())
+        db.q("INSERT INTO exam_questions(guild_id, question, options, answer, topic, source, created_at) "
+             "VALUES(?,?,?,?,?,?,?)", gid, q["q"], json.dumps(q["options"], ensure_ascii=False), 0, q.get("topic", "проект"), "builtin", now_iso())
 
 
-def pick_questions(db, n):
-    rows = [dict(r) for r in db.all("SELECT * FROM exam_questions WHERE enabled=1")]
+def pick_questions(db, gid, n):
+    seed_questions(db, gid)
+    rows = [dict(r) for r in db.all("SELECT * FROM exam_questions WHERE guild_id=? AND enabled=1", gid)]
     if not rows:
         return []
     fam = [r for r in rows if r["topic"] == "семья"]
@@ -249,8 +251,8 @@ class AddQuestionModal(discord.ui.Modal, title="Новый вопрос экза
 
     async def on_submit(self, inter: discord.Interaction):
         opts = [self.right.value, self.w1.value, self.w2.value, self.w3.value]
-        cur = inter.client.db.q("INSERT INTO exam_questions(question, options, answer, topic, source, created_at) "
-                                "VALUES(?,?,?,?,?,?)", self.q.value, json.dumps(opts, ensure_ascii=False), 0,
+        cur = inter.client.db.q("INSERT INTO exam_questions(guild_id, question, options, answer, topic, source, "
+                                "created_at) VALUES(?,?,?,?,?,?,?)", inter.guild.id, self.q.value, json.dumps(opts, ensure_ascii=False), 0,
                                 self.topic, f"user:{inter.user.id}", now_iso())
         await inter.response.send_message(f"✅ Вопрос №{cur.lastrowid} добавлен.", ephemeral=True)
 
@@ -262,7 +264,6 @@ class Applications(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.sessions = {}
-        seed_questions(bot.db)
 
     async def post_panels(self, guild, repost):
         bot = self.bot
@@ -287,7 +288,7 @@ class Applications(commands.Cog):
         bot, db, u = self.bot, self.bot.db, inter.user
         if bot.in_family(u):
             return await inter.response.send_message("Ты уже в семье 🙂", ephemeral=True)
-        bl = bot.blacklist_find(discord_id=u.id)
+        bl = bot.blacklist_find(inter.guild, discord_id=u.id)
         if bl:
             await bot.log(inter.guild, f"⛔ {u.mention} из чёрного списка (№{bl['id']}) пытался подать заявку", "hrlog")
             return await inter.response.send_message("К сожалению, мы не можем принять твою заявку.", ephemeral=True)
@@ -295,20 +296,21 @@ class Applications(commands.Cog):
         if s and not s.expired and not s.training:
             return await inter.response.send_message("⏳ У тебя уже идёт тест — продолжи в открытом окне.",
                                                      ephemeral=True)
-        pending = db.one(f"SELECT id FROM applications WHERE user_id=? AND status IN {OPEN}", u.id)
+        gid = inter.guild.id
+        pending = db.one(f"SELECT id FROM applications WHERE guild_id=? AND user_id=? AND status IN {OPEN}", gid, u.id)
         if pending:
             return await inter.response.send_message(f"⏳ Твоя заявка №{pending['id']} уже на рассмотрении.",
                                                      ephemeral=True)
-        last_fail = db.one("SELECT created_at FROM exam_attempts WHERE user_id=? AND passed=0 AND training=0 "
-                           "ORDER BY id DESC LIMIT 1", u.id)
+        last_fail = db.one("SELECT created_at FROM exam_attempts WHERE guild_id=? AND user_id=? AND passed=0 AND "
+                           "training=0 ORDER BY id DESC LIMIT 1", gid, u.id)
         if last_fail:
             left = parse_dt(last_fail["created_at"]) + dt.timedelta(minutes=config.EXAM_RETRY_MIN) - now()
             if left.total_seconds() > 0:
                 return await inter.response.send_message(
                     f"📕 Повторно пройти тест можно через **{int(left.total_seconds() // 60) + 1} мин**. "
                     "Пока потренируйся: `/экзамен тренировка`", ephemeral=True)
-        last_deny = db.one("SELECT decided_at, created_at FROM applications WHERE user_id=? AND status='denied' "
-                           "ORDER BY id DESC LIMIT 1", u.id)
+        last_deny = db.one("SELECT decided_at, created_at FROM applications WHERE guild_id=? AND user_id=? AND "
+                           "status='denied' ORDER BY id DESC LIMIT 1", gid, u.id)
         if last_deny and now() - parse_dt(last_deny["decided_at"] or last_deny["created_at"]) < dt.timedelta(hours=24):
             return await inter.response.send_message("⏳ После отказа повторно подать заявку можно через 24 часа.",
                                                      ephemeral=True)
@@ -319,18 +321,20 @@ class Applications(commands.Cog):
         static = m.static.value.strip()
         if not static.isdigit():
             return await inter.response.send_message("❌ Static ID должен состоять только из цифр.", ephemeral=True)
-        bl = bot.blacklist_find(discord_id=u.id, static=static, nick=m.nick.value)
-        db.q("UPDATE applications SET status='abandoned' WHERE user_id=? AND status='exam'", u.id)
-        cur = db.q("INSERT INTO applications(user_id,nick,static_id,age_exp,reason,online,status,created_at) "
-                   "VALUES(?,?,?,?,?,?,?,?)", u.id, m.nick.value.strip(), static, m.age_exp.value, m.reason.value,
+        gid = inter.guild.id
+        bl = bot.blacklist_find(inter.guild, discord_id=u.id, static=static, nick=m.nick.value)
+        db.q("UPDATE applications SET status='abandoned' WHERE guild_id=? AND user_id=? AND status='exam'", gid, u.id)
+        cur = db.q("INSERT INTO applications(guild_id,user_id,nick,static_id,age_exp,reason,online,status,created_at) "
+                   "VALUES(?,?,?,?,?,?,?,?,?)", gid, u.id, m.nick.value.strip(), static, m.age_exp.value, m.reason.value,
                    m.online.value, "blacklisted" if bl else "exam", now_iso())
         app_id = cur.lastrowid
         if bl:
             await bot.log(inter.guild, f"⛔ Заявка №{app_id} от {u.mention} ({m.nick.value}, ID {static}) совпала с "
                                        f"чёрным списком №{bl['id']}: {bl['reason']}", "hrlog", config.RED)
             return await inter.response.send_message("К сожалению, мы не можем принять твою заявку.", ephemeral=True)
-        attempt = db.one("SELECT COUNT(*) n FROM exam_attempts WHERE user_id=? AND training=0", u.id)["n"] + 1
-        questions = pick_questions(db, config.EXAM_QUESTIONS)
+        attempt = db.one("SELECT COUNT(*) n FROM exam_attempts WHERE guild_id=? AND user_id=? AND training=0",
+                         gid, u.id)["n"] + 1
+        questions = pick_questions(db, gid, config.EXAM_QUESTIONS)
         if not questions:
             return await inter.response.send_message(
                 embed=bot.embed("✅ Анкета сохранена", "Последний шаг — ответь на 2 вопроса о себе.", config.GREEN),
@@ -381,8 +385,8 @@ class Applications(commands.Cog):
         score = total - len(wrong)
         need = s.need()
         passed = score >= need
-        db.q("INSERT INTO exam_attempts(user_id, score, total, passed, training, created_at) VALUES(?,?,?,?,?,?)",
-             s.user_id, score, total, int(passed), int(s.training), now_iso())
+        db.q("INSERT INTO exam_attempts(guild_id, user_id, score, total, passed, training, created_at) "
+             "VALUES(?,?,?,?,?,?,?)", inter.guild.id, s.user_id, score, total, int(passed), int(s.training), now_iso())
         wrong_text = "\n".join(f"• {q['q']}\n  ✅ {q['options'][q['correct']]}" for q in wrong[:8])
         if s.training:
             e = bot.embed("🎓 Тренировка завершена",
@@ -550,13 +554,18 @@ class Applications(commands.Cog):
     @staff_only(config.HR)
     async def apps_cmd(self, inter: discord.Interaction):
         db = self.bot.db
-        rows = db.all(f"SELECT * FROM applications WHERE status IN {OPEN} ORDER BY id")
+        gid = inter.guild.id
+        rows = db.all(f"SELECT * FROM applications WHERE guild_id=? AND status IN {OPEN} ORDER BY id", gid)
         week = (now() - dt.timedelta(days=7)).isoformat()
-        acc = db.one("SELECT COUNT(*) n FROM applications WHERE status='accepted' AND created_at>?", week)["n"]
-        den = db.one("SELECT COUNT(*) n FROM applications WHERE status='denied' AND created_at>?", week)["n"]
-        att = db.one("SELECT COUNT(*) n, SUM(passed) p FROM exam_attempts WHERE training=0 AND created_at>?", week)
-        top = db.all("""SELECT reviewer_id, COUNT(*) n FROM applications WHERE status IN ('accepted','denied')
-                        AND created_at>? AND reviewer_id IS NOT NULL GROUP BY reviewer_id ORDER BY n DESC LIMIT 5""", week)
+        acc = db.one("SELECT COUNT(*) n FROM applications WHERE guild_id=? AND status='accepted' AND created_at>?",
+                     gid, week)["n"]
+        den = db.one("SELECT COUNT(*) n FROM applications WHERE guild_id=? AND status='denied' AND created_at>?",
+                     gid, week)["n"]
+        att = db.one("SELECT COUNT(*) n, SUM(passed) p FROM exam_attempts WHERE guild_id=? AND training=0 AND "
+                     "created_at>?", gid, week)
+        top = db.all("""SELECT reviewer_id, COUNT(*) n FROM applications WHERE guild_id=? AND
+                        status IN ('accepted','denied') AND created_at>? AND reviewer_id IS NOT NULL
+                        GROUP BY reviewer_id ORDER BY n DESC LIMIT 5""", gid, week)
         e = self.bot.embed("📥 Набор в семью", None, config.COLOR, inter.guild)
         e.add_field(name=f"Открытые ({len(rows)})",
                     value="\n".join(f"№{r['id']} <@{r['user_id']}> — {STATUS[r['status']][0]}"
@@ -569,7 +578,7 @@ class Applications(commands.Cog):
 
     @exam.command(name="тренировка", description="Пройти пробный тест по правилам (ни на что не влияет)")
     async def exam_train(self, inter: discord.Interaction):
-        qs = pick_questions(self.bot.db, config.EXAM_QUESTIONS)
+        qs = pick_questions(self.bot.db, inter.guild.id, config.EXAM_QUESTIONS)
         if not qs:
             return await inter.response.send_message("Вопросов пока нет.", ephemeral=True)
         s = ExamSession(inter.user.id, None, qs, 0, training=True)
@@ -580,8 +589,12 @@ class Applications(commands.Cog):
     @staff_only(config.LEAD + ["hr_head"])
     async def exam_list(self, inter: discord.Interaction):
         db = self.bot.db
-        stats = db.all("SELECT topic, source, COUNT(*) n FROM exam_questions WHERE enabled=1 GROUP BY topic, source")
-        rows = db.all("SELECT id, topic, question FROM exam_questions WHERE enabled=1 ORDER BY id DESC LIMIT 25")
+        gid = inter.guild.id
+        seed_questions(db, gid)
+        stats = db.all("SELECT topic, source, COUNT(*) n FROM exam_questions WHERE guild_id=? AND enabled=1 "
+                       "GROUP BY topic, source", gid)
+        rows = db.all("SELECT id, topic, question FROM exam_questions WHERE guild_id=? AND enabled=1 "
+                      "ORDER BY id DESC LIMIT 25", gid)
         txt = "\n".join(f"`{r['id']}` [{r['topic']}] {r['question'][:80]}" for r in rows)
         st = ", ".join(f"{r['topic']}/{r['source'].split(':')[0]}: {r['n']}" for r in stats)
         await inter.response.send_message(embed=self.bot.embed("🧠 Вопросы экзамена", f"**Всего:** {st}\n\n{txt}"[:4000],
@@ -598,7 +611,7 @@ class Applications(commands.Cog):
     @app_commands.rename(qid="номер")
     @staff_only(config.LEAD + ["hr_head"])
     async def exam_del(self, inter: discord.Interaction, qid: int):
-        self.bot.db.q("UPDATE exam_questions SET enabled=0 WHERE id=?", qid)
+        self.bot.db.q("UPDATE exam_questions SET enabled=0 WHERE guild_id=? AND id=?", inter.guild.id, qid)
         await inter.response.send_message(f"🗑 Вопрос №{qid} убран.", ephemeral=True)
 
     @exam.command(name="сгенерировать", description="ИИ составит новые вопросы по базе знаний (законы/правила)")
@@ -611,7 +624,7 @@ class Applications(commands.Cog):
         bot = self.bot
         if not bot.ai.on:
             return await inter.response.send_message("ИИ не подключён (нет ключа GROQ_API_KEY в .env).", ephemeral=True)
-        text = bot.kb.sample([cat.value], max_chars=22000)
+        text = bot.kb.sample(inter.guild.id, [cat.value], max_chars=22000)
         if len(text) < 300:
             return await inter.response.send_message("В этом разделе базы знаний пока пусто. Добавь документы: "
                                                      "`/база ссылка` или `/база правила-проекта`.", ephemeral=True)
@@ -630,8 +643,8 @@ class Applications(commands.Cog):
             if (not isinstance(opts, list) or len(opts) != 4 or len(set(map(str, opts))) != 4
                     or not str(q.get("q", "")).strip()):
                 continue
-            cur = bot.db.q("INSERT INTO exam_questions(question, options, answer, topic, source, created_at) "
-                           "VALUES(?,?,?,?,?,?)", str(q["q"])[:300],
+            cur = bot.db.q("INSERT INTO exam_questions(guild_id, question, options, answer, topic, source, created_at) "
+                           "VALUES(?,?,?,?,?,?,?)", inter.guild.id, str(q["q"])[:300],
                            json.dumps([str(o)[:90] for o in opts], ensure_ascii=False), 0,
                            TOPIC_BY_CAT.get(cat.value, "проект"), "ai", now_iso())
             added.append(f"`{cur.lastrowid}` {str(q['q'])[:90]}")

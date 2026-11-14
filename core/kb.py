@@ -62,7 +62,7 @@ class KnowledgeBase:
 
     def __init__(self, db):
         self.db = db
-        self._chunks = None
+        self._chunks = {}  # guild_id -> (chunks, df, avg)
 
     # ---------- документы ----------
     def family_doc(self):
@@ -70,41 +70,42 @@ class KnowledgeBase:
         return {"id": 0, "title": f"Правила семьи {config.FAMILY}", "url": None, "category": "family",
                 "content": text}
 
-    def docs(self, cats=None):
-        rows = [dict(r) for r in self.db.all("SELECT * FROM kb_docs ORDER BY id")]
+    def docs(self, gid, cats=None):
+        """Документы семьи + общие для всех (guild_id=0, правила проекта)."""
+        rows = [dict(r) for r in self.db.all("SELECT * FROM kb_docs WHERE guild_id IN (0, ?) ORDER BY id", gid)]
         rows.append(self.family_doc())
         if cats:
             rows = [r for r in rows if r["category"] in cats]
         return rows
 
-    def add(self, title, url, category, content, by):
+    def add(self, gid, title, url, category, content, by):
         now = discord.utils.utcnow().isoformat()
         if url:
-            old = self.db.one("SELECT id FROM kb_docs WHERE url=?", url)
+            old = self.db.one("SELECT id FROM kb_docs WHERE guild_id=? AND url=?", gid, url)
             if old:
                 self.db.q("UPDATE kb_docs SET title=?, category=?, content=?, updated_at=? WHERE id=?",
                           title, category, content, now, old["id"])
                 self.invalidate()
                 return old["id"], False
-        cur = self.db.q("INSERT INTO kb_docs(title,url,category,content,added_by,added_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                        title, url, category, content, by, now, now)
+        cur = self.db.q("INSERT INTO kb_docs(guild_id,title,url,category,content,added_by,added_at,updated_at) "
+                        "VALUES(?,?,?,?,?,?,?,?)", gid, title, url, category, content, by, now, now)
         self.invalidate()
         return cur.lastrowid, True
 
-    def delete(self, doc_id):
-        self.db.q("DELETE FROM kb_docs WHERE id=?", doc_id)
+    def delete(self, gid, doc_id):
+        self.db.q("DELETE FROM kb_docs WHERE guild_id=? AND id=?", gid, doc_id)
         self.invalidate()
 
     def invalidate(self):
-        self._chunks = None
+        self._chunks = {}  # guild_id -> (chunks, df, avg)
 
-    def total_chars(self, cats=None):
-        return sum(len(d["content"] or "") for d in self.docs(cats))
+    def total_chars(self, gid, cats=None):
+        return sum(len(d["content"] or "") for d in self.docs(gid, cats))
 
     # ---------- поиск ----------
-    def _build(self):
+    def _build(self, gid):
         chunks = []
-        for d in self.docs():
+        for d in self.docs(gid):
             for i, c in enumerate(chunk_text(d["content"])):
                 toks = tokens(d["title"] + " " + c)
                 chunks.append({"doc_id": d["id"], "title": d["title"], "url": d["url"], "category": d["category"],
@@ -113,12 +114,11 @@ class KnowledgeBase:
         for ch in chunks:
             df.update(set(ch["tf"]))
         avg = sum(c["len"] for c in chunks) / max(len(chunks), 1)
-        self._chunks = (chunks, df, avg)
+        self._chunks[gid] = (chunks, df, avg)
+        return self._chunks[gid]
 
-    def search(self, query, k=10, cats=None):
-        if self._chunks is None:
-            self._build()
-        chunks, df, avg = self._chunks
+    def search(self, gid, query, k=10, cats=None):
+        chunks, df, avg = self._chunks.get(gid) or self._build(gid)
         q = tokens(query)
         if not q or not chunks:
             return []
@@ -143,9 +143,9 @@ class KnowledgeBase:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [c for _, c in scored[:k]]
 
-    def context(self, query, cats=None, max_chars=18000):
+    def context(self, gid, query, cats=None, max_chars=18000):
         """Текст для ИИ + список источников."""
-        docs = self.docs(cats)
+        docs = self.docs(gid, cats)
         total = sum(len(d["content"] or "") for d in docs)
         parts, sources = [], []
         if total <= self.FULL_LIMIT:
@@ -155,7 +155,7 @@ class KnowledgeBase:
                 sources.append((d["title"], d["url"]))
             return "\n\n".join(parts), sources, True
         used = 0
-        for ch in self.search(query, k=40, cats=cats):
+        for ch in self.search(gid, query, k=40, cats=cats):
             block = f"=== {ch['title']} [{config.KB_CATEGORIES.get(ch['category'], ch['category'])}] ===\n{ch['text']}"
             if used + len(block) > max_chars:
                 break
@@ -165,12 +165,11 @@ class KnowledgeBase:
                 sources.append((ch["title"], ch["url"]))
         return "\n\n".join(parts), sources, False
 
-    def sample(self, cats=None, max_chars=20000):
+    def sample(self, gid, cats=None, max_chars=20000):
         """Кусок базы для генерации вопросов экзамена."""
         import random
-        if self._chunks is None:
-            self._build()
-        chunks = [c for c in self._chunks[0] if not cats or c["category"] in cats]
+        built = self._chunks.get(gid) or self._build(gid)
+        chunks = [c for c in built[0] if not cats or c["category"] in cats]
         random.shuffle(chunks)
         out, used = [], 0
         for c in chunks:

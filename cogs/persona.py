@@ -84,8 +84,7 @@ def label(score):
 class Persona(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        bot.db.q("CREATE TABLE IF NOT EXISTS persona(user_id INTEGER PRIMARY KEY, score INTEGER DEFAULT 0, "
-                 "notes TEXT DEFAULT '[]', updated TEXT)")
+        # таблица persona — в core/db.py (досье своё на каждом сервере)
         self.greeted = {}       # user_id -> monotonic
         self.last_greet = -1e9
         self.alone = {}         # user_id -> (channel_id, с какого момента один)
@@ -98,8 +97,8 @@ class Persona(commands.Cog):
         self.lonely.cancel()
 
     # ---------- досье ----------
-    def get(self, uid):
-        r = self.bot.db.one("SELECT score, notes FROM persona WHERE user_id=?", uid)
+    def get(self, gid, uid):
+        r = self.bot.db.one("SELECT score, notes FROM persona WHERE guild_id=? AND user_id=?", gid, uid)
         if not r:
             return 0, []
         try:
@@ -108,16 +107,17 @@ class Persona(commands.Cog):
             notes = []
         return int(r["score"] or 0), notes
 
-    def save(self, uid, score, notes):
-        self.bot.db.q("INSERT INTO persona(user_id, score, notes, updated) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE "
+    def save(self, gid, uid, score, notes):
+        self.bot.db.q("INSERT INTO persona(guild_id, user_id, score, notes, updated) VALUES(?,?,?,?,?) "
+                      "ON CONFLICT(guild_id, user_id) DO UPDATE "
                       "SET score=excluded.score, notes=excluded.notes, updated=excluded.updated",
-                      uid, max(-100, min(100, int(score))), json.dumps(notes[-MAX_NOTES:], ensure_ascii=False),
+                      gid, uid, max(-100, min(100, int(score))), json.dumps(notes[-MAX_NOTES:], ensure_ascii=False),
                       now().isoformat())
 
-    def forget(self, uid):
-        self.bot.db.q("DELETE FROM persona WHERE user_id=?", uid)
+    def forget(self, gid, uid):
+        self.bot.db.q("DELETE FROM persona WHERE guild_id=? AND user_id=?", gid, uid)
 
-    def apply(self, uid, mood, remember):
+    def apply(self, gid, uid, mood, remember):
         """Что ИИ вынес из разговора: как человек с ним обошёлся и что о нём стоит запомнить."""
         try:
             mood = max(-3, min(3, int(mood or 0)))
@@ -126,14 +126,14 @@ class Persona(commands.Cog):
         note = " ".join(str(remember or "").split())[:120]
         if not mood and not note:
             return
-        score, notes = self.get(uid)
+        score, notes = self.get(gid, uid)
         if note and note.lower() not in {n["s"].lower() for n in notes}:
             notes.append({"d": msk().strftime("%d.%m"), "s": note})
-        self.save(uid, score + mood * 2, notes)
+        self.save(gid, uid, score + mood * 2, notes)
 
     def card(self, member):
         """Кусок подсказки для ИИ: время, настроение и досье на автора."""
-        score, notes = self.get(member.id)
+        score, notes = self.get(member.guild.id, member.id)
         lines = [mood_now(), f"Досье на автора ({member.display_name}): отношение {score:+d} из 100 — {attitude(score)}."]
         if notes:
             lines.append("Твои заметки о нём (дата — что было): " + "; ".join(f"{n.get('d', '')} — {n['s']}" for n in notes))
@@ -266,7 +266,7 @@ class Persona(commands.Cog):
     # ---------- команды ----------
     @app_commands.command(name="досье", description="Что Швейцар о тебе помнит и как к тебе относится")
     async def dossier_cmd(self, inter: discord.Interaction):
-        score, notes = self.get(inter.user.id)
+        score, notes = self.get(inter.guild.id, inter.user.id)
         e = self.bot.embed("🎩 Досье швейцара", f"**Отношение:** {label(score)} ({score:+d} из 100)", config.COLOR, inter.guild)
         e.add_field(name="Что он о тебе запомнил",
                     value=("\n".join(f"`{n.get('d', '—')}` {n['s']}" for n in notes) or "Пока ничего.")[:1024], inline=False)
@@ -275,12 +275,13 @@ class Persona(commands.Cog):
 
     @app_commands.command(name="забудь_меня", description="Стереть всё, что Швейцар о тебе помнит")
     async def forget_cmd(self, inter: discord.Interaction):
-        self.forget(inter.user.id)
+        self.forget(inter.guild.id, inter.user.id)
         await inter.response.send_message("🧹 Стёр. Кто ты вообще такой? Начинаем с чистого листа.", ephemeral=True)
 
     @app_commands.command(name="любимчики", description="Кого Швейцар любит, а кого терпеть не может")
     async def favorites_cmd(self, inter: discord.Interaction):
-        rows = self.bot.db.all("SELECT user_id, score FROM persona WHERE score<>0 ORDER BY score DESC")
+        rows = self.bot.db.all("SELECT user_id, score FROM persona WHERE guild_id=? AND score<>0 ORDER BY score DESC",
+                               inter.guild.id)
         rows = [r for r in rows if inter.guild.get_member(r["user_id"])]
         if not rows:
             return await inter.response.send_message("Пока все для меня на одно лицо. Поболтайте со мной.", ephemeral=True)

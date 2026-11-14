@@ -107,8 +107,8 @@ class Moderation(commands.Cog):
 
     async def flag(self, message, category, severity, reason, by_ai):
         bot = self.bot
-        cur = bot.db.q("INSERT INTO flags(user_id, channel_id, message_id, content, category, reason, created_at) "
-                       "VALUES(?,?,?,?,?,?,?)", message.author.id, message.channel.id, message.id,
+        cur = bot.db.q("INSERT INTO flags(guild_id, user_id, channel_id, message_id, content, category, reason, created_at) "
+                       "VALUES(?,?,?,?,?,?,?,?)", message.guild.id, message.author.id, message.channel.id, message.id,
                        message.content[:1500], category, reason, now_iso())
         fid = cur.lastrowid
         auto = ""

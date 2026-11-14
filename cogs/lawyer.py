@@ -55,7 +55,7 @@ class TextDocModal(discord.ui.Modal, title="Добавить текст в ба�
         self.cat = cat
 
     async def on_submit(self, inter: discord.Interaction):
-        doc_id, _ = inter.client.kb.add(self.name.value, None, self.cat, self.body.value, inter.user.id)
+        doc_id, _ = inter.client.kb.add(inter.guild.id, self.name.value, None, self.cat, self.body.value, inter.user.id)
         await inter.response.send_message(f"✅ Документ №{doc_id} «{self.name.value}» добавлен.", ephemeral=True)
 
 
@@ -74,18 +74,18 @@ class Lawyer(commands.Cog):
         self.cool[uid] = time.monotonic()
         return 0
 
-    async def answer(self, question, mode="q"):
-        """→ (текст, источники, использован_ли_ИИ)"""
+    async def answer(self, gid, question, mode="q"):
+        """→ (текст, источники, использован_ли_ИИ). gid — сервер семьи (её база знаний)."""
         bot = self.bot
         if not bot.ai.on:
-            hits = bot.kb.search(question, k=3)
+            hits = bot.kb.search(gid, question, k=3)
             if not hits:
                 return ("В базе знаний ничего не нашлось по этому вопросу. Руководство может добавить документы: "
                         "`/база правила-проекта`, `/база ссылка`."), [], False
             text = "🔎 Нашёл в правилах и законах (ИИ не подключён — показываю самые подходящие пункты):\n\n" + \
                    "\n\n".join(f"📄 **{h['title']}**\n{quote(h['text'])}" for h in hits)
             return text, [(h["title"], h["url"]) for h in hits], False
-        context, sources, _ = bot.kb.context(question)
+        context, sources, _ = bot.kb.context(gid, question)
         system = f"{BASE_PROMPT}\n\nЗАДАЧА: {MODES[mode][1]}\n\nДОКУМЕНТЫ:\n{context}"
         reply = await bot.ai.ask(system, question, max_tokens=1600 if mode == "doc" else 900, smart=True, cache=True)
         return reply or "ИИ не дал ответа, попробуй переформулировать.", sources, True
@@ -116,7 +116,7 @@ class Lawyer(commands.Cog):
             return await inter.response.send_message(f"⏳ Подожди {left} сек.", ephemeral=True)
         await inter.response.defer(thinking=True)
         try:
-            text, sources, _ = await self.answer(question, mode)
+            text, sources, _ = await self.answer(inter.guild.id, question, mode)
         except AIUnavailable as e:
             text, sources = f"⚠️ {e}", []
         except Exception as e:
@@ -151,7 +151,7 @@ class Lawyer(commands.Cog):
             return await message.reply(f"⏳ Подожди {left} сек.", delete_after=8, mention_author=False)
         async with message.channel.typing():
             try:
-                text, sources, _ = await self.answer(question, "q")
+                text, sources, _ = await self.answer(message.guild.id, question, "q")
             except AIUnavailable as e:
                 text, sources = f"⚠️ {e}", []
             except Exception as e:
@@ -166,7 +166,7 @@ class Lawyer(commands.Cog):
     @kb.command(name="найти", description="Найти пункт в правилах и законах (работает без ИИ)")
     @app_commands.rename(query="запрос")
     async def kb_find(self, inter: discord.Interaction, query: str):
-        hits = self.bot.kb.search(query, k=4)
+        hits = self.bot.kb.search(inter.guild.id, query, k=4)
         if not hits:
             return await inter.response.send_message("Ничего не нашлось.", ephemeral=True)
         e = self.bot.embed(f"🔎 {query[:200]}", None, config.COLOR, inter.guild)
@@ -183,7 +183,7 @@ class Lawyer(commands.Cog):
         for i, url in enumerate(config.PROJECT_RULE_URLS, 1):
             try:
                 title, content, url2 = await fetch_url(url)
-                self.bot.kb.add(title, url2, "ooc", content, inter.user.id)
+                self.bot.kb.add(0, title, url2, "ooc", content, inter.user.id)  # правила проекта — общие для всех семей
                 ok.append(f"✅ {title} ({len(content) // 1000} тыс. знаков)")
             except Exception as e:
                 bad.append(f"❌ {url} — {e}")
@@ -208,7 +208,7 @@ class Lawyer(commands.Cog):
         except Exception as e:
             return await inter.followup.send(f"❌ Не получилось скачать: {e}\nМожно добавить текстом: `/база текст` "
                                              "или файлом: `/база файл`.", ephemeral=True)
-        doc_id, new = self.bot.kb.add(title or t, url2, cat.value, content, inter.user.id)
+        doc_id, new = self.bot.kb.add(inter.guild.id, title or t, url2, cat.value, content, inter.user.id)
         await inter.followup.send(f"✅ {'Добавлен' if new else 'Обновлён'} документ №{doc_id} «{title or t}» — "
                                   f"{len(content)} знаков.", ephemeral=True)
 
@@ -228,7 +228,8 @@ class Lawyer(commands.Cog):
             return await inter.followup.send(f"❌ Не смог прочитать файл: {e}", ephemeral=True)
         if len(content) < 20:
             return await inter.followup.send("В файле почти нет текста.", ephemeral=True)
-        doc_id, _ = self.bot.kb.add(title or file.filename.rsplit(".", 1)[0], None, cat.value, content, inter.user.id)
+        doc_id, _ = self.bot.kb.add(inter.guild.id, title or file.filename.rsplit(".", 1)[0], None, cat.value, content,
+                                    inter.user.id)
         await inter.followup.send(f"✅ Документ №{doc_id} добавлен — {len(content)} знаков.", ephemeral=True)
 
     @kb.command(name="текст", description="Добавить документ, вставив текст")
@@ -241,11 +242,12 @@ class Lawyer(commands.Cog):
 
     @kb.command(name="список", description="Документы в базе знаний")
     async def kb_list(self, inter: discord.Interaction):
-        rows = self.bot.db.all("SELECT id, title, url, category, LENGTH(content) n, updated_at FROM kb_docs ORDER BY category, id")
+        rows = self.bot.db.all("SELECT id, title, url, category, LENGTH(content) n, updated_at FROM kb_docs "
+                               "WHERE guild_id IN (0, ?) ORDER BY category, id", inter.guild.id)
         lines = [f"`{r['id']}` {config.KB_CATEGORIES.get(r['category'], r['category'])[:2]} "
                  f"{'[' + r['title'][:70] + '](' + r['url'] + ')' if r['url'] else r['title'][:70]} · "
                  f"{r['n'] // 1000} тыс. · {r['updated_at'][:10]}" for r in rows]
-        total = self.bot.kb.total_chars()
+        total = self.bot.kb.total_chars(inter.guild.id)
         await inter.response.send_message(embed=self.bot.embed(
             f"📚 База знаний: {len(rows)} док. + правила семьи", ("\n".join(lines) or "Пусто. Начни с `/база правила-проекта`")
             [:3800] + f"\n\nВсего ≈ {total // 1000} тыс. знаков · ИИ: {self.bot.ai.name}", config.COLOR, inter.guild),
@@ -256,7 +258,10 @@ class Lawyer(commands.Cog):
     async def kb_del(self, inter: discord.Interaction, doc_id: int):
         if not self.bot.has(inter.user, KB_STAFF):
             return await inter.response.send_message("⛔ Недостаточно прав.", ephemeral=True)
-        self.bot.kb.delete(doc_id)
+        if not self.bot.db.one("SELECT 1 FROM kb_docs WHERE guild_id=? AND id=?", inter.guild.id, doc_id):
+            return await inter.response.send_message("Нет такого документа (общие правила проекта удалить нельзя).",
+                                                     ephemeral=True)
+        self.bot.kb.delete(inter.guild.id, doc_id)
         await inter.response.send_message(f"🗑 Документ №{doc_id} удалён.", ephemeral=True)
 
     @kb.command(name="обновить", description="Заново скачать все документы со ссылками (если законы изменились)")
@@ -264,12 +269,12 @@ class Lawyer(commands.Cog):
         if not self.bot.has(inter.user, KB_STAFF):
             return await inter.response.send_message("⛔ Недостаточно прав.", ephemeral=True)
         await inter.response.defer(ephemeral=True, thinking=True)
-        rows = self.bot.db.all("SELECT * FROM kb_docs WHERE url IS NOT NULL")
+        rows = self.bot.db.all("SELECT * FROM kb_docs WHERE guild_id IN (0, ?) AND url IS NOT NULL", inter.guild.id)
         ok, bad = 0, []
         for r in rows:
             try:
                 t, content, url2 = await fetch_url(r["url"])
-                self.bot.kb.add(r["title"], url2, r["category"], content, inter.user.id)
+                self.bot.kb.add(r["guild_id"], r["title"], url2, r["category"], content, inter.user.id)
                 ok += 1
             except Exception as e:
                 bad.append(f"❌ №{r['id']} {r['title'][:60]} — {e}")

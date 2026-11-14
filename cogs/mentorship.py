@@ -80,17 +80,18 @@ class Mentorship(commands.Cog):
     # ---------- данные ----------
     def stats(self, row):
         db = self.bot.db
-        a = db.one("SELECT voice_seconds FROM activity WHERE user_id=?", row["newbie_id"])
+        gid = row["guild_id"]
+        a = db.one("SELECT voice_seconds FROM activity WHERE guild_id=? AND user_id=?", gid, row["newbie_id"])
         voice = max(0, (a["voice_seconds"] if a else 0) - (row["voice_start"] or 0))
         gatherings = 0
-        for ev in db.all("SELECT data FROM events WHERE created_at>=?", row["started_at"]):
+        for ev in db.all("SELECT data FROM events WHERE guild_id=? AND created_at>=?", gid, row["started_at"]):
             try:
                 if row["newbie_id"] in json.loads(ev["data"]).get("yes", []):
                     gatherings += 1
             except (ValueError, TypeError):
                 pass
-        warns = db.one("SELECT COUNT(*) n FROM warns WHERE user_id=? AND created_at>=? AND active=1",
-                       row["newbie_id"], row["started_at"])["n"]
+        warns = db.one("SELECT COUNT(*) n FROM warns WHERE guild_id=? AND user_id=? AND created_at>=? AND active=1",
+                       gid, row["newbie_id"], row["started_at"])["n"]
         return voice, gatherings, warns
 
     def card(self, guild, row):
@@ -152,8 +153,8 @@ class Mentorship(commands.Cog):
         cands = [m for m in role.members if not m.bot and m.id != exclude_id and not (vac and vac in m.roles)]
         if not cands:
             return None
-        load = {m.id: self.bot.db.one("SELECT COUNT(*) n FROM mentorships WHERE mentor_id=? AND status='active'",
-                                      m.id)["n"] for m in cands}
+        load = {m.id: self.bot.db.one("SELECT COUNT(*) n FROM mentorships WHERE guild_id=? AND mentor_id=? AND "
+                                      "status='active'", guild.id, m.id)["n"] for m in cands}
         low = min(load.values())
         return random.choice([m for m in cands if load[m.id] == low])
 
@@ -174,10 +175,10 @@ class Mentorship(commands.Cog):
                 await thread.add_user(u)
             except discord.HTTPException:
                 pass
-        a = db.one("SELECT voice_seconds FROM activity WHERE user_id=?", newbie.id)
+        a = db.one("SELECT voice_seconds FROM activity WHERE guild_id=? AND user_id=?", guild.id, newbie.id)
         start = now()
-        cur = db.q("INSERT INTO mentorships(newbie_id, mentor_id, thread_id, checklist, started_at, due_at, voice_start)"
-                   " VALUES(?,?,?,?,?,?,?)", newbie.id, mentor.id, thread.id,
+        cur = db.q("INSERT INTO mentorships(guild_id, newbie_id, mentor_id, thread_id, checklist, started_at, due_at, "
+                   "voice_start) VALUES(?,?,?,?,?,?,?,?)", guild.id, newbie.id, mentor.id, thread.id,
                    json.dumps([False] * len(config.MENTOR_CHECKLIST)), start.isoformat(),
                    (start + dt.timedelta(days=config.MENTOR_DAYS)).isoformat(), a["voice_seconds"] if a else 0)
         row = db.one("SELECT * FROM mentorships WHERE id=?", cur.lastrowid)
@@ -206,7 +207,8 @@ class Mentorship(commands.Cog):
         if not m or not (kind == "expelled" or (kind == "rank" and data.get("rank") in ("member", "senior"))):
             return
         status = "failed" if kind == "expelled" else "done"
-        for row in self.bot.db.all("SELECT * FROM mentorships WHERE newbie_id=? AND status='active'", m.id):
+        for row in self.bot.db.all("SELECT * FROM mentorships WHERE guild_id=? AND newbie_id=? AND status='active'",
+                                   guild.id, m.id):
             self.bot.db.q("UPDATE mentorships SET status=?, closed_at=? WHERE id=?", status, now_iso(), row["id"])
             row = self.bot.db.one("SELECT * FROM mentorships WHERE id=?", row["id"])
             th = await self.get_thread(guild, row["thread_id"])
@@ -222,7 +224,8 @@ class Mentorship(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_remove(self, member):
-        for row in self.bot.db.all("SELECT * FROM mentorships WHERE newbie_id=? AND status='active'", member.id):
+        for row in self.bot.db.all("SELECT * FROM mentorships WHERE guild_id=? AND newbie_id=? AND status='active'",
+                                   member.guild.id, member.id):
             self.bot.db.q("UPDATE mentorships SET status='left', closed_at=? WHERE id=?", now_iso(), row["id"])
             th = await self.get_thread(member.guild, row["thread_id"])
             if th:
@@ -297,7 +300,7 @@ class Mentorship(commands.Cog):
     async def due_loop(self):
         db = self.bot.db
         for row in db.all("SELECT * FROM mentorships WHERE status='active' AND asked=0 AND due_at<=?", now_iso()):
-            for guild in self.bot.home_guilds:
+            for guild in filter(None, [self.bot.get_guild(row["guild_id"])]):
                 th = await self.get_thread(guild, row["thread_id"])
                 if not th:
                     continue
@@ -326,7 +329,8 @@ class Mentorship(commands.Cog):
     @staff_only(config.MENTORS)
     async def assign_cmd(self, inter: discord.Interaction, newbie: discord.Member, mentor: discord.Member = None):
         db = self.bot.db
-        row = db.one("SELECT * FROM mentorships WHERE newbie_id=? AND status='active'", newbie.id)
+        row = db.one("SELECT * FROM mentorships WHERE guild_id=? AND newbie_id=? AND status='active'", inter.guild.id,
+                     newbie.id)
         if row:
             if not mentor:
                 return await inter.response.send_message("У новичка уже есть наставник. Укажи нового, чтобы сменить.",
@@ -350,7 +354,8 @@ class Mentorship(commands.Cog):
     @group.command(name="список", description="Новички на испытательном сроке")
     @staff_only(config.MENTORS + ["recruiter"])
     async def list_cmd(self, inter: discord.Interaction):
-        rows = self.bot.db.all("SELECT * FROM mentorships WHERE status='active' ORDER BY due_at")
+        rows = self.bot.db.all("SELECT * FROM mentorships WHERE guild_id=? AND status='active' ORDER BY due_at",
+                               inter.guild.id)
         lines = []
         for r in rows:
             done = sum(1 for x in json.loads(r["checklist"] or "[]") if x)
@@ -363,8 +368,8 @@ class Mentorship(commands.Cog):
     @group.command(name="рейтинг", description="Лучшие наставники")
     async def rating_cmd(self, inter: discord.Interaction):
         rows = self.bot.db.all("""SELECT mentor_id, SUM(status='done') ok, SUM(status='failed') bad,
-                                  SUM(status='active') act FROM mentorships GROUP BY mentor_id
-                                  ORDER BY ok DESC, act DESC LIMIT 15""")
+                                  SUM(status='active') act FROM mentorships WHERE guild_id=? GROUP BY mentor_id
+                                  ORDER BY ok DESC, act DESC LIMIT 15""", inter.guild.id)
         medals = ["🥇", "🥈", "🥉"]
         lines = [f"{medals[i] if i < 3 else f'`{i + 1}.`'} <@{r['mentor_id']}> — 🎓 выпустил: **{r['ok'] or 0}** · "
                  f"сейчас: {r['act'] or 0} · не прошли: {r['bad'] or 0}" for i, r in enumerate(rows)]

@@ -146,7 +146,8 @@ class Market(commands.Cog):
                    kind: app_commands.Choice[str] = None, photo: discord.Attachment = None):
         if not self.bot.ch(inter.guild, "market"):
             return await inter.response.send_message("Канал рынка не настроен — запусти /настройка.", ephemeral=True)
-        active = self.bot.db.one("SELECT COUNT(*) n FROM market WHERE user_id=? AND status='active'", inter.user.id)["n"]
+        active = self.bot.db.one("SELECT COUNT(*) n FROM market WHERE guild_id=? AND user_id=? AND status='active'",
+                                 inter.guild.id, inter.user.id)["n"]
         if active >= 10:
             return await inter.response.send_message("У тебя уже 10 активных объявлений — сними лишние.", ephemeral=True)
         await inter.response.send_modal(ListingModal(kind.value if kind else "sell", category.value, photo))
@@ -160,8 +161,8 @@ class Market(commands.Cog):
             except discord.HTTPException:
                 image = None
         t = now_iso()
-        cur = self.bot.db.q("INSERT INTO market(user_id, kind, category, title, price, price_num, description, created_at,"
-                            " bumped_at, has_image) VALUES(?,?,?,?,?,?,?,?,?,?)", inter.user.id, kind, category, title,
+        cur = self.bot.db.q("INSERT INTO market(guild_id, user_id, kind, category, title, price, price_num, description, "
+                            "created_at, bumped_at, has_image) VALUES(?,?,?,?,?,?,?,?,?,?,?)", inter.guild.id, inter.user.id, kind, category, title,
                             price, parse_price(price), desc or None, t, t, int(bool(image)))
         row = self.bot.db.one("SELECT * FROM market WHERE id=?", cur.lastrowid)
         msg = await self.send_listing(inter.guild, row, image)
@@ -257,7 +258,8 @@ class Market(commands.Cog):
     @app_commands.choices(category=[app_commands.Choice(name=v, value=k) for k, v in config.MARKET_CATEGORIES.items()])
     @family_only()
     async def search(self, inter: discord.Interaction, query: str = None, category: app_commands.Choice[str] = None):
-        rows = self.bot.db.all("SELECT * FROM market WHERE status='active' ORDER BY bumped_at DESC")
+        rows = self.bot.db.all("SELECT * FROM market WHERE guild_id=? AND status='active' ORDER BY bumped_at DESC",
+                               inter.guild.id)
         q = words(query)
         rows = [r for r in rows if (not category or r["category"] == category.value) and (not q or matches(r, q))]
         lines = [f"{config.MARKET_KINDS[r['kind']][0]} [{r['title'][:60]}]({self.link(inter.guild, r)}) — **{r['price']}**"
@@ -267,8 +269,8 @@ class Market(commands.Cog):
 
     @group.command(name="мои", description="Мои объявления")
     async def mine(self, inter: discord.Interaction):
-        rows = self.bot.db.all("SELECT * FROM market WHERE user_id=? AND status IN ('active','expired') "
-                               "ORDER BY bumped_at DESC", inter.user.id)
+        rows = self.bot.db.all("SELECT * FROM market WHERE guild_id=? AND user_id=? AND status IN ('active','expired') "
+                               "ORDER BY bumped_at DESC", inter.guild.id, inter.user.id)
         lines = [f"{'🟢' if r['status'] == 'active' else '⌛'} №{r['id']} [{r['title'][:60]}]({self.link(inter.guild, r)})"
                  f" — {r['price']}" for r in rows]
         await inter.response.send_message(embed=self.bot.embed("🛒 Мои объявления", "\n".join(lines) or "Пусто",
@@ -279,10 +281,11 @@ class Market(commands.Cog):
     @family_only()
     async def price(self, inter: discord.Interaction, query: str):
         q = words(query)
-        sold = [r for r in self.bot.db.all("SELECT * FROM market WHERE status='sold' AND sold_price IS NOT NULL "
-                                           "ORDER BY sold_at DESC") if matches(r, q)]
-        active = [r for r in self.bot.db.all("SELECT * FROM market WHERE status='active' AND price_num IS NOT NULL "
-                                             "AND kind='sell'") if matches(r, q)]
+        gid = inter.guild.id
+        sold = [r for r in self.bot.db.all("SELECT * FROM market WHERE guild_id=? AND status='sold' AND sold_price IS "
+                                           "NOT NULL ORDER BY sold_at DESC", gid) if matches(r, q)]
+        active = [r for r in self.bot.db.all("SELECT * FROM market WHERE guild_id=? AND status='active' AND price_num "
+                                             "IS NOT NULL AND kind='sell'", gid) if matches(r, q)]
         e = self.bot.embed(f"📈 Цена: {query[:100]}", None, config.GOLD, inter.guild)
         if sold:
             prices = [r["sold_price"] for r in sold]
@@ -307,7 +310,7 @@ class Market(commands.Cog):
         for row in rows:
             self.bot.db.q("UPDATE market SET status='expired' WHERE id=?", row["id"])
             row = self.bot.db.one("SELECT * FROM market WHERE id=?", row["id"])
-            for g in self.bot.home_guilds:
+            for g in filter(None, [self.bot.get_guild(row["guild_id"])]):
                 c = self.bot.ch(g, "market")
                 if not c or not row["message_id"]:
                     continue

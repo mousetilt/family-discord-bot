@@ -27,7 +27,8 @@ class Chronicle(commands.Cog):
 
     async def record(self, guild, kind, text, user_id=None, image=None):
         bot = self.bot
-        bot.db.q("INSERT INTO chronicle(kind, text, user_id, created_at) VALUES(?,?,?,?)", kind, text, user_id, now_iso())
+        bot.db.q("INSERT INTO chronicle(guild_id, kind, text, user_id, created_at) VALUES(?,?,?,?,?)", guild.id, kind,
+                 text, user_id, now_iso())
         c = bot.ch(guild, "chronicle")
         if not c:
             return
@@ -64,8 +65,8 @@ class Chronicle(commands.Cog):
     async def check_milestone(self, guild):
         n = len(self.bot.family_members(guild))
         for t in MILESTONES:
-            if n >= t and not self.bot.db.get(f"milestone:{t}"):
-                self.bot.db.set(f"milestone:{t}", 1)
+            if n >= t and not self.bot.db.gget(guild, f"milestone:{t}"):
+                self.bot.db.gset(guild, f"milestone:{t}", 1)
                 await self.record(guild, "milestone", f"🎉 Нас уже **{t}**! Семья {config.FAMILY_GEN} растёт.")
 
     # ---------- ежедневное ----------
@@ -78,8 +79,8 @@ class Chronicle(commands.Cog):
             if t.day == 1 and t.hour >= 8:
                 prev = (t.replace(day=1) - dt.timedelta(days=1))
                 key = f"chapter:{prev.year}-{prev.month:02d}"
-                if not self.bot.db.get(key):
-                    self.bot.db.set(key, 1)
+                if not self.bot.db.gget(guild, key):
+                    self.bot.db.gset(guild, key, 1)
                     await self.post_chapter(guild, prev.year, prev.month)
 
     @daily.before_loop
@@ -89,15 +90,15 @@ class Chronicle(commands.Cog):
     async def anniversaries(self, guild, t):
         db = self.bot.db
         rows = db.all("SELECT user_id, MIN(COALESCE(decided_at, created_at)) d FROM applications "
-                      "WHERE status='accepted' GROUP BY user_id")
+                      "WHERE guild_id=? AND status='accepted' GROUP BY user_id", guild.id)
         for r in rows:
             m = guild.get_member(r["user_id"])
             if not m or not self.bot.in_family(m):
                 continue
             days = (t.date() - parse_dt(r["d"]).date()).days
             label = ANNIVERSARIES.get(days)
-            if label and not db.get(f"anniv:{m.id}:{days}"):
-                db.set(f"anniv:{m.id}:{days}", 1)
+            if label and not db.gget(guild, f"anniv:{m.id}:{days}"):
+                db.gset(guild, f"anniv:{m.id}:{days}", 1)
                 await self.record(guild, "anniversary", f"🎂 {m.mention} — уже **{label}** в семье {config.FAMILY_GEN}!",
                                   m.id)
 
@@ -105,8 +106,8 @@ class Chronicle(commands.Cog):
         db, bot = self.bot.db, self.bot
         start = dt.datetime(year, month, 1, tzinfo=dt.timezone.utc)
         end = (start + dt.timedelta(days=32)).replace(day=1)
-        rows = db.all("SELECT * FROM chronicle WHERE created_at>=? AND created_at<? ORDER BY id",
-                      start.isoformat(), end.isoformat())
+        rows = db.all("SELECT * FROM chronicle WHERE guild_id=? AND created_at>=? AND created_at<? ORDER BY id",
+                      guild.id, start.isoformat(), end.isoformat())
         title = f"📜 Глава: {MONTHS_NOM[month - 1]} {year}"
         if not rows:
             text = "В этом месяце летопись молчит. Пусть следующий будет громче!"
@@ -142,8 +143,8 @@ class Chronicle(commands.Cog):
             if arch:
                 f = await image.to_file()
                 bot = self.bot
-                bot.db.q("INSERT INTO chronicle(kind, text, user_id, created_at) VALUES(?,?,?,?)", "manual",
-                         f"✍️ {text}", inter.user.id, now_iso())
+                bot.db.q("INSERT INTO chronicle(guild_id, kind, text, user_id, created_at) VALUES(?,?,?,?,?)",
+                         inter.guild.id, "manual", f"✍️ {text}", inter.user.id, now_iso())
                 e = bot.embed(f"📖 {ru_date(now())}", f"✍️ {text}", config.GOLD, inter.guild)
                 e.set_image(url=f"attachment://{f.filename}")
                 await arch.send(embed=e, file=f)

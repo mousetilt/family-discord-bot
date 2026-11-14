@@ -136,7 +136,7 @@ class Boosts(commands.Cog):
     async def refresh(self, guild):
         """Обновить панель прогресса (без пересоздания)."""
         ch = self.bot.ch(guild, "boosts")
-        mid = self.bot.db.get("panel:boosts")
+        mid = self.bot.db.gget(guild, "panel:boosts")
         if not ch or not mid:
             return
         try:
@@ -158,7 +158,7 @@ class Boosts(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_remove(self, member):
-        if self.bot.db.get(f"boostrole:{member.id}"):
+        if self.bot.db.gget(member.guild, f"boostrole:{member.id}"):
             await self.drop_role(member)  # ушёл с сервера — личная роль бустера не должна висеть
         if member.premium_since:
             await self.refresh(member.guild)
@@ -188,19 +188,19 @@ class Boosts(commands.Cog):
         if chron:
             await chron.record(g, "boost", f"💎 {member.mention} поддержал(а) семью бустом сервера.", member.id)
             for n, what in GOALS:
-                if count >= n and not self.bot.db.get(f"boostgoal:{n}"):
-                    self.bot.db.set(f"boostgoal:{n}", 1)
+                if count >= n and not self.bot.db.gget(g, f"boostgoal:{n}"):
+                    self.bot.db.gset(g, f"boostgoal:{n}", 1)
                     await chron.record(g, "boost_goal", f"🎉 Семья собрала **{n}** бустов — открыто: {what}.")
 
     async def drop_role(self, member):
-        rid = self.bot.db.get(f"boostrole:{member.id}")
+        rid = self.bot.db.gget(member.guild, f"boostrole:{member.id}")
         r = member.guild.get_role(int(rid)) if rid else None
         if r:
             try:
                 await r.delete(reason="Буст закончился")
             except discord.HTTPException:
                 pass
-        self.bot.db.set(f"boostrole:{member.id}", "")
+        self.bot.db.gset(member.guild, f"boostrole:{member.id}", "")
 
     @tasks.loop(hours=6)
     @guarded
@@ -208,13 +208,13 @@ class Boosts(commands.Cog):
         for g in self.bot.home_guilds:
             count = g.premium_subscription_count or 0
             goal = self.next_goal(count)
-            last = self.bot.db.get("boost:reminded")
+            last = self.bot.db.gget(g, "boost:reminded")
             if not goal or (last and now().timestamp() - float(last) < REMIND_DAYS * 86400):
                 continue
             ch = self.bot.ch(g, "chat")
             if not ch:
                 continue
-            self.bot.db.set("boost:reminded", now().timestamp())
+            self.bot.db.gset(g, "boost:reminded", now().timestamp())
             n, what = goal
             e = discord.Embed(title="💎 Немного не хватает",
                               description=f"У семьи **{count}** из **{n}** бустов. Ещё **{n - count}** — и откроем: "
@@ -251,7 +251,7 @@ class Boosts(commands.Cog):
             return await inter.response.send_message("Цвет нужен в формате #FF66CC.", ephemeral=True)
         title = f"💎 {(name or m.display_name).strip()[:30]}"
         g = inter.guild
-        rid = self.bot.db.get(f"boostrole:{m.id}")
+        rid = self.bot.db.gget(g, f"boostrole:{m.id}")
         r = g.get_role(int(rid)) if rid else None
         try:
             if r:
@@ -259,7 +259,7 @@ class Boosts(commands.Cog):
             else:
                 r = await g.create_role(name=title, color=col, hoist=False, mentionable=False,
                                         reason="Личная роль бустера")
-                self.bot.db.set(f"boostrole:{m.id}", r.id)
+                self.bot.db.gset(g, f"boostrole:{m.id}", r.id)
                 pos = max(1, g.me.top_role.position - 1)
                 try:
                     await r.edit(position=pos)  # выше рангов — чтобы цвет было видно

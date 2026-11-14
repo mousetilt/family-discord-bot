@@ -42,7 +42,7 @@ class Promo(commands.Cog):
         self.bot = bot
 
     async def invite_url(self, guild):
-        code = self.bot.db.get("invite_code")
+        code = self.bot.db.gget(guild, "invite_code")
         try:
             invites = await guild.invites()
         except discord.HTTPException:
@@ -58,21 +58,21 @@ class Promo(commands.Cog):
                 code = (await ch.create_invite(max_age=0, max_uses=0, unique=False, reason="Визитка семьи")).code
             except discord.HTTPException:
                 return None
-        self.bot.db.set("invite_code", code)
+        self.bot.db.gset(guild, "invite_code", code)
         return f"https://discord.gg/{code}"
 
     def collect(self, guild):
         bot = self.bot
-        ids = bot.role_ids(config.FAMILY_RANKS)
+        ids = bot.role_ids(guild, config.FAMILY_RANKS)
         members = [m for m in guild.members if not m.bot and any(r.id in ids for r in m.roles)]
         lead_role = bot.role(guild, "leader")
         leader = next((m for m in lead_role.members if not m.bot), None) if lead_role else None
-        since = bot.db.get("family_since")
+        since = bot.db.gget(guild, "family_since")
         if not since:
             d = guild.created_at
             since = f"{MONTHS[d.month - 1]} {d.year}"
-        allies = [r["family"] for r in bot.db.all("SELECT family FROM relations WHERE status IN ('ally','pact') "
-                                                    "ORDER BY status, family")]
+        allies = [r["family"] for r in bot.db.all("SELECT family FROM relations WHERE guild_id=? AND "
+                                                    "status IN ('ally','pact') ORDER BY status, family", guild.id)]
         return members, leader, since, allies
 
     def forum_post(self, guild, n, leader, since, allies, invite, recruiting):
@@ -113,7 +113,7 @@ class Promo(commands.Cog):
         if since:
             if not bot.has(inter.user, config.LEAD):
                 return await inter.response.send_message("⛔ Дату основания меняет только руководство.", ephemeral=True)
-            bot.db.set("family_since", since.strip()[:24])
+            bot.db.gset(g, "family_since", since.strip()[:24])
         await inter.response.defer(thinking=True)
         members, leader, since_txt, allies = self.collect(g)
         invite = await self.invite_url(g) or ""

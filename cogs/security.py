@@ -124,7 +124,7 @@ class Security(commands.Cog):
         if len(self.joins) >= RAID_JOINS and t > self.raid_until:
             self.raid_until = t + 600
             if g.verification_level < discord.VerificationLevel.high:
-                self.bot.db.set("raid:prev_level", g.verification_level.value)
+                self.bot.db.gset(g, "raid:prev_level", g.verification_level.value)
             try:
                 await g.edit(verification_level=discord.VerificationLevel.high, reason="Анти-рейд")
             except discord.HTTPException:
@@ -220,8 +220,8 @@ class Security(commands.Cog):
     async def raid(self, inter: discord.Interaction, on: bool):
         self.raid_until = time.monotonic() + 3600 if on else 0
         if on and inter.guild.verification_level < discord.VerificationLevel.high:
-            self.bot.db.set("raid:prev_level", inter.guild.verification_level.value)
-        prev = discord.VerificationLevel(int(self.bot.db.get("raid:prev_level") or 2))
+            self.bot.db.gset(inter.guild, "raid:prev_level", inter.guild.verification_level.value)
+        prev = discord.VerificationLevel(int(self.bot.db.gget(inter.guild, "raid:prev_level") or 2))
         try:
             await inter.guild.edit(verification_level=discord.VerificationLevel.high if on else prev,
                                    reason="Режим рейда")

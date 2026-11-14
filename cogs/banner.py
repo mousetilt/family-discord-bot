@@ -39,9 +39,9 @@ class Banner(commands.Cog):
         for g in self.bot.home_guilds:
             t = now()
             key = f"banner:{t.date()}"
-            if t.hour < BANNER_HOUR or self.bot.db.get(key):
+            if t.hour < BANNER_HOUR or self.bot.db.gget(g, key):
                 continue
-            self.bot.db.set(key, 1)
+            self.bot.db.gset(g, key, 1)
             await self.refresh(g)
 
     @hourly.before_loop
@@ -50,8 +50,8 @@ class Banner(commands.Cog):
 
     def stats(self, guild):
         fam = self.bot.family_members(guild)
-        lead_ids = self.bot.role_ids(config.LEAD)
-        senior_ids = self.bot.role_ids(["senior"])
+        lead_ids = self.bot.role_ids(guild, config.LEAD)
+        senior_ids = self.bot.role_ids(guild, ["senior"])
         return (len(fam), sum(1 for m in fam if any(r.id in lead_ids for r in m.roles)),
                 sum(1 for m in fam if any(r.id in senior_ids for r in m.roles)))
 
@@ -75,7 +75,7 @@ class Banner(commands.Cog):
 
     async def refresh(self, guild):
         async with self.lock:
-            news = self.bot.db.get("news:text") or ""
+            news = self.bot.db.gget(guild, "news:text") or ""
             stats = self.stats(guild)
             try:
                 data = await self.render(stats, news)
@@ -105,7 +105,7 @@ class Banner(commands.Cog):
         if not self.bot.has(inter.user, config.LEAD):
             return await inter.response.send_message("⛔ Только для руководства.", ephemeral=True)
         text = " ".join(текст.split())
-        self.bot.db.set("news:text", "" if text.lower() == "сбросить" else text[:MAX_NEWS])
+        self.bot.db.gset(inter.guild, "news:text", "" if text.lower() == "сбросить" else text[:MAX_NEWS])
         await inter.response.defer(ephemeral=True)
         ok = await self.refresh(inter.guild)
         await inter.followup.send(("📰 Готово, баннер обновлён." if ok

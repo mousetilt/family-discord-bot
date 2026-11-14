@@ -107,10 +107,11 @@ class Gatherings(commands.Cog):
     def cog_unload(self):
         self.tick.cancel()
 
-    def attendance(self, uid):
-        """(пришёл, отмечался «Иду») по сборам, где бот проверял явку."""
+    def attendance(self, member):
+        """(пришёл, отмечался «Иду») по сборам его семьи, где бот проверял явку."""
+        uid = member.id
         came = total = 0
-        for row in self.bot.db.all("SELECT data FROM events"):
+        for row in self.bot.db.all("SELECT data FROM events WHERE guild_id=?", member.guild.id):
             try:
                 d = json.loads(row["data"])
             except ValueError:
@@ -126,7 +127,7 @@ class Gatherings(commands.Cog):
         """Напоминание за 15 минут тем, кто идёт, и отметка явки через 10 минут после начала."""
         db, t = self.bot.db, now().timestamp()
         border = (now() - dt.timedelta(days=31)).isoformat()
-        for row in db.all("SELECT message_id, data FROM events WHERE created_at>?", border):
+        for row in db.all("SELECT message_id, guild_id, data FROM events WHERE created_at>?", border):
             try:
                 d = json.loads(row["data"])
             except ValueError:
@@ -135,7 +136,7 @@ class Gatherings(commands.Cog):
             if not ts or d.get("checked"):
                 continue
             changed = False
-            for g in self.bot.home_guilds:
+            for g in filter(None, [self.bot.get_guild(row["guild_id"])]):
                 ch = self.bot.ch(g, "gather")
                 msg = ch.get_partial_message(row["message_id"]) if ch else None
                 if not d.get("reminded") and t >= ts - REMIND_BEFORE:
@@ -201,7 +202,8 @@ class Gatherings(commands.Cog):
         ping = self.bot.role(guild, "n_gather")
         msg = await c.send(content=ping.mention if ping else None, embed=event_embed(self.bot, d, guild), view=v,
                            allowed_mentions=discord.AllowedMentions(roles=True))
-        self.bot.db.q("INSERT INTO events(message_id, data, created_at) VALUES(?,?,?)", msg.id, json.dumps(d), now_iso())
+        self.bot.db.q("INSERT INTO events(message_id, guild_id, data, created_at) VALUES(?,?,?,?)", msg.id, guild.id,
+                      json.dumps(d), now_iso())
         music = self.bot.get_cog("Music")
         if music:
             place = f" Место: {where}." if where else ""

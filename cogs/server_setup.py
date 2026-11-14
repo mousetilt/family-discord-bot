@@ -88,7 +88,8 @@ async def order_roles(guild, our_ids):
 
 def find_category(bot, guild, cat):
     """Категория по сохранённому ID (переживает переименование), иначе по названию."""
-    cid = bot.db.get(f"cat:{cat['name']}") or (bot.db.get(f"ch:{cat['key']}") if cat.get("key") else None)
+    cid = bot.db.gget(guild, f"cat:{cat['name']}") or (bot.db.gget(guild, f"ch:{cat['key']}") if cat.get("key")
+                                                       else None)
     c = guild.get_channel(int(cid)) if cid else None
     if isinstance(c, discord.CategoryChannel):
         return c
@@ -100,7 +101,7 @@ async def build_server(bot, guild, progress):
     R = {}
     for key, name, color, perms, hoist in config.ROLES:
         # сначала по сохранённому ID: если роль переименовали вручную, дубль не создаём
-        rid = db.get(f"role:{key}")
+        rid = db.gget(guild, f"role:{key}")
         role = (guild.get_role(int(rid)) if rid else None) or discord.utils.get(guild.roles, name=name)
         if not role:
             role = await guild.create_role(
@@ -113,7 +114,7 @@ async def build_server(bot, guild, progress):
             except discord.HTTPException:
                 pass
         R[key] = role
-        db.set(f"role:{key}", role.id)
+        db.gset(guild, f"role:{key}", role.id)
     await progress(f"✅ Роли ({len(R)})")
 
     await progress(await order_roles(guild, [R[k].id for k, *_ in config.ROLES]))
@@ -132,9 +133,9 @@ async def build_server(bot, guild, progress):
             category = await guild.create_category(cat["name"], overwrites=ow)
         else:
             await category.edit(overwrites=ow)
-        db.set(f"cat:{cat['name']}", category.id)
+        db.gset(guild, f"cat:{cat['name']}", category.id)
         if cat.get("key"):
-            db.set(f"ch:{cat['key']}", category.id)
+            db.gset(guild, f"ch:{cat['key']}", category.id)
         for ctype, key, name, extra in cat["channels"]:
             c_ow = build_overwrites(guild, R, extra.get("view", cat["view"]), extra.get("send", cat["send"]),
                                    kind=ctype, connect=extra.get("connect"), speak=extra.get("speak"))
@@ -163,7 +164,7 @@ async def build_server(bot, guild, progress):
                                                           bitrate=int(guild.bitrate_limit))
                 else:
                     await ch.edit(overwrites=c_ow)
-            db.set(f"ch:{key}", ch.id)
+            db.gset(guild, f"ch:{key}", ch.id)
         await progress(f"✅ {cat['name']}")
     await progress("✅ Права доступа выставлены по ролям")
 
@@ -177,7 +178,7 @@ async def build_server(bot, guild, progress):
 
 
 async def apply_branding(bot, guild, progress, force=False):
-    if bot.db.get("branding_done") and not force:
+    if bot.db.gget(guild, "branding_done") and not force:
         return
     emblem = (config.ASSETS / "emblem.png").read_bytes()
     try:
@@ -203,7 +204,7 @@ async def apply_branding(bot, guild, progress, force=False):
             await progress("✅ Аватар бота — герб семьи")
         except discord.HTTPException:
             pass
-    bot.db.set("branding_done", 1)
+    bot.db.gset(guild, "branding_done", 1)
 
 
 class SelfRoleButton(discord.ui.DynamicItem[discord.ui.Button], template=r"selfrole:(?P<key>n_\w+)"):

@@ -95,9 +95,9 @@ class Daily(commands.Cog):
     async def backup(self, guild):
         t = now()
         key = f"backup:{t.date()}"
-        if t.hour < BACKUP_HOUR or self.bot.db.get(key):
+        if t.hour < BACKUP_HOUR or self.bot.db.gget(guild, key):
             return
-        self.bot.db.set(key, 1)
+        self.bot.db.gset(guild, key, 1)
         if not await self.send_backup(guild):
             await self.bot.log(guild, "💾 Не смог отправить владельцу сервера резервную копию базы — открой ЛС от "
                                       "участников сервера. Вручную: `/копия`.", color=0xFB8C00)
@@ -136,10 +136,10 @@ class Daily(commands.Cog):
             return
         db = self.bot.db
         border = (now() - dt.timedelta(days=config.WARN_DAYS)).isoformat()
-        rows = db.all("SELECT user_id, COUNT(*) n, MAX(created_at) last FROM warns WHERE active=1 GROUP BY user_id "
-                      "HAVING MAX(created_at)<?", border)
+        rows = db.all("SELECT user_id, COUNT(*) n, MAX(created_at) last FROM warns WHERE guild_id=? AND active=1 "
+                      "GROUP BY user_id HAVING MAX(created_at)<?", guild.id, border)
         for r in rows:
-            db.q("UPDATE warns SET active=0 WHERE user_id=? AND active=1", r["user_id"])
+            db.q("UPDATE warns SET active=0 WHERE guild_id=? AND user_id=? AND active=1", guild.id, r["user_id"])
             await self.bot.log(guild, f"⚪ С <@{r['user_id']}> автоматически сняты выговоры ({r['n']}): "
                                       f"{config.WARN_DAYS} дн. без новых нарушений.", "warns")
             m = guild.get_member(r["user_id"])
@@ -153,25 +153,27 @@ class Daily(commands.Cog):
         since = (t - dt.timedelta(days=max(config.DIGEST_DAYS, 1))).isoformat()
         e = bot.embed(f"🗞 Сводка по семье {config.FAMILY}", None, config.GOLD, guild)
         fam = bot.family_members(guild)
-        joined = db.one("SELECT COUNT(*) n FROM applications WHERE status='accepted' AND decided_at>?", since)["n"]
+        gid = guild.id
+        joined = db.one("SELECT COUNT(*) n FROM applications WHERE guild_id=? AND status='accepted' AND decided_at>?",
+                        gid, since)["n"]
         e.description = f"В семье **{len(fam)}** чел." + (f" · новых за период: **{joined}**" if joined else "")
 
-        apps = db.all("SELECT id, user_id, status, created_at FROM applications WHERE status IN ('new','taken','interview') "
-                      "ORDER BY id")
+        apps = db.all("SELECT id, user_id, status, created_at FROM applications WHERE guild_id=? AND "
+                      "status IN ('new','taken','interview') ORDER BY id", gid)
         if apps:
             names = {"new": "🟡 ждёт", "taken": "🔵 взята", "interview": "🟣 собеседование"}
             e.add_field(name=f"📥 Открытые заявки ({len(apps)})",
                         value="\n".join(f"№{a['id']} <@{a['user_id']}> — {names[a['status']]} · "
                                         f"<t:{int(parse_dt(a['created_at']).timestamp())}:R>" for a in apps[:8])[:1024],
                         inline=False)
-        appeals = db.all("SELECT id, topic, created_at FROM appeals WHERE status='open' ORDER BY id")
+        appeals = db.all("SELECT id, topic, created_at FROM appeals WHERE guild_id=? AND status='open' ORDER BY id", gid)
         if appeals:
             e.add_field(name=f"📬 Обращения без ответа ({len(appeals)})",
                         value="\n".join(f"№{a['id']} {a['topic']} · <t:{int(parse_dt(a['created_at']).timestamp())}:R>"
                                         for a in appeals[:8])[:1024], inline=False)
         soon = (t + dt.timedelta(days=2)).isoformat()
-        ms = db.all("SELECT newbie_id, mentor_id, due_at FROM mentorships WHERE status='active' AND due_at<? "
-                    "ORDER BY due_at", soon)
+        ms = db.all("SELECT newbie_id, mentor_id, due_at FROM mentorships WHERE guild_id=? AND status='active' "
+                    "AND due_at<? ORDER BY due_at", gid, soon)
         if ms:
             e.add_field(name=f"🎓 Испытательный срок: пора решать ({len(ms)})",
                         value="\n".join(f"<@{m['newbie_id']}> (наставник <@{m['mentor_id']}>) — "
@@ -183,7 +185,7 @@ class Daily(commands.Cog):
         for m in fam:
             if (vac and vac in m.roles) or m.voice:
                 continue
-            a = db.one("SELECT last_seen FROM activity WHERE user_id=?", m.id)
+            a = db.one("SELECT last_seen FROM activity WHERE guild_id=? AND user_id=?", gid, m.id)
             last = parse_dt(a["last_seen"]) if a and a["last_seen"] else None
             if not last or last < border:
                 idle.append(m)
@@ -191,12 +193,13 @@ class Daily(commands.Cog):
             e.add_field(name=f"💤 Не появлялись {INACTIVE_DAYS}+ дн. ({len(idle)})",
                         value=(", ".join(m.mention for m in idle[:15]) + ("…" if len(idle) > 15 else ""))[:1024]
                         + "\nПодробно: `/неактив`", inline=False)
-        warns = db.all("SELECT user_id, COUNT(*) n FROM warns WHERE active=1 GROUP BY user_id ORDER BY n DESC")
+        warns = db.all("SELECT user_id, COUNT(*) n FROM warns WHERE guild_id=? AND active=1 GROUP BY user_id "
+                       "ORDER BY n DESC", gid)
         if warns:
             e.add_field(name=f"⚖️ С активными выговорами ({len(warns)})",
                         value=", ".join(f"<@{w['user_id']}> ×{w['n']}" for w in warns[:12])[:1024], inline=False)
-        flags = db.one("SELECT COUNT(*) n FROM flags WHERE status='open'")["n"]
-        market = db.one("SELECT COUNT(*) n FROM market WHERE status='active'")["n"]
+        flags = db.one("SELECT COUNT(*) n FROM flags WHERE guild_id=? AND status='open'", gid)["n"]
+        market = db.one("SELECT COUNT(*) n FROM market WHERE guild_id=? AND status='active'", gid)["n"]
         e.add_field(name="Прочее", value=f"🛡 Жалоб и флагов модерации без решения: **{flags}**\n"
                                          f"🛒 Объявлений на рынке: **{market}**\n"
                                          f"💎 Бустов сервера: **{guild.premium_subscription_count or 0}**", inline=False)
@@ -209,10 +212,10 @@ class Daily(commands.Cog):
         if config.DIGEST_DAYS <= 0:
             return
         t = now()
-        last = self.bot.db.get("digest:last")
+        last = self.bot.db.gget(guild, "digest:last")
         if t.hour < DIGEST_HOUR or (last and (t - parse_dt(last)).total_seconds() < config.DIGEST_DAYS * 86400 - 3600):
             return
-        self.bot.db.set("digest:last", now_iso())
+        self.bot.db.gset(guild, "digest:last", now_iso())
         role = self.bot.role(guild, "leader")
         targets = [m for m in (role.members if role else []) if not m.bot]
         if not targets and guild.owner:

@@ -276,7 +276,7 @@ class Assistant(commands.Cog):
                 if m.bot or m.id in seen or m.id == me.id:
                     continue
                 seen.add(m.id)
-                nick = self.bot.db.get(f"alias:{m.id}")
+                nick = self.bot.db.gget(g, f"alias:{m.id}")
                 rows.append(f"{m.id} | {m.display_name}" + (f" | {nick}" if nick else ""))
                 if len(rows) >= 30:
                     break
@@ -303,7 +303,7 @@ class Assistant(commands.Cog):
             if m.bot or m.id in seen:
                 continue
             seen.add(m.id)
-            nick = self.bot.db.get(f"alias:{m.id}")
+            nick = self.bot.db.gget(g, f"alias:{m.id}")
             people.append(f"{m.id} | {m.display_name}" + (f" ({m.name})" if m.name != m.display_name else "") +
                           (f" | прозвища: {nick}" if nick else "") +
                           (" | сейчас в войсе" if m.voice and m.voice.channel else ""))
@@ -357,7 +357,7 @@ class Assistant(commands.Cog):
                 continue
             best, score = None, 0.0
             for m in pool:
-                labels = [m.display_name.split("[")[0], m.name] + (self.bot.db.get(f"alias:{m.id}") or "").split(",")
+                labels = [m.display_name.split("[")[0], m.name] + (self.bot.db.gget(g, f"alias:{m.id}") or "").split(",")
                 for lab in labels:
                     for part in [lat(lab)] + lat(lab).split():
                         if not part:
@@ -449,7 +449,7 @@ class Assistant(commands.Cog):
             return text
         if persona:
             try:
-                persona.apply(ctx.author.id, data.get("mood"), data.get("remember"))
+                persona.apply(ctx.author.guild.id, ctx.author.id, data.get("mood"), data.get("remember"))
             except Exception:
                 log.exception("Швейцар: не записал досье")
         plan = [a for a in (data.get("actions") or []) if isinstance(a, dict) and a.get("type") in PERMS]
@@ -591,14 +591,15 @@ class Assistant(commands.Cog):
             q = str(a.get("question") or message.content or "")[:500]
             if not law:
                 return "Юрист не загружен."
-            text, _sources, _ai = await law.answer(q, "q")
+            text, _sources, _ai = await law.answer(g.id, q, "q")
             return str(text)[:1700]
         if t in ("profile", "warns"):
             m = self.one(g, a)
             if not m and (a.get("user") or a.get("users") or a.get("names")):
                 return "Не нашёл такого человека — назови ник точнее или задай прозвище через /прозвище."
             m = m or me
-            rows = db.all("SELECT id, reason, created_at FROM warns WHERE user_id=? AND active=1 ORDER BY id", m.id)
+            rows = db.all("SELECT id, reason, created_at FROM warns WHERE guild_id=? AND user_id=? AND active=1 "
+                          "ORDER BY id", g.id, m.id)
             wl = "\n".join(f"№{r['id']} · <t:{int(parse_dt(r['created_at']).timestamp())}:d> · {r['reason'][:120]}"
                             for r in rows)
             if t == "warns":
@@ -606,9 +607,9 @@ class Assistant(commands.Cog):
             act = bot.get_cog("Activity")
             if act:
                 act.flush(m)
-            r = db.one("SELECT * FROM activity WHERE user_id=?", m.id)
+            r = db.one("SELECT * FROM activity WHERE guild_id=? AND user_id=?", g.id, m.id)
             gat = bot.get_cog("Gatherings")
-            came, total = gat.attendance(m.id) if gat else (0, 0)
+            came, total = gat.attendance(m) if gat else (0, 0)
             last = f"<t:{int(parse_dt(r['last_seen']).timestamp())}:R>" if r and r["last_seen"] else "—"
             return (f"**{m.display_name}** — {bot.rank_name(m) or 'не в семье'}\n"
                     f"🎙 В войсе: {fmt_hours(r['voice_seconds']) if r else '0 мин'} (за неделю "
@@ -617,7 +618,8 @@ class Assistant(commands.Cog):
         if t == "top":
             week = a.get("period") != "all"
             v, mcol = ("week_voice", "week_messages") if week else ("voice_seconds", "messages")
-            rows = db.all(f"SELECT user_id, {v} v, {mcol} m FROM activity ORDER BY ({v}/60 + {mcol}*2) DESC LIMIT 10")
+            rows = db.all(f"SELECT user_id, {v} v, {mcol} m FROM activity WHERE guild_id=? "
+                          f"ORDER BY ({v}/60 + {mcol}*2) DESC LIMIT 10", g.id)
             return f"🏆 Топ — {'неделя' if week else 'всё время'}\n" + "\n".join(
                 f"{i + 1}. {self.name(g, r['user_id'])} — 🎙 {fmt_hours(r['v'])} · 💬 {r['m']}" for i, r in enumerate(rows))
         if t == "inactive":
@@ -626,14 +628,14 @@ class Assistant(commands.Cog):
             for m in bot.family_members(g):
                 if (vac and vac in m.roles) or m.voice:
                     continue
-                r = db.one("SELECT last_seen FROM activity WHERE user_id=?", m.id)
+                r = db.one("SELECT last_seen FROM activity WHERE guild_id=? AND user_id=?", g.id, m.id)
                 last = parse_dt(r["last_seen"]) if r and r["last_seen"] else None
                 if not last or last < border:
                     out.append(m.display_name)
             return f"💤 Не появлялись {days}+ дн. ({len(out)}): " + (", ".join(out[:40]) or "таких нет, все молодцы")
         if t == "bl_check":
             m = self.one(g, a)
-            hit = bot.blacklist_find(discord_id=m.id if m else None, static=a.get("static") or None,
+            hit = bot.blacklist_find(g, discord_id=m.id if m else None, static=a.get("static") or None,
                                      nick=a.get("nick") or (a.get("names") or [None])[0] if not m else None)
             if not hit:
                 return "✅ В чёрном списке не найден."
@@ -641,7 +643,8 @@ class Assistant(commands.Cog):
         if t == "market":
             from cogs.market import matches, words
             q = words(str(a.get("query") or ""))
-            rows = [r for r in db.all("SELECT * FROM market WHERE status='active' ORDER BY bumped_at DESC")
+            rows = [r for r in db.all("SELECT * FROM market WHERE guild_id=? AND status='active' ORDER BY bumped_at DESC",
+                                      g.id)
                     if not q or matches(r, q)]
             return f"🛒 На рынке найдено: {len(rows)}\n" + "\n".join(
                 f"• {config.MARKET_KINDS[r['kind']][0]} {r['title'][:60]} — {r['price']}" for r in rows[:10])
@@ -731,8 +734,9 @@ class Assistant(commands.Cog):
                             bot.emit(g, "post", member=m, post=a["post"], added=add, by=me)
                             out.append(f"🎖 {m.display_name}: {role.name} {'выдана' if add else 'снята'}.")
                     elif t == "unwarn":
-                        n = bot.db.one("SELECT COUNT(*) n FROM warns WHERE user_id=? AND active=1", m.id)["n"]
-                        bot.db.q("UPDATE warns SET active=0 WHERE user_id=? AND active=1", m.id)
+                        n = bot.db.one("SELECT COUNT(*) n FROM warns WHERE guild_id=? AND user_id=? AND active=1",
+                                       g.id, m.id)["n"]
+                        bot.db.q("UPDATE warns SET active=0 WHERE guild_id=? AND user_id=? AND active=1", g.id, m.id)
                         if n:
                             await bot.log(g, f"⚪ С {m.mention} сняты выговоры ({n}) — {me.mention}", "warns")
                         out.append(f"⚪ {m.display_name}: снято выговоров — {n}.")
@@ -763,13 +767,13 @@ class Assistant(commands.Cog):
                         out.append(f"⛔ {m.display_name}: нельзя — он не ниже тебя по иерархии.")
                     else:
                         if m and not static:
-                            app = bot.db.one("SELECT static_id, nick FROM applications WHERE user_id=? AND static_id "
-                                             "IS NOT NULL ORDER BY id DESC LIMIT 1", m.id)
+                            app = bot.db.one("SELECT static_id, nick FROM applications WHERE guild_id=? AND user_id=? "
+                                             "AND static_id IS NOT NULL ORDER BY id DESC LIMIT 1", g.id, m.id)
                             if app:
                                 static, nick = app["static_id"], nick or app["nick"]
                         days = max(0, min(3650, int(a.get("days") or 0)))
-                        cur = bot.db.q("INSERT INTO blacklist(discord_id, static_id, nick, reason, added_by, created_at, "
-                                       "until) VALUES(?,?,?,?,?,?,?)", m.id if m else None, static or None, nick or None,
+                        cur = bot.db.q("INSERT INTO blacklist(guild_id, discord_id, static_id, nick, reason, added_by, "
+                                       "created_at, until) VALUES(?,?,?,?,?,?,?,?)", g.id, m.id if m else None, static or None, nick or None,
                                        reason, me.id, now_iso(),
                                        (now() + dt.timedelta(days=days)).isoformat() if days else None)
                         if m and bot.in_family(m):
@@ -791,8 +795,8 @@ class Assistant(commands.Cog):
                     else:
                         sec.raid_until = time.monotonic() + 3600 if on else 0
                         if on and g.verification_level < discord.VerificationLevel.high:
-                            bot.db.set("raid:prev_level", g.verification_level.value)
-                        prev = discord.VerificationLevel(int(bot.db.get("raid:prev_level") or 2))
+                            bot.db.gset(g, "raid:prev_level", g.verification_level.value)
+                        prev = discord.VerificationLevel(int(bot.db.gget(g, "raid:prev_level") or 2))
                         await g.edit(verification_level=discord.VerificationLevel.high if on else prev,
                                      reason=f"Режим рейда: {me}")
                         await bot.log(g, f"🛡 Режим рейда {'включён' if on else 'выключен'} — {me.mention}",
@@ -951,7 +955,7 @@ class Assistant(commands.Cog):
                 elif t == "forget":
                     persona = bot.get_cog("Persona")
                     if persona:
-                        persona.forget(me.id)
+                        persona.forget(g.id, me.id)
                     out.append("🧹 Досье стёр. Кто ты вообще такой?")
                 elif t == "invite":
                     who = self.one(g, a)
@@ -1020,10 +1024,10 @@ class Assistant(commands.Cog):
             return await inter.response.send_message("⛔ Только для руководства и старшего состава.", ephemeral=True)
         key = f"alias:{member.id}"
         if names is None:
-            cur = self.bot.db.get(key)
+            cur = self.bot.db.gget(inter.guild, key)
             return await inter.response.send_message(f"Прозвища {member.mention}: {cur or 'не заданы'}", ephemeral=True)
         clean = ", ".join(x.strip()[:24] for x in names.replace(";", ",").split(",") if x.strip() and x.strip() != "-")[:120]
-        self.bot.db.set(key, clean)
+        self.bot.db.gset(inter.guild, key, clean)
         await inter.response.send_message(f"✅ {member.mention}: {clean or 'прозвища удалены'}", ephemeral=True)
 
 

@@ -39,8 +39,9 @@ class Interviews(commands.Cog):
         return isinstance(m, discord.Member) and not m.bot and not self.bot.has(m, config.FAMILY_PLUS) \
             and not self.staff(m)
 
-    def app(self, uid):
-        return self.bot.db.one(f"SELECT * FROM applications WHERE user_id=? AND status IN {OPEN} ORDER BY id DESC", uid)
+    def app(self, member):
+        return self.bot.db.one(f"SELECT * FROM applications WHERE guild_id=? AND user_id=? AND status IN {OPEN} "
+                               "ORDER BY id DESC", member.guild.id, member.id)
 
     @staticmethod
     def has_space(room, extra=1):
@@ -110,7 +111,7 @@ class Interviews(commands.Cog):
     # ---------- события ----------
     async def on_candidate_waiting(self, member):
         g = member.guild
-        app = self.app(member.id)
+        app = self.app(member)
         if not app:
             asyncio.create_task(self.greet(member, None, None))  # голос — вне блокировки, чтобы не тормозить переносы
             return
@@ -134,7 +135,7 @@ class Interviews(commands.Cog):
         queue = [m for m in waiting.members if self.candidate(m)]
         mine, free = None, None
         for m in queue:
-            a = self.app(m.id)
+            a = self.app(m)
             if not a:
                 continue
             if a["reviewer_id"] == staff.id:
