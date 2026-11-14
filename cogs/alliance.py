@@ -514,17 +514,7 @@ class Alliance(commands.Cog):
         if self.bot.is_family(guild):
             return
         await self.sync_foreign(guild)
-        ch = guild.system_channel or next((c for c in guild.text_channels
-                                           if c.permissions_for(guild.me).send_messages), None)
-        if ch:
-            try:
-                await ch.send(embed=self.embed(
-                    f"🤝 {A}", "Привет! Я бот альянса.\n\n"
-                               "**Это сервер семьи?** Администратор пишет `/альянс подключить` — название семьи, роль "
-                               "членов семьи и роль руководства. Потом совет альянса голосует за вступление.\n\n"
-                               "**Это будущий штаб альянса?** Глава любой семьи альянса пишет `/альянс штаб`."))
-            except discord.HTTPException:
-                pass
+        # приветствие (с вариантами «своя семья» / «союзник по альянсу» / «штаб») шлёт ког Families — одно на всех
 
     @commands.Cog.listener()
     async def on_guild_remove(self, guild):
