@@ -77,7 +77,8 @@ class Lawyer(commands.Cog):
     async def answer(self, gid, question, mode="q"):
         """→ (текст, источники, использован_ли_ИИ). gid — сервер семьи (её база знаний)."""
         bot = self.bot
-        if not bot.ai.on:
+        ai = bot.ai_for(gid)
+        if not ai.on:
             hits = bot.kb.search(gid, question, k=3)
             if not hits:
                 return ("В базе знаний ничего не нашлось по этому вопросу. Руководство может добавить документы: "
@@ -87,7 +88,7 @@ class Lawyer(commands.Cog):
             return text, [(h["title"], h["url"]) for h in hits], False
         context, sources, _ = bot.kb.context(gid, question)
         system = f"{bot.brand(gid, BASE_PROMPT)}\n\nЗАДАЧА: {MODES[mode][1]}\n\nДОКУМЕНТЫ:\n{context}"
-        reply = await bot.ai.ask(system, question, max_tokens=1600 if mode == "doc" else 900, smart=True, cache=True)
+        reply = await ai.ask(system, question, max_tokens=1600 if mode == "doc" else 900, smart=True, cache=True)
         return reply or "ИИ не дал ответа, попробуй переформулировать.", sources, True
 
     async def send_answer(self, send, question, text, sources, mode, guild):
@@ -102,7 +103,7 @@ class Lawyer(commands.Cog):
             e = self.bot.embed(title, text, config.COLOR, guild)
             if src:
                 e.add_field(name="Источники", value="\n".join(src)[:1024], inline=False)
-            e.set_footer(text=f"ИИ: {self.bot.ai.name} · проверяй важное по первоисточнику · "
+            e.set_footer(text=f"ИИ: {self.bot.ai_for(guild).name} · проверяй важное по первоисточнику · "
                               f"{self.bot.brand(guild, config.FOOTER)}")
             await send(embed=e)
 
@@ -133,6 +134,8 @@ class Lawyer(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not message.content:
+            return
+        if not self.bot.feature(message.guild, "lawyer_channel"):
             return
         lawyer_ch = self.bot.ch(message.guild, "lawyer")
         in_channel = lawyer_ch and message.channel.id == lawyer_ch.id
@@ -251,7 +254,7 @@ class Lawyer(commands.Cog):
         total = self.bot.kb.total_chars(inter.guild.id)
         await inter.response.send_message(embed=self.bot.embed(
             f"📚 База знаний: {len(rows)} док. + правила семьи", ("\n".join(lines) or "Пусто. Начни с `/база правила-проекта`")
-            [:3800] + f"\n\nВсего ≈ {total // 1000} тыс. знаков · ИИ: {self.bot.ai.name}", config.COLOR, inter.guild),
+            [:3800] + f"\n\nВсего ≈ {total // 1000} тыс. знаков · ИИ: {self.bot.ai_for(inter.guild).name}", config.COLOR, inter.guild),
             ephemeral=True)
 
     @kb.command(name="удалить", description="Удалить документ из базы")

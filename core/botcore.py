@@ -12,7 +12,7 @@ from discord.ext import commands
 from . import config
 from .ai import AI
 from .db import DB, gid_of as guild_id_of
-from .family import brand as family_brand, profile as family_profile
+from .family import brand as family_brand, feature as family_feature, profile as family_profile
 from .kb import KnowledgeBase
 
 log = logging.getLogger("family-bot")
@@ -142,6 +142,7 @@ class FamilyBot(commands.Bot):
         self.families = {int(r["guild_id"]) for r in self.db.all(
             "SELECT guild_id FROM guild_settings WHERE key='family:enabled' AND value='1'")}
         self._synced_ids = set()
+        self._ai_cache = {}  # guild_id -> (ключи, AI) для семей со своими ключами
         global _BRAND
         _BRAND = self.brand
 
@@ -176,6 +177,28 @@ class FamilyBot(commands.Bot):
     def set_family(self, guild, on):
         self.db.gset(guild, "family:enabled", "1" if on else "0")
         (self.families.add if on else self.families.discard)(guild.id)
+
+    # ---------- ИИ и модули семьи ----------
+    def ai_for(self, guild):
+        """ИИ этой семьи. Домашний сервер — ключи хоста; остальные — только свои ключи (/ии ключ), иначе ИИ выключен."""
+        if guild is None:
+            return self.ai
+        gid = guild_id_of(guild)
+        if self.home_id is None or gid == self.home_id:
+            return self.ai
+        keys = {p: self.db.gget(gid, f"ai:{p}") for p in ("groq", "gemini")}
+        keys = {p: k for p, k in keys.items() if k}
+        sig = tuple(sorted(keys.items()))
+        cached = self._ai_cache.get(gid)
+        if cached and cached[0] == sig:
+            return cached[1]
+        ai = AI(self.db, keys=keys, scope=gid)
+        self._ai_cache[gid] = (sig, ai)
+        return ai
+
+    def feature(self, guild, key):
+        """Включён ли модуль у этой семьи (/настройки)."""
+        return guild is None or family_feature(self.db, guild_id_of(guild), key)
 
     # ---------- профиль семьи ----------
     def family(self, guild):

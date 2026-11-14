@@ -115,13 +115,14 @@ class Chronicle(commands.Cog):
         else:
             events = "\n".join(f"{r['created_at'][:10]} — {r['text']}" for r in rows)
             text = None
-            if bot.ai.on:
+            ai = bot.ai_for(guild)
+            if ai.on:
                 system = bot.brand(guild, f"Ты летописец семьи «{config.FAMILY}» (RP-проект «Россия Онлайн»). Напиши главу летописи за "
                           f"{MONTHS_NOM[month - 1].lower()} {year} в торжественном стиле старинной летописи («В лето "
                           f"{year}-е, месяца …»), но живо и понятно, 700-1500 символов. Упомяни события из списка, не "
                           "выдумывай новых. Упоминания вида <@123> оставляй как есть.")
                 try:
-                    text = await bot.ai.ask(system, events[:12000], max_tokens=900)
+                    text = await ai.ask(system, events[:12000], max_tokens=900)
                 except Exception as e:
                     log.warning("Глава летописи: %s", e)
             if not text:

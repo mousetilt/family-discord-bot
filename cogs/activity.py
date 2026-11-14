@@ -183,12 +183,13 @@ class Activity(commands.Cog):
                 db.all("SELECT status, COUNT(*) n FROM applications WHERE guild_id=? AND created_at>? GROUP BY status",
                        guild.id, week)}
         rows.sort(key=lambda r: r["voice_h"] * 60 + r["msgs"] * 2, reverse=True)
-        if bot.ai.on:
+        ai = bot.ai_for(guild)
+        if ai.on:
             system = bot.brand(guild, f"Ты аналитик семьи «{config.FAMILY}». По данным за неделю напиши отчёт для руководства по-русски: "
                       "1) общая картина, 2) топ-3 активных (кого поощрить), 3) кто проседает, 4) набор новых, "
                       "5) 2-3 конкретных совета. Коротко, с эмодзи, до 1500 символов.")
             try:
-                return await bot.ai.ask(system, json.dumps({"members": len(rows), "activity": rows[:60],
+                return await ai.ask(system, json.dumps({"members": len(rows), "activity": rows[:60],
                                                             "applications": apps}, ensure_ascii=False), max_tokens=900)
             except Exception as e:
                 log.warning("ИИ-отчёт: %s", e)
@@ -207,7 +208,7 @@ class Activity(commands.Cog):
             return
         key = f"report:{t.date()}"
         for g in self.bot.home_guilds:
-            if self.bot.db.gget(g, key):
+            if self.bot.db.gget(g, key) or not self.bot.feature(g, "weekly_report"):
                 continue
             c = self.bot.ch(g, "reports")
             if c:

@@ -427,7 +427,7 @@ class Applications(commands.Cog):
         msg = await review.send(content=ping.mention if ping else None, embed=app_embed(bot, a, inter.user, inter.guild),
                                 view=app_view(app_id), allowed_mentions=discord.AllowedMentions(roles=True))
         db.q("UPDATE applications SET message_id=? WHERE id=?", msg.id, app_id)
-        if bot.ai.on:
+        if bot.ai_for(inter.guild).on:
             asyncio.create_task(self.ai_review(inter.guild, app_id, msg, inter.user))
 
     async def ai_review(self, guild, app_id, msg, user):
@@ -448,7 +448,7 @@ class Applications(commands.Cog):
             "ситуационные_вопросы": json.loads(a["situational"] or "[]"),
         }, ensure_ascii=False)
         try:
-            data = await bot.ai.ask_json(system, prompt, max_tokens=700)
+            data = await bot.ai_for(guild).ask_json(system, prompt, max_tokens=700)
         except Exception as e:
             log.warning("ИИ-оценка заявки: %s", e)
             return
@@ -622,8 +622,9 @@ class Applications(commands.Cog):
     async def exam_gen(self, inter: discord.Interaction, cat: app_commands.Choice[str],
                        count: app_commands.Range[int, 3, 15] = 8):
         bot = self.bot
-        if not bot.ai.on:
-            return await inter.response.send_message("ИИ не подключён (нет ключа GROQ_API_KEY в .env).", ephemeral=True)
+        ai = bot.ai_for(inter.guild)
+        if not ai.on:
+            return await inter.response.send_message("ИИ не подключён — бесплатный ключ: `/ии ключ`.", ephemeral=True)
         text = bot.kb.sample(inter.guild.id, [cat.value], max_chars=22000)
         if len(text) < 300:
             return await inter.response.send_message("В этом разделе базы знаний пока пусто. Добавь документы: "
@@ -634,7 +635,7 @@ class Applications(commands.Cog):
                   "правил, на русском; вопрос до 200 символов, варианты до 90. Не выдумывай того, чего нет в тексте. "
                   'Формат: [{"q":"...","options":["верный","неверный","неверный","неверный"]}] — верный всегда первый.')
         try:
-            data = await bot.ai.ask_json(system, text, max_tokens=3000)
+            data = await ai.ask_json(system, text, max_tokens=3000)
         except Exception as e:
             return await inter.followup.send(f"❌ ИИ не ответил: {e}", ephemeral=True)
         added = []

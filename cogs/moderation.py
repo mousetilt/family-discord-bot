@@ -163,7 +163,8 @@ class Moderation(commands.Cog):
                     await safe_dm(message.author, "⚠️ Осторожно: сделки за реальные деньги на проекте «Россия Онлайн» "
                                                   "караются PermBan (п. 6.21 правил). Сообщение передано руководству семьи.")
                 return
-        if self.bot.ai.on and config.AI_MODERATION and len(message.content or "") >= 6:
+        if config.AI_MODERATION and len(message.content or "") >= 6 and self.bot.feature(message.guild, "ai_moderation") \
+                and self.bot.ai_for(message.guild).on:
             self.buffer.append(message)
             if len(self.buffer) > 200:
                 self.buffer = self.buffer[-200:]
@@ -173,9 +174,16 @@ class Moderation(commands.Cog):
     async def ai_loop(self):
         if not self.buffer:
             return
-        batch, self.buffer = self.buffer[:40], self.buffer[40:]
+        # пачка — с одного сервера: у каждой семьи свой ИИ-ключ и своя семья в подсказке
+        g = self.buffer[0].guild
+        batch = [m for m in self.buffer if m.guild.id == g.id][:40]
+        taken = {id(m) for m in batch}
+        self.buffer = [m for m in self.buffer if id(m) not in taken]
+        ai = self.bot.ai_for(g)
+        if not ai.on:
+            return
         lines = [f"[{i}] #{m.channel.name} | {m.author.display_name}: {m.content[:400]}" for i, m in enumerate(batch)]
-        system = (f"Ты модератор Discord-сервера RP-семьи «{config.FAMILY}» (игра «Россия Онлайн»). Ниже пронумерованные "
+        system = self.bot.brand(g, f"Ты модератор Discord-сервера RP-семьи «{config.FAMILY}» (игра «Россия Онлайн»). Ниже пронумерованные "
                   "сообщения. Мат в дружеском тоне, шутки, сленг и RP-отыгрыш — НЕ нарушение. Нарушения: прямые "
                   "оскорбления и травля участника, оскорбление родных, дискриминация (нация, религия), угрозы в "
                   "реальной жизни, реклама других серверов/семей, слив чужих личных данных, NSFW, скам, призывы к "
@@ -183,7 +191,7 @@ class Moderation(commands.Cog):
                   'Верни {"violations":[{"i":номер,"severity":"low"|"medium"|"high","category":"кратко",'
                   '"reason":"1 предложение"}]}; если нарушений нет — {"violations":[]}.')
         try:
-            data = await self.bot.ai.ask_json(system, "\n".join(lines), max_tokens=700, light=True)
+            data = await ai.ask_json(system, "\n".join(lines), max_tokens=700, light=True)
         except Exception as e:
             log.warning("ИИ-модерация: %s", e)
             return

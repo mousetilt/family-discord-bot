@@ -374,7 +374,7 @@ class Assistant(commands.Cog):
         """Берёт ли помощник это сообщение. «Швейцар, …» — всегда; упоминание бота — везде, кроме канала юриста
         (там упоминание — вопрос юристу). Ответ на сообщение бота (reply) упоминанием не считается."""
         text = message.content or ""
-        if not self.bot.has(message.author, EVERYONE):
+        if not self.bot.has(message.author, EVERYONE) or not self.bot.feature(message.guild, "ai_chat"):
             return False
         if TRIGGER.match(text) or NAME_ANYWHERE.search(text):
             return True
@@ -428,14 +428,16 @@ class Assistant(commands.Cog):
     async def handle(self, ctx, request, send):
         """ctx — сообщение или похожий объект (guild, author, channel, content, mentions). Возвращает короткий
         итог для озвучки."""
-        if not self.bot.ai.on:
-            await send(content="ИИ не настроен — помощник не работает.")
+        ai = self.bot.ai_for(ctx.author.guild)
+        if not ai.on:
+            await send(content="ИИ не настроен — помощник не работает. Руководство может подключить бесплатный ключ: "
+                               "`/ии ключ`.")
             return "ИИ не настроен"
         persona = self.bot.get_cog("Persona")
         card = (persona.card(ctx.author) + "\n\n") if persona else ""
         try:
             system = self.bot.brand(ctx.author.guild, SYSTEM if self.bot.has(ctx.author, USERS) else SYSTEM_LITE)
-            data = await self.bot.ai.ask_json(system, f"{self.context(ctx)}\n\n{card}{self.chat(ctx)}{self.history(ctx)}"
+            data = await ai.ask_json(system, f"{self.context(ctx)}\n\n{card}{self.chat(ctx)}{self.history(ctx)}"
                                                       f"Сообщение от {ctx.author.display_name}: {request}",
                                               max_tokens=500)
         except Exception as e:

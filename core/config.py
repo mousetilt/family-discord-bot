@@ -332,5 +332,5 @@ EXTENSIONS = [
     "cogs.gatherings", "cogs.staff", "cogs.activity", "cogs.moderation", "cogs.lawyer", "cogs.chronicle",
     "cogs.diplomacy", "cogs.market", "cogs.security", "cogs.music", "cogs.context_menus",
     "cogs.streams", "cogs.appeals", "cogs.promo", "cogs.interviews", "cogs.alliance", "cogs.boosts", "cogs.assistant", "cogs.jarvis", "cogs.daily", "cogs.persona",
-    "cogs.maintenance", "cogs.families",
+    "cogs.maintenance", "cogs.families", "cogs.control",
 ]

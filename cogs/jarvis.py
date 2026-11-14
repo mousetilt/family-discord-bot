@@ -412,7 +412,7 @@ class Listener:
     async def phrase(self, uid, pcm):
         try:
             self.stats["phrases"] += 1
-            text = await self.cog.transcribe(pcm)
+            text = await self.cog.transcribe(self.guild, pcm)
             self.stats["heard"] = (text or "∅")[:80]
             if not text:
                 return
@@ -491,7 +491,7 @@ class Jarvis(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.listeners = {}
-        self._whisper_calls = []  # метки последних распознаваний — для минутного лимита
+        self._whisper_by_key = {}  # ключ Groq -> метки последних распознаваний (минутный лимит)
         from cogs.assistant import USERS
         self.users_roles = USERS
 
@@ -500,23 +500,34 @@ class Jarvis(commands.Cog):
             li.stop()
 
     # ---------- распознавание ----------
-    async def transcribe(self, pcm):
-        if not config.GROQ_API_KEY:
+    def whisper_key(self, guild):
+        """Ключ Groq для распознавания: домашний сервер — ключ хоста, остальные семьи — только свой (/ии ключ)."""
+        ai = self.bot.ai_for(guild)
+        return ai.keys.get("groq", "")
+
+    def whisper_counter(self, guild):
+        day = now().strftime("%Y-%m-%d")
+        return f"whisper:{day}" if self.bot.is_home(guild) else f"whisper:{day}:{guild.id}"
+
+    async def transcribe(self, guild, pcm):
+        key = self.whisper_key(guild)
+        if not key:
             return None
         wav, voiced = await asyncio.to_thread(pcm_to_wav16k, pcm)
         if voiced < MIN_VOICED:
             return None  # тишина или шум — не тратим лимит и не даём распознавателю «додумать» команду
-        day = now().strftime("%Y-%m-%d")
-        used = int(self.bot.db.get(f"whisper:{day}") or 0)
+        counter = self.whisper_counter(guild)
+        used = int(self.bot.db.get(counter) or 0)
         if used >= DAILY_LIMIT:
             return None
-        # минутный лимит Groq (20/мин): если за последние 60 сек уже много — пропускаем, иначе ловим 429 и копим очередь
+        # минутный лимит Groq (20/мин на ключ): если за последние 60 сек уже много — пропускаем
         mono = time.monotonic()
-        self._whisper_calls = [c for c in self._whisper_calls if mono - c < 60]
-        if len(self._whisper_calls) >= WHISPER_RPM:
+        calls = self._whisper_by_key.setdefault(key, [])
+        calls[:] = [c for c in calls if mono - c < 60]
+        if len(calls) >= WHISPER_RPM:
             return None
-        self._whisper_calls.append(mono)
-        self.bot.db.set(f"whisper:{day}", used + 1)
+        calls.append(mono)
+        self.bot.db.set(counter, used + 1)
         form = aiohttp.FormData()
         form.add_field("file", wav, filename="cmd.wav", content_type="audio/wav")
         form.add_field("model", WHISPER_MODEL)
@@ -529,7 +540,7 @@ class Jarvis(commands.Cog):
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
                 async with s.post("https://api.groq.com/openai/v1/audio/transcriptions", data=form,
-                                  headers={"Authorization": f"Bearer {config.GROQ_API_KEY}"}) as r:
+                                  headers={"Authorization": f"Bearer {key}"}) as r:
                     if r.status != 200:
                         log.warning("Whisper %s: %s", r.status, (await r.text())[:200])
                         return None
@@ -561,6 +572,8 @@ class Jarvis(commands.Cog):
             return "❌ Голосовой модуль ещё запускается — попробуй через 10 секунд."
         if not member.voice or not member.voice.channel:
             return "❌ Сначала зайди в голосовой канал."
+        if not self.whisper_key(guild):
+            return "❌ Для голосовых команд нужен бесплатный ключ Groq — руководство может вставить его: `/ии ключ`."
         try:
             if not disnake.opus.is_loaded():
                 disnake.opus._load_default()
@@ -718,7 +731,6 @@ class Jarvis(commands.Cog):
         vc = li.vc()
         sess = getattr(getattr(vc, "dave", None), "_session", None)
         st = li.stats
-        day = now().strftime("%Y-%m-%d")
         await inter.response.send_message(
             f"Пакетов получено: **{st['packets']}** · голосовых: **{st['rtp_ok']}** · без владельца: "
             f"**{st['unknown']}** · декодировано: **{st['decoded']}** · ошибок DAVE: **{st['dave_fail']}** · "
@@ -726,7 +738,8 @@ class Jarvis(commands.Cog):
             f"Сигналы Discord: {dict(sorted(st['ops'].items(), key=lambda x: str(x[0])))} · "
             f"Опознано по ключу: {len(li.ssrc_dec)} · Знаю голоса: {len(li.users)} · DAVE-группа: {'да' if sess and sess.has_established_group() else 'нет'} · "
             f"режим: `{getattr(vc, 'mode', '?')}`\n"
-            f"Распознаваний сегодня: {self.bot.db.get(f'whisper:{day}') or 0}/{DAILY_LIMIT}", ephemeral=True)
+            f"Распознаваний сегодня: {self.bot.db.get(self.whisper_counter(inter.guild)) or 0}/{DAILY_LIMIT}",
+            ephemeral=True)
 
 
 async def setup(bot):

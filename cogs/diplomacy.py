@@ -216,9 +216,10 @@ class Diplomacy(commands.Cog):
                 lines.append(f"[{m.created_at:%d.%m.%Y %H:%M}] {m.author.display_name}: {m.content} {att}".strip())
         transcript = "\n".join(lines)
         summary = None
-        if bot.ai.on and len(transcript) > 200:
+        ai = bot.ai_for(g)
+        if ai.on and len(transcript) > 200:
             try:
-                summary = await bot.ai.ask("Сделай краткое резюме переговоров между семьями: о чём договорились, кто что "
+                summary = await ai.ask("Сделай краткое резюме переговоров между семьями: о чём договорились, кто что "
                                            "обещал, открытые вопросы. 4-8 пунктов, по-русски.", transcript[-15000:],
                                            max_tokens=600)
             except Exception as e:

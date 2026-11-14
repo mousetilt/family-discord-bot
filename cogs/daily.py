@@ -26,7 +26,7 @@ DIGEST_HOUR = 7    # UTC: 10:00 по Москве
 INACTIVE_DAYS = 5
 
 
-def make_backup(path, only_gid=None):
+def make_backup(path, only_gid=None, home_gid=None):
     """Целостная копия базы (даже если бот в этот момент пишет) → zip в памяти.
     only_gid — оставить только данные этой семьи (владельцу чужого сервера — не вся база бота)."""
     tmp = os.path.join(tempfile.gettempdir(), f"family_backup_{os.getpid()}_{only_gid or 0}.db")
@@ -37,6 +37,9 @@ def make_backup(path, only_gid=None):
             src.backup(dst)
             if only_gid:
                 strip_foreign(dst, only_gid)
+            elif home_gid:  # полная копия — но без ИИ-ключей других семей (они их вводили не для нас)
+                dst.execute("DELETE FROM guild_settings WHERE key LIKE 'ai:%' AND guild_id<>?", (home_gid,))
+                dst.commit()
         finally:
             dst.close()
     finally:
@@ -100,7 +103,7 @@ class Daily(commands.Cog):
             return False
         # домашнему серверу — вся база (для восстановления бота), остальным семьям — только их данные
         only = None if self.bot.is_home(guild) else guild.id
-        buf = await asyncio.to_thread(make_backup, config.DB_PATH, only)
+        buf = await asyncio.to_thread(make_backup, config.DB_PATH, only, None if only else guild.id)
         size = buf.getbuffer().nbytes
         if size > 9 * 1024 * 1024:
             return await safe_dm(owner, f"💾 База семьи {config.FAMILY} выросла до {size // 1024 // 1024} МБ — в ЛС уже не "
@@ -114,7 +117,7 @@ class Daily(commands.Cog):
     async def backup(self, guild):
         t = now()
         key = f"backup:{t.date()}"
-        if t.hour < BACKUP_HOUR or self.bot.db.gget(guild, key):
+        if t.hour < BACKUP_HOUR or self.bot.db.gget(guild, key) or not self.bot.feature(guild, "backup"):
             return
         self.bot.db.gset(guild, key, 1)
         if not await self.send_backup(guild):
@@ -230,7 +233,7 @@ class Daily(commands.Cog):
         return e
 
     async def digest(self, guild):
-        if config.DIGEST_DAYS <= 0:
+        if config.DIGEST_DAYS <= 0 or not self.bot.feature(guild, "digest"):
             return
         t = now()
         last = self.bot.db.gget(guild, "digest:last")

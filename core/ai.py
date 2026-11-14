@@ -33,8 +33,17 @@ class AIUnavailable(Exception):
 
 
 class AI:
-    def __init__(self, db):
+    def __init__(self, db, keys=None, scope=None):
+        """keys=None — ключи из окружения хоста (домашняя семья). keys={'groq': .., 'gemini': ..} — ключи семьи,
+        введённые через /ии ключ; scope — ID её сервера (свой дневной лимит)."""
         self.db = db
+        self.scope = scope
+        if keys is None:
+            keys = {"groq": config.GROQ_API_KEY, "gemini": config.GEMINI_API_KEY}
+            self.own_keys = False
+        else:
+            self.own_keys = True
+        self.keys = {p: (k or "").strip() for p, k in keys.items() if (k or "").strip()}
         self.provider = self._detect()
         own = {"groq": config.GROQ_MODEL, "gemini": config.GEMINI_MODEL, "ollama": config.OLLAMA_MODEL,
                "anthropic": config.AI_MODEL}.get(self.provider)
@@ -43,21 +52,28 @@ class AI:
         self.cool = {}    # (провайдер, модель) -> до какого момента не трогаем: лимит исчерпан
         self.dead = set() # (провайдер, модель), которых у провайдера больше нет
         # второй бесплатный ИИ как подстраховка: кончился лимит у одного — отвечает другой
-        self.backup = ("gemini" if self.provider == "groq" and config.GEMINI_API_KEY else
-                       "groq" if self.provider == "gemini" and config.GROQ_API_KEY else None)
+        self.backup = ("gemini" if self.provider == "groq" and self.keys.get("gemini") else
+                       "groq" if self.provider == "gemini" and self.keys.get("groq") else None)
+        if self.own_keys:
+            return
         if self.provider:
             log.info("ИИ: %s, модель %s", NAMES[self.provider], self.models[0])
         else:
             log.info("ИИ выключен (нет ключа в .env) — бот работает без ИИ-функций")
 
-    @staticmethod
-    def _detect():
+    def _detect(self):
         p = config.AI_PROVIDER
-        if p in DEFAULTS:
+        if self.own_keys:  # у семьи — только бесплатные Groq/Gemini по её ключам
+            if p in self.keys:
+                return p
+            return "gemini" if "gemini" in self.keys else "groq" if "groq" in self.keys else None
+        if p in ("groq", "gemini") and p in self.keys:
             return p
-        if config.GROQ_API_KEY:
+        if p in ("ollama", "anthropic"):
+            return p
+        if "groq" in self.keys:
             return "groq"
-        if config.GEMINI_API_KEY:
+        if "gemini" in self.keys:
             return "gemini"
         if config.OLLAMA_MODEL:
             return "ollama"
@@ -73,17 +89,43 @@ class AI:
     def name(self):
         return NAMES.get(self.provider, "выключен")
 
-    def _count(self):
+    def _day_key(self):
         day = dt.date.today().isoformat()
-        row = self.db.one("SELECT calls FROM ai_usage WHERE day=?", day)
-        if row and row["calls"] >= config.AI_DAILY_LIMIT:
-            raise AIUnavailable("Дневной лимит запросов к ИИ исчерпан (AI_DAILY_LIMIT в .env)")
-        self.db.q("INSERT INTO ai_usage(day, calls) VALUES(?,1) ON CONFLICT(day) DO UPDATE SET calls=calls+1", day)
+        return f"{day}:{self.scope}" if self.scope else day
+
+    def used_today(self):
+        row = self.db.one("SELECT calls FROM ai_usage WHERE day=?", self._day_key())
+        return row["calls"] if row else 0
+
+    def _count(self):
+        key = self._day_key()
+        if self.used_today() >= config.AI_DAILY_LIMIT:
+            raise AIUnavailable("Дневной лимит запросов к ИИ исчерпан — завтра снова заработает")
+        self.db.q("INSERT INTO ai_usage(day, calls) VALUES(?,1) ON CONFLICT(day) DO UPDATE SET calls=calls+1", key)
+
+    async def probe(self, provider):
+        """Проверка ключа одним крошечным запросом → None (всё ок) или текст ошибки."""
+        last = "нет ответа"
+        for model in DEFAULTS[provider]:
+            try:
+                await getattr(self, f"_{provider}")(model, "Ответь одним словом.", "Скажи: ок", 16)
+                return None
+            except _RateLimited:
+                return None  # ключ рабочий, просто лимит на эту минуту
+            except _ModelMissing as e:
+                last = str(e)[:150]
+            except AIUnavailable as e:
+                return str(e)[:200]
+            except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, KeyError, IndexError) as e:
+                last = type(e).__name__
+        return f"ни одна модель не ответила ({last})"
 
     async def ask(self, system, prompt, max_tokens=800, smart=False, cache=False, light=False):
         """Запрос к ИИ, возвращает текст ответа."""
         if not self.on:
-            raise AIUnavailable("ИИ не подключён. Бесплатный ключ: console.groq.com или aistudio.google.com → .env")
+            raise AIUnavailable("ИИ не подключён. Руководство может вставить бесплатный ключ Groq или Gemini "
+                                "командой /ии ключ" if self.own_keys else
+                                "ИИ не подключён. Бесплатный ключ: console.groq.com или aistudio.google.com")
         self._count()
         chain = [(self.provider, m) for m in self.models]
         if light:  # фоновые задачи (модерация) — сначала на младшие модели, чтобы не съедать лимит основной
@@ -135,8 +177,8 @@ class AI:
                 text = await r.text()
                 if r.status == 429:
                     raise _RateLimited(text[:400])
-                if r.status in (401, 403):
-                    raise AIUnavailable("Ключ ИИ не подходит — проверь его в .env")
+                if r.status in (401, 403) or (r.status == 400 and "api key" in text.lower()):
+                    raise AIUnavailable("Ключ ИИ не подходит — проверь его (/ии ключ)")
                 if r.status == 404 or (r.status == 400 and "model" in text.lower()):
                     raise _ModelMissing(text[:200])
                 if r.status >= 400:
@@ -152,7 +194,7 @@ class AI:
         else:
             payload["max_tokens"] = max_tokens
         data = await self._post("https://api.groq.com/openai/v1/chat/completions", payload,
-                                {"Authorization": f"Bearer {config.GROQ_API_KEY}"})
+                                {"Authorization": f"Bearer {self.keys.get('groq', '')}"})
         text = data["choices"][0]["message"].get("content") or ""
         return re.sub(r"<think>.*?</think>", "", text, flags=re.S)  # qwen думает вслух — мысли отрезаем
 
@@ -161,7 +203,7 @@ class AI:
                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
                    "generationConfig": {"maxOutputTokens": max_tokens + 2048, "temperature": 0.3}}
         data = await self._post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                                payload, {"x-goog-api-key": config.GEMINI_API_KEY})
+                                payload, {"x-goog-api-key": self.keys.get("gemini", "")})
         cands = data.get("candidates") or []
         parts = (cands[0].get("content") or {}).get("parts", []) if cands else []
         return "".join(p.get("text", "") for p in parts if not p.get("thought"))

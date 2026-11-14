@@ -144,10 +144,11 @@ class Persona(commands.Cog):
     # ---------- реплики голосом ----------
     async def line(self, task, member, fallback):
         """Одна личная реплика для озвучки. ИИ не ответил — говорим заготовку."""
-        if not self.bot.ai.on:
+        ai = self.bot.ai_for(member.guild)
+        if not ai.on:
             return fallback
         try:
-            text = await asyncio.wait_for(self.bot.ai.ask(self.bot.brand(member.guild, VOICE_SYSTEM),
+            text = await asyncio.wait_for(ai.ask(self.bot.brand(member.guild, VOICE_SYSTEM),
                                                           f"{self.card(member)}\n\n{task}", max_tokens=90),
                                           timeout=8)
         except Exception:
@@ -158,7 +159,7 @@ class Persona(commands.Cog):
     async def greet(self, guild, member):
         """Человек зашёл в войс, где сидит Швейцар: иногда встречаем личной фразой."""
         t = time.monotonic()
-        if member.bot or not self.bot.has(member, config.FAMILY_PLUS):
+        if member.bot or not self.bot.has(member, config.FAMILY_PLUS) or not self.bot.feature(guild, "voice_greet"):
             return
         if t - self.last_greet < GREET_GAP or t - self.greeted.get(member.id, -1e9) < GREET_EVERY:
             return
@@ -184,7 +185,7 @@ class Persona(commands.Cog):
         seen = set()
         for g in self.bot.home_guilds:
             jv, music = self.bot.get_cog("Jarvis"), self.bot.get_cog("Music")
-            if not jv or not music:
+            if not jv or not music or not self.bot.feature(g, "voice_visit"):
                 continue
             afk = self.bot.ch(g, "afk")
             for ch in g.voice_channels:

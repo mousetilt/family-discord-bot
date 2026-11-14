@@ -263,7 +263,7 @@ def gid_of(g):
     """guild / member / interaction / message / int → ID сервера (int)."""
     if isinstance(g, int):
         return g
-    if isinstance(g, discord.Guild):
+    if isinstance(g, (discord.Guild, discord.Object)):
         return g.id
     guild = getattr(g, "guild", None)
     if guild is not None:
