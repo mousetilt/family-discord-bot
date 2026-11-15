@@ -80,8 +80,8 @@ class CharterModal(discord.ui.Modal, title="📜 Новая редакция у�
         cog = inter.client.get_cog("Alliance")
         await inter.response.defer(ephemeral=True)
         vid = await cog.start_vote(inter.user, inter.guild, "charter", "Новая редакция устава", str(self.text),
-                                   None, self.hours)
-        await inter.followup.send(f"🗳 Голосование №{vid} по уставу запущено во всех семьях.", ephemeral=True)
+                                   None, self.hours, fallback=inter.channel)
+        await inter.followup.send(f"🗳 Голосование №{vid} по уставу запущено.\n{cog.where_sent()}", ephemeral=True)
 
 
 class Alliance(commands.Cog):
@@ -196,6 +196,23 @@ class Alliance(commands.Cog):
             elif m.id == g.owner_id or any(r.id == row["lead_role_id"] for r in m.roles):
                 return row
         return None
+
+    def is_founder(self, user):
+        """Глава/зам (или владелец сервера) семьи-основателя — может принимать семьи без голосования."""
+        home = self.home()
+        m = home.get_member(user.id) if home else None
+        return bool(m and (m.id == home.owner_id or self.bot.has(m, ["leader", "deputy"])))
+
+    async def force_accept(self, row, user):
+        """Принять семью из заявки без голосования: открытые голосования по ней закрываются как принятые."""
+        db = self.bot.db
+        for v in db.all("SELECT id FROM alliance_votes WHERE status='open' AND kind='join' AND target=?",
+                        row["guild_id"]):
+            db.q("UPDATE alliance_votes SET status='passed' WHERE id=?", v["id"])
+            await self.refresh(v["id"], closed=True)
+        await self.activate(row)
+        await self.record(f"⚡ Семья **{row['family']}** принята решением семьи-основателя без голосования "
+                          f"({user.display_name}).")
 
     def exists(self):
         h = self.bot.home_id
@@ -319,12 +336,26 @@ class Alliance(commands.Cog):
         return g.get_channel(row[col]) if g and row[col] else None
 
     async def broadcast(self, col, embed=None, content=None, view_factory=None, ping=False, only=None):
-        sent = []
+        """Во все серверы альянса (семьи с ботом + штаб). Нет канала — один раз пересобираем каналы и пробуем снова.
+        self.last_failed — [(сервер, почему)] для ответа автору."""
+        sent, self.last_failed = [], []
         for row in self.nodes():
             if only and row["guild_id"] not in only:
                 continue
+            if self.is_ext(row):
+                continue  # у семьи без бота своих каналов нет — она всё видит в штабе
             ch = self.channel(row, col)
+            g = self.bot.get_guild(row["guild_id"])
+            if not ch and g:
+                try:  # канал удалили/пересоздали руками — восстанавливаем
+                    fixed = await (self.build_hub(g) if row["status"] == "hub" else self.ensure_channels(row))
+                    ch = self.channel(fixed, col) if fixed else None
+                except Exception:
+                    log.exception("Альянс: восстановление каналов на «%s»", g.name)
             if not ch:
+                why = "бот не видит этот сервер" if not g else "нет канала и не вышло его создать (права бота?)"
+                self.last_failed.append((row["family"], why))
+                log.error("Альянс: рассылка %s — «%s»: %s", col, row["family"], why)
                 continue
             kw = {"embed": embed, "allowed_mentions": discord.AllowedMentions(everyone=ping)}
             text = ("@here " if ping else "") + (content or "")
@@ -336,7 +367,8 @@ class Alliance(commands.Cog):
                 m = await ch.send(**kw)
                 sent.append((ch.id, m.id))
             except discord.HTTPException as e:
-                log.warning("Альянс: рассылка в %s: %s", ch, e)
+                self.last_failed.append((row["family"], f"Discord не дал написать в #{ch.name}: {str(e)[:80]}"))
+                log.error("Альянс: рассылка в «%s» #%s: %s", row["family"], ch.name, e)
         return sent
 
     def embed(self, title, text, color=COLOR):
@@ -586,7 +618,9 @@ class Alliance(commands.Cog):
             self.bot.db.set("hub:invite", "")
 
     # ================= голосования =================
-    async def start_vote(self, user, guild, kind, title, text, target, hours):
+    async def start_vote(self, user, guild, kind, title, text, target, hours, fallback=None):
+        """Голосование совета → во все каналы «совет-альянса». Никуда не ушло — в fallback (канал команды)
+        и ошибка разработчику. self.last_sent — куда разослали (для ответа автору)."""
         hours = max(1, min(int(hours or 24), 168))
         ends = now() + dt.timedelta(hours=hours)
         cur = self.bot.db.q("INSERT INTO alliance_votes(kind, title, text, target, created_by, created_gid, created_at,"
@@ -595,9 +629,39 @@ class Alliance(commands.Cog):
         vid = cur.lastrowid
         e = self.vote_embed(vid)
         sent = await self.broadcast("council_id", embed=e, view_factory=lambda: self.vote_view(vid))
+        self.last_fallback = not sent
+        if not sent:
+            nodes = [(r["family"], r["council_id"], bool(self.bot.get_guild(r["guild_id"]))) for r in self.nodes()]
+            log.error("Альянс: голосование №%s не разослано ни в один канал совета (семья, council_id, сервер виден): %s",
+                      vid, nodes)
+            if fallback is not None:
+                try:
+                    m = await fallback.send(embed=e, view=self.vote_view(vid))
+                    sent = [(fallback.id, m.id)]
+                except discord.HTTPException:
+                    pass
+        self.last_sent = sent
         self.bot.db.q("UPDATE alliance_votes SET messages=? WHERE id=?", json.dumps(sent), vid)
         await self.maybe_close(vid)
         return vid
+
+    def where_sent(self):
+        """Куда ушло последнее голосование — строкой для ответа."""
+        if getattr(self, "last_fallback", False):
+            return ("⚠️ Каналы «совет-альянса» не найдены ни на одном сервере — голосование выложено прямо здесь, "
+                    "разработчику ушёл отчёт. Голосовать можно и через `/альянс голосования`.")
+        names = []
+        for cid, _ in getattr(self, "last_sent", []):
+            ch = self.bot.get_channel(cid)
+            if ch:
+                names.append(f"{ch.mention} ({ch.guild.name})")
+        out = ("✅ Разослано: " + ", ".join(names)) if names else \
+            "⚠️ Не нашёл ни одного канала совета альянса — голосование не разослано. Голосуйте через `/альянс голосования`."
+        failed = getattr(self, "last_failed", [])
+        if failed:
+            out += "\n⚠️ Не дошло: " + "; ".join(f"**{f}** — {why}" for f, why in failed) + \
+                   "\nГолосовать там можно через `/альянс голосования`. Разработчику ушёл отчёт."
+        return out
 
     def vote_view(self, vid, closed=False):
         v = discord.ui.View(timeout=None)
@@ -1030,16 +1094,18 @@ class Alliance(commands.Cog):
                           inter.user.id)
         n = len([m for m in fam_role.members if not m.bot])
         vid = await self.start_vote(inter.user, g, "join", f"Семья {family}",
-                                    f"Сервер: {g.name}\nЧленов семьи: {n}\nЗаявку подал: {inter.user} ", g.id, 48)
-        await inter.followup.send(f"📨 Заявка семьи **{family}** отправлена. Совет альянса голосует (№{vid}, до 48 ч).",
-                                  ephemeral=True)
+                                    f"Сервер: {g.name}\nЧленов семьи: {n}\nЗаявку подал: {inter.user} ", g.id, 48,
+                                    fallback=inter.channel)
+        await inter.followup.send(f"📨 Заявка семьи **{family}** отправлена. Совет альянса голосует (№{vid}, до 48 ч).\n"
+                                  f"{self.where_sent()}", ephemeral=True)
 
     @group.command(name="добавить-семью", description="Принять в альянс семью БЕЗ нашего бота (она будет в штабе)")
-    @app_commands.rename(family="семья", leader="глава", deputy="заместитель")
+    @app_commands.rename(family="семья", leader="глава", deputy="заместитель", now_="сразу")
     @app_commands.describe(family="Название семьи", leader="Глава семьи — должен быть в штабе альянса",
-                           deputy="Заместитель (необязательно) — тоже голосует в совете")
+                           deputy="Заместитель (необязательно) — тоже голосует в совете",
+                           now_="Принять сразу, без голосования (только Глава/зам семьи-основателя)")
     async def add_ext(self, inter: discord.Interaction, family: str, leader: discord.Member,
-                      deputy: discord.Member = None):
+                      deputy: discord.Member = None, now_: bool = False):
         if not await self.need_leader(inter):
             return
         hub = self.hub()
@@ -1066,16 +1132,25 @@ class Alliance(commands.Cog):
             if other:
                 return await inter.response.send_message(f"<@{uid}> уже в руководстве семьи {other['family']}.",
                                                          ephemeral=True)
+        if now_ and not self.is_founder(inter.user):
+            return await inter.response.send_message("⛔ Принять без голосования может только Глава или заместитель "
+                                                     "семьи-основателя альянса.", ephemeral=True)
         await inter.response.defer(ephemeral=True, thinking=True)
         gid = self.new_ext_id()
         db.q("INSERT INTO alliance_families(guild_id, family, status, external, leaders, added_by) "
              "VALUES(?,?, 'pending', 1, ?, ?)", gid, family, json.dumps(ids), inter.user.id)
+        if now_:
+            await self.force_accept(self.fam(gid), inter.user)
+            return await inter.followup.send(f"✅ Семья **{family}** принята в альянс без голосования. Её руководство "
+                                             "уже может выдавать роль семьи в штабе: `/альянс участники добавить`.",
+                                             ephemeral=True)
         vid = await self.start_vote(inter.user, inter.guild, "join", f"Семья {family} (без бота, в штабе)",
                                     "Руководство: " + ", ".join(f"<@{u}>" for u in ids) + f"\nПредложил: {inter.user}\n"
-                                    "Своего сервера с ботом у семьи нет — участвует через штаб альянса.", gid, 48)
+                                    "Своего сервера с ботом у семьи нет — участвует через штаб альянса.", gid, 48,
+                                    fallback=inter.channel)
         await inter.followup.send(f"📨 Семья **{family}** вынесена на голосование совета (№{vid}, до 48 ч). После "
                                   "принятия её руководство получит роль совета в штабе и сможет выдавать роль семьи "
-                                  "своим: `/альянс участники добавить`.", ephemeral=True)
+                                  f"своим: `/альянс участники добавить`.\n{self.where_sent()}", ephemeral=True)
 
     async def ext_gate(self, inter):
         """Руководство семьи без бота, в штабе. Возвращает её строку или None (ответ уже отправлен)."""
@@ -1163,6 +1238,38 @@ class Alliance(commands.Cog):
                                           allowed_mentions=discord.AllowedMentions.none())
         await self.resync(member.id)
 
+    async def pending_auto(self, inter: discord.Interaction, current: str):
+        rows = self.bot.db.all("SELECT guild_id, family, external FROM alliance_families WHERE status='pending'")
+        return [app_commands.Choice(name=(r["family"] + (" (без бота)" if r["external"] else ""))[:100],
+                                    value=str(r["guild_id"]))
+                for r in rows if (current or "").lower() in r["family"].lower()][:25]
+
+    @group.command(name="принять-сразу", description="Принять семью из заявки без голосования (Глава/зам основателя)")
+    @app_commands.rename(family="семья")
+    @app_commands.autocomplete(family=pending_auto)
+    async def force_cmd(self, inter: discord.Interaction, family: str):
+        if not self.is_founder(inter.user):
+            return await inter.response.send_message("⛔ Только Глава или заместитель семьи-основателя альянса.",
+                                                     ephemeral=True)
+        row = self.fam(int(family)) if family.lstrip("-").isdigit() else self.bot.db.one(
+            "SELECT * FROM alliance_families WHERE status='pending' AND lower(family)=lower(?)", family.strip())
+        if not row or row["status"] != "pending":
+            return await inter.response.send_message("Нет такой заявки. Сначала: `/альянс подключить` (семья с "
+                                                     "ботом) или `/альянс добавить-семью` (без бота).", ephemeral=True)
+        await inter.response.defer(ephemeral=True, thinking=True)
+        await self.force_accept(row, inter.user)
+        await inter.followup.send(f"✅ Семья **{row['family']}** принята в альянс без голосования.", ephemeral=True)
+
+    @group.command(name="голосования", description="Открытые голосования совета — с кнопками, голосовать отсюда")
+    async def votes_cmd(self, inter: discord.Interaction):
+        rows = self.bot.db.all("SELECT id FROM alliance_votes WHERE status='open' ORDER BY id")
+        if not rows:
+            return await inter.response.send_message("🗳 Открытых голосований нет.", ephemeral=True)
+        await inter.response.send_message(embed=self.vote_embed(rows[0]["id"]), view=self.vote_view(rows[0]["id"]),
+                                          ephemeral=True)
+        for r in rows[1:5]:
+            await inter.followup.send(embed=self.vote_embed(r["id"]), view=self.vote_view(r["id"]), ephemeral=True)
+
     @group.command(name="состав", description="Семьи альянса")
     async def roster(self, inter: discord.Interaction):
         rows = self.bot.db.all("SELECT * FROM alliance_families WHERE status IN ('active','pending') "
@@ -1208,8 +1315,8 @@ class Alliance(commands.Cog):
             return await inter.response.send_message("Опиши суть решения в поле «суть».", ephemeral=True)
         await inter.response.defer(ephemeral=True)
         title = text.strip().split("\n")[0][:120]
-        vid = await self.start_vote(inter.user, inter.guild, k, title, text, target, hours)
-        await inter.followup.send(f"🗳 Голосование №{vid} запущено во всех семьях альянса.", ephemeral=True)
+        vid = await self.start_vote(inter.user, inter.guild, k, title, text, target, hours, fallback=inter.channel)
+        await inter.followup.send(f"🗳 Голосование №{vid} запущено.\n{self.where_sent()}", ephemeral=True)
 
     @group.command(name="тревога", description="Позвать на помощь все семьи альянса")
     @app_commands.rename(text="что_случилось")
