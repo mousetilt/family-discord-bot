@@ -81,6 +81,7 @@ ROLES = [
                                                          "mute_members": True, "manage_nicknames": True, "mention_everyone": True,
                                                          "manage_threads": True, "create_events": True}, True),
     ("hr_head",  "📋 Начальник отдела кадров", 0x1E88E5, {"manage_nicknames": True, "move_members": True, "moderate_members": True}, True),
+    ("treasurer","💰 Казначей",               0xFDD835, {}, True),
     ("diplomat", "🕊 Дипломат",                0x00ACC1, {"move_members": True}, True),
     ("recruiter","📨 Рекрутер",                0x42A5F5, {"move_members": True}, True),
     ("events",   "🎉 Организатор мероприятий", 0xFB8C00, {"mention_everyone": True, "move_members": True, "create_events": True}, True),
@@ -107,17 +108,19 @@ ALLIANCE_NAME = os.getenv("ALLIANCE_NAME", "Альянс семей Арбатс
 ALLIANCE_COLOR = 0xB08D57
 MOD_EXEMPT = LEAD + ["hr_head", "senior"]  # без автонаказаний модерации и анти-спама (остальные должности — как все)
 MENTORS = LEAD + ["hr_head", "mentor"]
-FAMILY_RANKS = ["leader", "deputy", "council", "hr_head", "diplomat", "recruiter", "events", "mentor", "senior",
+TREASURY = LEAD + ["treasurer", "senior"]  # ведут и видят казну, зарплаты, штрафы
+FAMILY_RANKS = ["leader", "deputy", "council", "hr_head", "treasurer", "diplomat", "recruiter", "events", "mentor", "senior",
                 "member", "newbie"]
 FAMILY_PLUS = FAMILY_RANKS + ["friend"]
 CORE = [k for k in FAMILY_RANKS if k != "newbie"]  # семья без новичков на испытательном сроке
 BASE_RANKS = {"newbie": "🆕 Новичок", "member": "👥 Член семьи", "senior": "🛡 Старший состав"}
-STAFF_POSTS = {"recruiter": "📨 Рекрутер", "hr_head": "📋 Начальник отдела кадров", "diplomat": "🕊 Дипломат",
+STAFF_POSTS = {"recruiter": "📨 Рекрутер", "hr_head": "📋 Начальник отдела кадров", "treasurer": "💰 Казначей",
+               "diplomat": "🕊 Дипломат",
                "events": "🎉 Организатор мероприятий", "mentor": "🎓 Наставник", "council": "🏛 Совет семьи"}
 # Должности раздают Глава и заместитель (любые), а Совет и старший состав — только «младшие»:
 JUNIOR_POSTS = ["recruiter", "diplomat", "events", "mentor"]
 POST_GIVERS = LEAD + ["senior"]
-ROSTER_ORDER = ["leader", "deputy", "council", "hr_head", "diplomat", "recruiter", "events", "mentor", "senior",
+ROSTER_ORDER = ["leader", "deputy", "council", "hr_head", "treasurer", "diplomat", "recruiter", "events", "mentor", "senior",
                 "member", "newbie"]
 
 # ─────────────────────────────── СТРУКТУРА СЕРВЕРА ───────────────────────────────
@@ -204,6 +207,8 @@ STRUCTURE = [
         ("text", "modqueue", "🛡・модерация", {"topic": "ИИ-модерация: подозрительные сообщения с кнопками"}),
         ("text", "warns", "⚖️・выговоры", {}),
         ("text", "reports", "📊・отчёты-активности", {"topic": "Еженедельный отчёт бота"}),
+        ("text", "treasury_log", "💰・казна", {"view": TREASURY, "send": LEAD + ["treasurer"],
+                                              "topic": "Журнал казны: приходы, расходы, взносы, зарплаты, штрафы — пишет бот"}),
         ("voice", "council_voice", "🏛 Совет семьи", {}),
     ]},
     {"name": "🛠 СЛУЖЕБНОЕ", "view": LEAD, "send": "all", "channels": [
@@ -333,4 +338,5 @@ EXTENSIONS = [
     "cogs.diplomacy", "cogs.market", "cogs.security", "cogs.music", "cogs.context_menus",
     "cogs.streams", "cogs.appeals", "cogs.promo", "cogs.interviews", "cogs.alliance", "cogs.boosts", "cogs.assistant", "cogs.jarvis", "cogs.daily", "cogs.persona",
     "cogs.maintenance", "cogs.families", "cogs.control", "cogs.hub",
+    "cogs.treasury",
 ]

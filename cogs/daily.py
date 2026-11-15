@@ -224,9 +224,12 @@ class Daily(commands.Cog):
                         value=", ".join(f"<@{w['user_id']}> ×{w['n']}" for w in warns[:12])[:1024], inline=False)
         flags = db.one("SELECT COUNT(*) n FROM flags WHERE guild_id=? AND status='open'", gid)["n"]
         market = db.one("SELECT COUNT(*) n FROM market WHERE guild_id=? AND status='active'", gid)["n"]
+        tr = bot.get_cog("Treasury")
+        money = tr.digest_line(guild) if tr else None
         e.add_field(name="Прочее", value=f"🛡 Жалоб и флагов модерации без решения: **{flags}**\n"
                                          f"🛒 Объявлений на рынке: **{market}**\n"
-                                         f"💎 Бустов сервера: **{guild.premium_subscription_count or 0}**", inline=False)
+                                         f"💎 Бустов сервера: **{guild.premium_subscription_count or 0}**"
+                                         + (f"\n{money}" if money else ""), inline=False)
         if len(e.fields) == 1 and not flags:
             e.description += "\n\n✅ Всё разобрано: открытых заявок, обращений и просроченных сроков нет."
         e.set_footer(text=f"Сводка приходит раз в {config.DIGEST_DAYS} сут. · {bot.brand(guild, config.FOOTER)}")

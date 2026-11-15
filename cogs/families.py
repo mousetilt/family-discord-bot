@@ -24,6 +24,7 @@ HINTS = {
     "deputy": ["зам", "deputy"],
     "council": ["совет", "council"],
     "hr_head": ["кадр"],
+    "treasurer": ["казн", "финанс", "бухгалт"],
     "diplomat": ["диплом"],
     "recruiter": ["рекрут", "набор", "recruit"],
     "events": ["организ", "мероприят", "ивент", "event"],

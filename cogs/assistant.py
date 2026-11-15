@@ -22,11 +22,14 @@ from core.botcore import fmt_hours, now, now_iso, parse_dt, safe_dm
 
 log = logging.getLogger("family-bot.assistant")
 TRIGGER = re.compile(r"^\s*(швейцар)(?![а-яёa-z])\s*[,!:.\-—]?\s*", re.I)  # «Швейцария…» — не обращение
-USERS = config.ORGANIZERS + config.HR + ["senior"]
+USERS = config.ORGANIZERS + config.HR + ["senior", "treasurer"]
 MOD = config.LEAD + ["hr_head"]
 INFO = "\u200b"   # пометка «это ответ-справка»: показываем целиком и зачитываем в голосе
 # справки — только чтение, выполняются сразу
-ASK = {"law", "profile", "top", "inactive", "warns", "bl_check", "market", "digest", "queue", "roll"}
+ASK = {"law", "profile", "top", "inactive", "warns", "bl_check", "market", "digest", "queue", "roll",
+       "treasury_balance", "treasury_debtors"}
+# казна (cogs/treasury.py): запись — после «Выполнить», справки — сразу
+TREASURY_ACTS = {"treasury_in", "treasury_out", "treasury_due", "treasury_balance", "treasury_debtors", "dues_set"}
 SAFE = {"move", "disconnect", "say", "music_play", "music_skip", "music_stop", "music_volume", "listen",
         "listen_stop", "leave", "music_pause", "music_resume", "voice_mute", "voice_unmute", "remind", "invite",
         "forget"} | ASK
@@ -56,7 +59,8 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "warns
          "chronicle": config.LEAD, "invite": USERS, "forget": USERS,
          "leave": USERS, "listen": USERS, "listen_stop": USERS, "move": USERS, "disconnect": USERS, "say": USERS, "music_play": USERS, "music_skip": USERS,
          "music_stop": USERS, "music_volume": USERS, "gather": config.ORGANIZERS, "announce": config.ORGANIZERS,
-         "alarm": config.LEAD, "mute": MOD, "unmute": MOD, "warn": MOD, "purge": MOD, "rank": config.LEAD}
+         "alarm": config.LEAD, "mute": MOD, "unmute": MOD, "warn": MOD, "purge": MOD, "rank": config.LEAD,
+         **{t: config.TREASURY for t in TREASURY_ACTS}, "dues_set": LEADS}
 LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив",
          "warns": "⚖️ Выговоры", "bl_check": "⛔ Проверка ЧС", "market": "🛒 Рынок", "queue": "🎶 Очередь",
          "roll": "🎲 Кубик", "digest": "🗞 Сводка", "music_pause": "⏸ Пауза", "music_resume": "▶️ Продолжить",
@@ -69,7 +73,9 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "music_play": "🎵 Включить", "music_skip": "⏭ Пропустить трек", "music_stop": "⏹ Выключить музыку",
          "music_volume": "🔊 Громкость", "gather": "📣 Сбор", "announce": "📢 Объявление", "alarm": "🚨 Тревога",
          "mute": "🔇 Мут", "unmute": "🔊 Снять мут", "warn": "⚖️ Выговор", "purge": "🧹 Очистить чат",
-         "rank": "🔁 Ранг"}
+         "rank": "🔁 Ранг", "treasury_in": "➕ Приход в казну", "treasury_out": "➖ Расход из казны",
+         "treasury_due": "✅ Взнос", "treasury_balance": "💰 Баланс казны", "treasury_debtors": "📋 Должники",
+         "dues_set": "⚙️ Настройка взноса"}
 
 # как каналы называют в разговоре (ключ канала из настроек → слова)
 CHANNEL_HINTS = {
@@ -170,6 +176,14 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
 """
 TAIL = """Непонятно или нужного человека/канала нет — "actions": [] и короткий вопрос в "reply".
 Верни JSON: {"reply":"что скажешь или сделаешь","actions":[{"type":"...", ...}],"mood":0,"remember":""}"""
+ACT_TREASURY = """КАЗНА семьи (внутриигровые вирты; только когда просят про казну/взносы):
+- treasury_in: {"amount":"50к","user":id от кого или null,"names":["как назвал"],"reason":"за что"} — приход
+- treasury_out: {"amount":"20к","reason":"на что"} — расход из казны
+- treasury_due: {"user":id,"names":["как назвал"],"amount":"100к" или null} — человек сдал членский взнос
+- treasury_balance — сколько в казне; treasury_debtors — кто не сдал взнос
+- dues_set: {"amount":"100к","period":"week"|"month"} — настроить членский взнос
+Сумму пиши как сказал автор («50к», «1.5кк», «200000»). Для справок "reply" оставь пустым.
+"""
 SYSTEM = CORE + ACT_ALL + ACT_MGMT + TAIL        # для тех, у кого есть права
 SYSTEM_LITE = CORE + ACT_ALL + TAIL              # для рядовых: вдвое короче
 
@@ -436,7 +450,10 @@ class Assistant(commands.Cog):
         persona = self.bot.get_cog("Persona")
         card = (persona.card(ctx.author) + "\n\n") if persona else ""
         try:
-            system = self.bot.brand(ctx.author.guild, SYSTEM if self.bot.has(ctx.author, USERS) else SYSTEM_LITE)
+            system = SYSTEM if self.bot.has(ctx.author, USERS) else SYSTEM_LITE
+            if self.bot.feature(ctx.author.guild, "treasury") and self.bot.has(ctx.author, config.TREASURY):
+                system = system[:-len(TAIL)] + ACT_TREASURY + TAIL
+            system = self.bot.brand(ctx.author.guild, system)
             data = await ai.ask_json(system, f"{self.context(ctx)}\n\n{card}{self.chat(ctx)}{self.history(ctx)}"
                                                       f"Сообщение от {ctx.author.display_name}: {request}",
                                               max_tokens=500)
@@ -506,6 +523,9 @@ class Assistant(commands.Cog):
 
     def describe(self, g, a):
         t = a["type"]
+        tr = self.bot.get_cog("Treasury")
+        if t in TREASURY_ACTS and tr:
+            return tr.describe(g, a, self.one(g, a))
         who = ", ".join(m.display_name for m in self.find_members(g, a))
         if t == "move":
             to = self.find_voice(g, a.get("to"), a.get("to_name"))
@@ -666,6 +686,9 @@ class Assistant(commands.Cog):
                 return "🎶 Сейчас ничего не играет."
             return f"🎶 Играет: {p.current.title[:80]}" + (
                 "\nДальше: " + "; ".join(x.title[:50] for x in list(p.queue)[:5]) if p.queue else "\nОчередь пуста.")
+        if t in TREASURY_ACTS:
+            tr = bot.get_cog("Treasury")
+            return await tr.speech(g, me, a) if tr else "Казна не загружена."
         if t == "roll":
             top = max(2, min(1_000_000, int(a.get("max") or 6)))
             return f"🎲 Выпало **{random.randint(1, top)}** (из {top})"
@@ -678,7 +701,10 @@ class Assistant(commands.Cog):
         for a in plan[:8]:
             t = a["type"]
             try:
-                if t in ASK:
+                if t in TREASURY_ACTS and t not in ASK:
+                    tr = bot.get_cog("Treasury")
+                    out.append(await tr.speech(g, me, a, self.one(g, a)) if tr else "❌ Казна не загружена.")
+                elif t in ASK:
                     out.append(INFO + (await self.info(message, a, extra) or "Нет данных."))
                 elif t in ("music_pause", "music_resume"):
                     vc = music.vc(g) if music else None

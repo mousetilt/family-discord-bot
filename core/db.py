@@ -11,7 +11,7 @@ import discord
 
 log = logging.getLogger("family-bot.db")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3  # v3: казна (treasury_tx), штрафы (fines) — новые таблицы, данные не трогаются
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
@@ -97,6 +97,15 @@ CREATE TABLE IF NOT EXISTS alliance_bl(
     family_gid INTEGER, added_by INTEGER, created_at TEXT, active INTEGER DEFAULT 1);
 CREATE TABLE IF NOT EXISTS alliance_log(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS ai_usage(day TEXT PRIMARY KEY, calls INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS treasury_tx(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER, actor_id INTEGER,
+    amount INTEGER NOT NULL, kind TEXT NOT NULL, reason TEXT, ts INTEGER NOT NULL);  -- kind: in | out | due
+CREATE TABLE IF NOT EXISTS fines(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, actor_id INTEGER,
+    amount INTEGER NOT NULL, reason TEXT, paid INTEGER DEFAULT 0, ts INTEGER NOT NULL, paid_ts INTEGER,
+    reminded INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS ix_treasury_g ON treasury_tx(guild_id, kind, ts);
+CREATE INDEX IF NOT EXISTS ix_fines_g ON fines(guild_id, paid);
 CREATE INDEX IF NOT EXISTS ix_applications_g ON applications(guild_id, user_id);
 CREATE INDEX IF NOT EXISTS ix_warns_g ON warns(guild_id, user_id);
 CREATE INDEX IF NOT EXISTS ix_market_g ON market(guild_id, status);
