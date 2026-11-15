@@ -98,7 +98,7 @@ def find_category(bot, guild, cat):
 
 # Каналы, добавленные после первой сборки сервера: при старте бот создаёт их сам (один раз, без «Собрать сервер»).
 # Значение — модуль, без которого канал не нужен. Удалили канал руками — второй раз не создаём (флаг auto:<key>).
-AUTO_CHANNELS = {"panel": None, "treasury_log": "treasury"}
+AUTO_CHANNELS = {"panel": None, "treasury_log": "treasury", "garage": "garage"}
 
 
 async def ensure_new_channels(bot, guild):

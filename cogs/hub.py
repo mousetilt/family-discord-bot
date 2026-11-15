@@ -215,6 +215,13 @@ ACTIONS = {
     "treaty_add": ("✍️", "Заключить договор", "договор заключить", {}),
     # альянс
     "al_roster": ("🏰", "Состав альянса", "альянс состав", {}),
+    # автопарк
+    "car_list": ("🚗", "Машины семьи", "автопарк список", {}),
+    "car_add": ("➕", "Добавить машину", "автопарк добавить", {}),
+    "car_give": ("🔁", "Передать машину", "автопарк передать", {}),
+    "car_status": ("🔧", "Ремонт / в строю", "автопарк статус", {}),
+    "car_remove": ("🗑", "Списать машину", "автопарк списать", {}),
+    "car_hist": ("📜", "История машины", "автопарк история", {}),
     "al_charter": ("📜", "Устав", "альянс устав", {}),
     "al_chron": ("📖", "Летопись альянса", "альянс летопись", {}),
     "al_alarm": ("🚨", "Тревога альянсу", "альянс тревога", {}),
@@ -295,6 +302,8 @@ LEAD_SECTIONS = {
     "fines": ("🧾", "Штрафы", config.TREASURY + ["hr_head"], ["fine_add", "fine_list", "fine_paid", "fine_cancel"]),
     "kb": ("📚", "База знаний", config.LEAD + ["hr_head", "mentor"],
            ["kb_list", "kb_find", "kb_text", "kb_link", "kb_rules", "kb_update"]),
+    "garage": ("🚗", "Автопарк", config.LEAD + ["senior", "treasurer"],
+               ["car_list", "car_add", "car_give", "car_status", "car_remove", "car_hist"]),
     "setup": ("⚙️", "Настройка", SETUP_ROLES, ["wizard", "modules", "ai", "perms"]),
 }
 MEMBER_SECTIONS = {
@@ -304,6 +313,7 @@ MEMBER_SECTIONS = {
     "market": ("🛒", "Рынок", config.FAMILY_PLUS, ["mk_search", "mk_mine", "mk_sell", "mk_price"]),
     "fun": ("🔴", "Эфиры и бусты", config.FAMILY_PLUS, ["stream", "streams", "boost", "boost_role"]),
     "learn": ("🎓", "Обучение", config.FAMILY_PLUS, ["exam_try", "exam_pass", "lawyer", "kb_find"]),
+    "cars": ("🚗", "Автопарк", config.FAMILY_PLUS, ["car_list", "car_hist"]),
 }
 SECTIONS = {**LEAD_SECTIONS, **MEMBER_SECTIONS}
 # Команды, скрытые из списка «/» у рядовых участников (default_permissions) — они заменены кнопками и речью.
@@ -614,6 +624,7 @@ CHANNEL_PANELS = {
     "warns": ("🎖 Кадры", ["staff"], None),
     "modqueue": ("🛡 Модерация", ["mod"], None),
     "diplo_archive": ("🤝 Дипломатия", ["diplo"], None),
+    "garage": ("🚗 Автопарк семьи", ["garage"], "garage"),
 }
 
 
@@ -623,6 +634,9 @@ def channel_status(bot, guild, key):
         if key == "treasury_log":
             tr = bot.get_cog("Treasury")
             return tr.digest_line(guild) if tr else None
+        if key == "garage":
+            gar = bot.get_cog("Garage")
+            return gar.summary(guild, 15) if gar else None
         if key == "review":
             db = bot.db
             apps = db.one("SELECT COUNT(*) n FROM applications WHERE guild_id=? AND status IN ('new','taken','interview')",
@@ -711,8 +725,8 @@ class Hub(commands.Cog):
                 except discord.HTTPException:
                     pass
             bot.db.gdel(guild, "panel:hub_member")
-        await bot.panel_once(guild, "hub_member", "panel", repost, member, version=4)  # v2: канал только для семьи, v3: сдать экзамен
-        await bot.panel_once(guild, "hub_lead", "botcmd", repost, lead, version=4)  # v3: ручной приём, срок
+        await bot.panel_once(guild, "hub_member", "panel", repost, member, version=5)  # v2: канал только для семьи, v3: сдать экзамен
+        await bot.panel_once(guild, "hub_lead", "botcmd", repost, lead, version=5)  # v3: ручной приём, срок
         for key, (_, _, mod) in CHANNEL_PANELS.items():
             if mod and not bot.feature(guild, mod):
                 continue

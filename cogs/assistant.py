@@ -28,6 +28,7 @@ MOD = config.LEAD + ["hr_head"]
 INFO = "\u200b"   # пометка «это ответ-справка»: показываем целиком и зачитываем в голосе
 # справки — только чтение, выполняются сразу
 ASK = {"law", "profile", "top", "inactive", "warns", "bl_check", "market", "digest", "queue", "roll", "recruit_stats",
+       "car_list",
        "web_search", "missed", "draft",
        "treasury_balance", "treasury_debtors", "salary_rates", "fine_list"}
 # казна (cogs/treasury.py): запись — после «Выполнить», справки — сразу
@@ -38,10 +39,11 @@ SAFE = {"move", "disconnect", "say", "music_play", "music_skip", "music_stop", "
         "listen_stop", "leave", "music_pause", "music_resume", "voice_mute", "voice_unmute", "remind", "invite",
         "forget"} | ASK
 LEADS = ["leader", "deputy"]
+GARAGE_BY = config.LEAD + ["senior", "treasurer"]  # ведут автопарк (cogs/garage.py)
 CHANNEL_ONLY = {"purge", "slowmode", "poll"}  # работают с текущим каналом — в ЛС их не выполняем
 # болтать со Швейцаром может вся семья и друзья; им доступны только безобидные вещи
 EVERYONE = config.FAMILY_PLUS
-FOR_ALL = {"web_search", "missed", "law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
+FOR_ALL = {"car_list", "web_search", "missed", "law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
            "music_pause", "music_resume", "music_volume", "listen", "listen_stop", "leave", "invite", "forget"}
 INVITE_GAP = 10 * 60  # один человек зовёт кого-то в войс через бота не чаще раза в 10 минут
 # живые отговорки вместо казённых фраз
@@ -64,7 +66,8 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "warns
          "chronicle": config.LEAD, "invite": USERS, "forget": USERS,
          "leave": USERS, "listen": USERS, "listen_stop": USERS, "move": USERS, "disconnect": USERS, "say": USERS, "music_play": USERS, "music_skip": USERS,
          "music_stop": USERS, "music_volume": USERS, "gather": config.ORGANIZERS, "announce": config.ORGANIZERS,
-         "alarm": config.LEAD, "web_search": USERS, "missed": USERS, "draft": config.LEAD + ["events", "hr_head", "recruiter", "diplomat"],
+         "alarm": config.LEAD, "car_list": USERS, **{t: GARAGE_BY for t in ("car_add", "car_give", "car_status", "car_remove")},
+         "web_search": USERS, "missed": USERS, "draft": config.LEAD + ["events", "hr_head", "recruiter", "diplomat"],
          "accept": config.HR, "recruit_stats": config.HR + ["treasurer"], "mute": MOD, "unmute": MOD, "warn": MOD, "purge": MOD, "rank": config.LEAD,
          **{t: config.TREASURY for t in TREASURY_ACTS}, "dues_set": LEADS, "salary_rate_set": LEADS,
          "fine_add": config.TREASURY + ["hr_head"], "fine_list": config.TREASURY + ["hr_head"]}
@@ -80,7 +83,9 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "music_play": "🎵 Включить", "music_skip": "⏭ Пропустить трек", "music_stop": "⏹ Выключить музыку",
          "music_volume": "🔊 Громкость", "gather": "📣 Сбор", "announce": "📢 Объявление", "alarm": "🚨 Тревога",
          "mute": "🔇 Мут", "unmute": "🔊 Снять мут", "warn": "⚖️ Выговор", "purge": "🧹 Очистить чат",
-         "rank": "🔁 Ранг", "accept": "🛂 Принять в семью", "web_search": "🔎 Поиск", "missed": "🕰 Что я пропустил", "draft": "📝 Черновик",
+         "rank": "🔁 Ранг", "accept": "🛂 Принять в семью", "car_list": "🚗 Автопарк", "car_add": "🚗 Добавить машину",
+         "car_give": "🔁 Передать машину", "car_status": "🔧 Статус машины", "car_remove": "🗑 Списать машину",
+         "web_search": "🔎 Поиск", "missed": "🕰 Что я пропустил", "draft": "📝 Черновик",
          "recruit_stats": "📊 Статистика рекрутёров", "treasury_in": "➕ Приход в казну", "treasury_out": "➖ Расход из казны",
          "treasury_due": "✅ Взнос", "treasury_balance": "💰 Баланс казны", "treasury_debtors": "📋 Должники",
          "dues_set": "⚙️ Настройка взноса", "salary_rates": "💸 Ставки зарплат",
@@ -183,6 +188,9 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
   из списка; «напиши Платону» → id Платона, НЕ автора). Всем — {{"source":"family","text":"..."}}. Кого не нашёл в
   списке — НЕ шли автору, верни actions:[] и переспроси ник. chronicle: {{"text":"..."}} — запись в летопись
 - inactive: {{"days":1..90}}; digest — сводка по семье
+- АВТОПАРК: car_list {{"user":id или null}} — чьи машины; car_add {{"model":"Elegy","plate":"А123ВС" или null,
+  "user":id у кого или null (общая),"note":"..."}}; car_give {{"plate" или "model","user":id или null (в общий гараж)}};
+  car_status {{"plate" или "model","status":"ok"|"repair","note":"..."}}; car_remove {{"plate" или "model","reason":"..."}}
 - recruit_stats: {{"days":7}} — статистика рекрутёров: обзвоны, принятые, отклонённые («как рекрутёры за месяц» → 30)
 «нас», «всех нас», «всех» в разговоре про войс — source "my"; «всех со всего сервера» — source "all"; «меня» — автор.
 КАНАЛЫ понимай по смыслу и с ошибками распознавания речи: «на двоих», «вдвоём» — канал «На двоих», «курилка» —
@@ -784,6 +792,9 @@ class Assistant(commands.Cog):
             title_, text = await auto.draft(g, str(a.get("kind") or "announce"), str(a.get("topic") or ""))
             return (f"📝 **{title_}**\n{text}\n\n_Это черновик. Опубликовать: «Швейцар, объяви это» или `/черновик`._"
                     if text else title_)
+        if t == "car_list":
+            gar = bot.get_cog("Garage")
+            return await gar.speech(g, me, a, self.one(g, a)) if gar else "Автопарк не загружен."
         if t == "recruit_stats":
             rec = bot.get_cog("Recruit")
             try:
@@ -1088,6 +1099,9 @@ class Assistant(commands.Cog):
                         out.append("❌ Не нашёл, кого принять.")
                     else:
                         out.append((await apps.manual_accept(g, me, m, a.get("nick"), a.get("static")))[1])
+                elif t in ("car_add", "car_give", "car_status", "car_remove"):
+                    gar = bot.get_cog("Garage")
+                    out.append(await gar.speech(g, me, a, self.one(g, a)) if gar else "Автопарк не загружен.")
                 elif t == "rank":
                     m, key = next(iter(self.find_members(message.guild, a)), None), a.get("rank")
                     if not m or key not in config.BASE_RANKS:

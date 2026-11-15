@@ -195,6 +195,8 @@ STRUCTURE = [
         ("voice", "event_voice", "🎯 Мероприятие", {"speak": ORGANIZERS + ["member", "newbie", "mentor", "recruiter", "hr_head", "diplomat"]}),
         ("voice", "business", "🤫 Дела семьи", {"limit": 5, "view": CORE}),
         ("voice", "silent", "🔇 Тихий режим", {}),
+        ("text", "garage", "🚗・автопарк", {"send": LEAD + ["senior", "treasurer"],
+                                          "topic": "Машины семьи: у кого какая, ремонт, история — ведёт бот"}),
     ]},
     {"name": "🔊 ЛИЧНЫЕ КОМНАТЫ", "key": "temp_cat", "view": FAMILY_PLUS, "send": "all", "channels": []},
     {"name": "🗂 ОТДЕЛ КАДРОВ", "view": HR, "send": "all", "channels": [
@@ -340,5 +342,5 @@ EXTENSIONS = [
     "cogs.streams", "cogs.appeals", "cogs.promo", "cogs.interviews", "cogs.alliance", "cogs.boosts", "cogs.assistant", "cogs.jarvis", "cogs.daily", "cogs.persona",
     "cogs.maintenance", "cogs.families", "cogs.control", "cogs.hub",
     "cogs.treasury", "cogs.recruit", "cogs.nickcheck",
-    "cogs.automation",
+    "cogs.automation", "cogs.garage",
 ]
