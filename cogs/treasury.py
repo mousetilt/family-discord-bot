@@ -16,11 +16,13 @@ from discord import app_commands
 from discord.ext import commands
 
 from core import config
-from core.botcore import now
+from core.botcore import now, safe_dm
 
 log = logging.getLogger("family-bot.treasury")
 TREASURY = config.TREASURY
-DUES_SETTERS = ["leader", "deputy"]
+DUES_SETTERS = ["leader", "deputy"]  # взнос и ставки зарплат настраивают Глава и заместитель
+RATE_ROLES = list(config.ROSTER_ORDER)  # роли, на которые можно поставить ставку зарплаты
+ROLE_CHOICES = [app_commands.Choice(name=config.ROLE_NAMES[k], value=k) for k in RATE_ROLES][:25]
 MAX_AMOUNT = 10 ** 12
 PERIODS = {"week": "неделю", "month": "месяц"}
 _MULT = [("ккк", 10 ** 9), ("kkk", 10 ** 9), ("млрд", 10 ** 9), ("кк", 10 ** 6), ("kk", 10 ** 6), ("млн", 10 ** 6),
@@ -103,6 +105,32 @@ class OverdraftView(discord.ui.View):
         await inter.response.edit_message(content="Отменено. Казна не тронута.", view=None)
 
 
+class PayView(discord.ui.View):
+    """Подтверждение выплаты зарплат (показывает список и сумму)."""
+
+    def __init__(self, cog, author_id, pairs, reason, ranks=False):
+        super().__init__(timeout=300)
+        self.cog, self.author_id, self.pairs, self.reason, self.ranks = cog, author_id, pairs, reason, ranks
+
+    async def interaction_check(self, inter):
+        if inter.user.id != self.author_id:
+            await inter.response.send_message("Подтвердить может только тот, кто проводит выплату.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Выплатить", style=discord.ButtonStyle.success, emoji="💸")
+    async def yes(self, inter, _):
+        self.stop()
+        await inter.response.edit_message(content="💸 Выплачиваю…", view=None)
+        text = await self.cog.payout(inter.guild, inter.user, self.pairs, self.reason, self.ranks)
+        await inter.edit_original_response(content=text)
+
+    @discord.ui.button(label="Отмена", style=discord.ButtonStyle.secondary)
+    async def no(self, inter, _):
+        self.stop()
+        await inter.response.edit_message(content="Отменено. Казна не тронута.", view=None)
+
+
 def treasury_only():
     async def pred(inter: discord.Interaction):
         cog = inter.client.get_cog("Treasury")
@@ -149,11 +177,13 @@ class Treasury(commands.Cog):
         period = db.gget(guild, "dues:period") or "week"
         return amount, (period if period in PERIODS else "week")
 
-    async def tx(self, guild, kind, amount, actor, user_id=None, reason=""):
+    async def tx(self, guild, kind, amount, actor, user_id=None, reason="", quiet=False):
         reason = clean(reason, 200)
         cur = self.bot.db.q("INSERT INTO treasury_tx(guild_id, user_id, actor_id, amount, kind, reason, ts) "
                             "VALUES(?,?,?,?,?,?,?)", guild.id, user_id, actor.id, int(amount), kind, reason,
                             int(now().timestamp()))
+        if quiet:  # пачку (зарплаты) пишем в журнал одной записью
+            return cur.lastrowid
         sign = {"in": "➕ Приход", "out": "➖ Расход", "due": "✅ Взнос"}[kind]
         who = f" от <@{user_id}>" if user_id and kind != "out" else ""
         text = (f"{sign} **{fmt(amount)}**{who}" + (f" — {reason}" if reason else "")
@@ -276,6 +306,92 @@ class Treasury(commands.Cog):
             line += f" · должников по взносу: {len(self.debtors(guild))}"
         return line
 
+    # ---------- зарплаты ----------
+    def has_role(self, member, key):
+        """Реально ли у человека роль key (без «админ видит всё», как в bot.has)."""
+        ids = self.bot.role_ids(member.guild, [key])
+        return any(r.id in ids for r in member.roles)
+
+    def rates(self, guild):
+        out = {}
+        for k in RATE_ROLES:
+            try:
+                v = int(self.bot.db.gget(guild, f"salary:{k}") or 0)
+            except ValueError:
+                v = 0
+            if v > 0:
+                out[k] = v
+        return out
+
+    def set_rate(self, guild, key, amount):
+        if amount:
+            self.bot.db.gset(guild, f"salary:{key}", int(amount))
+            return f"💸 Ставка «{config.ROLE_NAMES[key]}»: **{fmt(amount)}**."
+        self.bot.db.gdel(guild, f"salary:{key}")
+        return f"💸 Ставка «{config.ROLE_NAMES[key]}» убрана."
+
+    def payroll(self, guild):
+        """Зарплата по ставкам: каждому — наибольшая ставка из его ролей. Отпускники не получают."""
+        rates, vac = self.rates(guild), self.bot.role(guild, "vacation")
+        out = []
+        for m in self.bot.family_members(guild):
+            if vac and vac in m.roles:
+                continue
+            best = max((v for k, v in rates.items() if self.has_role(m, k)), default=0)
+            if best:
+                out.append((m, best))
+        return out
+
+    def role_members(self, guild, key):
+        vac = self.bot.role(guild, "vacation")
+        return [m for m in self.bot.family_members(guild) if self.has_role(m, key) and not (vac and vac in m.roles)]
+
+    def rates_text(self, guild):
+        rates = self.rates(guild)
+        if not rates:
+            return ("💸 Ставки не заданы. Глава/зам: кнопка «Ставка» или «Швейцар, ставка рекрутёрам 30к». "
+                    "Каждый получает наибольшую ставку из своих ролей.")
+        pay = self.payroll(guild)
+        lines = ["💸 Ставки (каждому — наибольшая из его ролей):"]
+        lines += [f"• {config.ROLE_NAMES[k]} — {fmt(v)}" for k, v in rates.items()]
+        lines.append(f"Выплата по ставкам сейчас: {len(pay)} чел. на **{fmt(sum(a for _, a in pay))}** · "
+                     f"в казне {fmt(self.balance(guild.id))}")
+        last = self.bot.db.gget(guild, "salary:last")
+        if last:
+            lines.append(f"Последняя выплата по ставкам: <t:{last}:R>")
+        return "\n".join(lines)
+
+    def pay_preview(self, guild, pairs, reason):
+        total = sum(a for _, a in pairs)
+        bal = self.balance(guild.id)
+        names = ", ".join(f"{m.display_name} ({fmt(a)})" for m, a in pairs[:20]) + ("…" if len(pairs) > 20 else "")
+        text = f"💸 Выплата «{clean(reason, 80)}»: {len(pairs)} чел. на **{fmt(total)}**\n{names}"
+        if total > bal:
+            text += f"\n⚠️ В казне только {fmt(bal)} — казна уйдёт в минус."
+        return text
+
+    async def payout(self, guild, actor, pairs, reason, ranks=False):
+        """Выплаты из казны: каждому — расход с пометкой «зарплата», уведомление в ЛС, одна запись в журнал."""
+        reason = clean(reason, 120) or "зарплата"
+        pairs = [(m, int(a)) for m, a in pairs if m and a and a > 0]
+        if not pairs:
+            return "❌ Некому платить: никого не нашёл или ставки не заданы."
+        for m, a in pairs:
+            await self.tx(guild, "out", a, actor, m.id, f"зарплата: {reason}", quiet=True)
+        total = sum(a for _, a in pairs)
+        if ranks:
+            self.bot.db.gset(guild, "salary:last", int(now().timestamp()))
+        fam = self.bot.family(guild)["name"]
+        for m, a in pairs:
+            await safe_dm(m, f"💸 Тебе выплата из казны семьи {fam}: **{fmt(a)}** — {reason}.")
+        bal = self.balance(guild.id)
+        await self.journal(guild, f"💸 Выплата «{reason}»: {len(pairs)} чел. на **{fmt(total)}**\n"
+                                  + ", ".join(f"{m.mention} {fmt(a)}" for m, a in pairs[:30])
+                                  + f"\nПровёл: {actor.mention} · баланс: **{fmt(bal)}**", 0xFB8C00)
+        log.info("Казна «%s»: выплата %s × %d = %s (%s)", guild.name, reason, len(pairs), total, actor)
+        return (f"💸 Выплачено {len(pairs)} чел. на **{fmt(total)}** — {reason}. Баланс: **{fmt(bal)}**"
+                + (" ⚠️ казна в минусе!" if bal < 0 else "."))
+
     # ---------- речь (вызывает assistant.py) ----------
     def describe(self, guild, a, who=None):
         """Строка для окна «Подтверди»."""
@@ -291,20 +407,59 @@ class Treasury(commands.Cog):
             return f"✅ Взнос {who.display_name if who else '❓кто'}: {s if amount else 'сумма взноса по умолчанию'}"
         if t == "dues_set":
             return f"⚙️ Взнос {s} в {PERIODS.get(a.get('period'), 'неделю')}"
+        if t == "salary_rate_set":
+            key = a.get("role")
+            return f"💸 Ставка «{config.ROLE_NAMES.get(key, '❓роль')}»: {s if amount else 'убрать'}"
+        if t == "salary_ranks":
+            return self.pay_preview(guild, self.payroll(guild), "по ставкам")
+        if t == "salary_role":
+            key = a.get("role")
+            if key not in RATE_ROLES or not amount:
+                return f"💸 Выплата роли — {config.ROLE_NAMES.get(key, '❓роль')} по {s}"
+            return self.pay_preview(guild, [(m, amount) for m in self.role_members(guild, key)],
+                                    a.get("reason") or config.ROLE_NAMES[key])
+        if t == "salary_pay":
+            people = a.get("_members") or ([who] if who else [])
+            if not people or not amount:
+                return f"💸 Выплата {', '.join(m.display_name for m in people) or '❓кому'} по {s}"
+            return self.pay_preview(guild, [(m, amount) for m in people], a.get("reason") or "разовая выплата")
         return t
 
     async def speech(self, guild, actor, a, who=None):
         """Выполняет действие казны из речи. Возвращает строку-итог."""
         t = a.get("type")
         act = {"treasury_due": "dues", "dues_set": "dues", "treasury_debtors": "dues"}.get(t)
-        why = self.why_not(guild, actor, act, DUES_SETTERS if t == "dues_set" else TREASURY)
+        if t.startswith("salary_"):
+            act = "salary"
+        why = self.why_not(guild, actor, act, DUES_SETTERS if t in ("dues_set", "salary_rate_set") else TREASURY)
         if why:
             return why
         if t == "treasury_balance":
             return self.balance_text(guild)
         if t == "treasury_debtors":
             return self.debtors_text(guild)
+        if t == "salary_rates":
+            return self.rates_text(guild)
         amount = parse_amount(a.get("amount"))
+        if t == "salary_ranks":
+            return await self.payout(guild, actor, self.payroll(guild), clean(a.get("reason"), 80) or "по ставкам",
+                                     ranks=True)
+        if t == "salary_rate_set":
+            if a.get("role") not in RATE_ROLES:
+                return "❌ Не понял, для какой роли ставка."
+            return self.set_rate(guild, a["role"], amount)
+        if t in ("salary_role", "salary_pay") and not amount:
+            return "❌ Не понял сумму на человека. Пиши как в игре: 50к, 1.5кк."
+        if t == "salary_role":
+            if a.get("role") not in RATE_ROLES:
+                return "❌ Не понял, какой роли платить."
+            return await self.payout(guild, actor, [(m, amount) for m in self.role_members(guild, a["role"])],
+                                     a.get("reason") or config.ROLE_NAMES[a["role"]])
+        if t == "salary_pay":
+            people = a.get("_members") or ([who] if who else [])
+            if not people:
+                return "❌ Не понял, кому платить — назови ник точнее."
+            return await self.payout(guild, actor, [(m, amount) for m in people], a.get("reason") or "разовая выплата")
         if t == "treasury_due":
             if not who:
                 return "❌ Не понял, кто сдал взнос — назови ник точнее."
@@ -409,6 +564,73 @@ class Treasury(commands.Cog):
             text = self.set_dues(inter.guild, n, period.value)
             await self.journal(inter.guild, f"{text}\nНастроил: {inter.user.mention}")
             await inter.response.send_message(text, ephemeral=True)
+
+    # ---------- зарплаты ----------
+    @group.command(name="ставки", description="Ставки зарплат по ролям и сколько уйдёт на выплату")
+    @treasury_only()
+    async def c_rates(self, inter: discord.Interaction):
+        if await self.gate(inter, "salary"):
+            await inter.response.send_message(self.rates_text(inter.guild), ephemeral=True)
+
+    @group.command(name="ставка", description="Ставка зарплаты для роли (Глава/зам). 0 — убрать")
+    @app_commands.rename(role="роль", amount="сумма")
+    @app_commands.choices(role=ROLE_CHOICES)
+    @treasury_only()
+    async def c_rate(self, inter: discord.Interaction, role: app_commands.Choice[str], amount: str):
+        if not await self.gate(inter, "salary", DUES_SETTERS):
+            return
+        n = 0 if str(amount).strip() in ("0", "-") else await self._amount(inter, amount)
+        if n is None:
+            return
+        text = self.set_rate(inter.guild, role.value, n)
+        await self.journal(inter.guild, f"{text}\nНастроил: {inter.user.mention}")
+        await inter.response.send_message(text, ephemeral=True)
+
+    @group.command(name="зарплата", description="Выплатить зарплату всем по ставкам (с подтверждением)")
+    @treasury_only()
+    async def c_payroll(self, inter: discord.Interaction):
+        if not await self.gate(inter, "salary"):
+            return
+        pairs = self.payroll(inter.guild)
+        if not pairs:
+            return await inter.response.send_message(self.rates_text(inter.guild), ephemeral=True)
+        text = self.pay_preview(inter.guild, pairs, "по ставкам")
+        last = self.bot.db.gget(inter.guild, "salary:last")
+        if last and int(now().timestamp()) - int(last) < 6 * 86400:
+            text += f"\n⚠️ По ставкам уже платили <t:{last}:R> — не задвоить бы."
+        await inter.response.send_message(text[:1900], view=PayView(self, inter.user.id, pairs, "по ставкам", True),
+                                          ephemeral=True)
+
+    @group.command(name="выплатить", description="Разовая выплата участнику: за ивент, за работу…")
+    @app_commands.rename(member="участник", amount="сумма", reason="за_что")
+    @treasury_only()
+    async def c_pay(self, inter: discord.Interaction, member: discord.Member, amount: str, reason: str):
+        if not await self.gate(inter, "salary"):
+            return
+        n = await self._amount(inter, amount)
+        if not n:
+            return
+        pairs = [(member, n)]
+        if n > self.balance(inter.guild.id):
+            return await inter.response.send_message(self.pay_preview(inter.guild, pairs, reason),
+                                                     view=PayView(self, inter.user.id, pairs, reason), ephemeral=True)
+        await inter.response.send_message(await self.payout(inter.guild, inter.user, pairs, reason), ephemeral=True)
+
+    @group.command(name="выплатить-роли", description="Выплатить всем с ролью по одной сумме (организаторам, рекрутерам…)")
+    @app_commands.rename(role="роль", amount="сумма", reason="за_что")
+    @app_commands.choices(role=ROLE_CHOICES)
+    @treasury_only()
+    async def c_pay_role(self, inter: discord.Interaction, role: app_commands.Choice[str], amount: str, reason: str):
+        if not await self.gate(inter, "salary"):
+            return
+        n = await self._amount(inter, amount)
+        if not n:
+            return
+        pairs = [(m, n) for m in self.role_members(inter.guild, role.value)]
+        if not pairs:
+            return await inter.response.send_message(f"❌ С ролью «{role.name}» в семье никого нет.", ephemeral=True)
+        await inter.response.send_message(self.pay_preview(inter.guild, pairs, reason)[:1900],
+                                          view=PayView(self, inter.user.id, pairs, reason), ephemeral=True)
 
 
 async def setup(bot):
