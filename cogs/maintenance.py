@@ -74,6 +74,16 @@ class Maintenance(commands.Cog):
         lines = [f"**Состояние «{self.bot.user.display_name}»**"]
         lines.append(f"⏱ Аптайм: {_fmt_uptime(time.time() - START_TS)}")
         lines.append(f"🌐 Серверов: {len(self.bot.guilds)} · пинг: {round(self.bot.latency * 1000)} мс")
+        # версия кода — чтобы видеть, дошло ли обновление (сверить с последним коммитом на GitHub)
+        ver = "неизвестна (нет git)"
+        if os.path.isdir(os.path.join(ROOT, ".git")) and shutil.which("git"):
+            try:
+                code, out = await asyncio.wait_for(_run(["git", "log", "-1", "--format=%h · %s · %cr"]), 5)
+                if code == 0 and out.strip():
+                    ver = f"`{out.strip()[:120]}`"
+            except Exception:
+                pass
+        lines.append(f"🧩 Версия кода: {ver}")
         # ИИ
         if ai and getattr(ai, "on", False):
             lines.append(f"🤖 ИИ: **{ai.name}**, модель `{ai.models[0]}`"
