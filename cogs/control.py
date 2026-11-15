@@ -186,9 +186,6 @@ class Control(commands.Cog):
     async def ai_key(self, inter: discord.Interaction):
         if not allowed(self.bot, inter):
             return await self._deny(inter)
-        if self.bot.is_home(inter.guild):
-            return await inter.response.send_message(
-                "🏠 Это домашний сервер: ИИ работает на ключах хоста (вкладка «Окружение» на хостинге).", ephemeral=True)
         await inter.response.send_modal(KeyModal(self.bot))
 
     @ai_group.command(name="статус", description="Какой ИИ работает у семьи и сколько запросов сегодня")
@@ -198,12 +195,15 @@ class Control(commands.Cog):
         g, ai = inter.guild, self.bot.ai_for(inter.guild)
         lines = [f"🤖 ИИ семьи: **{ai.name if ai.on else 'выключен'}**"
                  + (f", резерв — {NAMES[ai.backup]}" if ai.on and ai.backup else "")]
-        if self.bot.is_home(g):
-            lines.append("🏠 Домашний сервер — ключи хоста.")
+        home = self.bot.is_home(g)
+        for prov, how in PROVIDERS.items():
+            k = self.bot.db.gget(g, f"ai:{prov}")
+            host = home and self.bot.ai.keys.get(prov)
+            state = mask(k) + " (свой)" if k else (f"{mask(host)} (ключ хостинга)" if host else "нет")
+            lines.append(f"{'🔑' if k or host else '▫️'} {NAMES[prov]}: {state}  ·  {how}")
+        if home:
+            lines.append("🏠 Домашний сервер: ключ из `/ии ключ` главнее ключа хостинга, ключ хостинга — запасной.")
         else:
-            for prov, how in PROVIDERS.items():
-                k = self.bot.db.gget(g, f"ai:{prov}")
-                lines.append(f"{'🔑' if k else '▫️'} {NAMES[prov]}: {mask(k) if k else 'нет'}  ·  {how}")
             if not ai.on:
                 lines.append("\nБез ключа ИИ-функции (Швейцар, юрист, ИИ-модерация, голос) не работают. Ключ бесплатный — "
                              "`/ии ключ`. Голосовым командам нужен именно Groq.")

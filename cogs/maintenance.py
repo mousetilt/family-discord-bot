@@ -264,7 +264,7 @@ class Maintenance(commands.Cog):
     async def status_cmd(self, inter: discord.Interaction):
         if not self._allowed(inter):
             return await self._deny(inter)
-        ai = getattr(self.bot, "ai", None)
+        ai = self.bot.ai_for(inter.guild)  # на домашнем — с учётом ключей из /ии ключ
         lines = [f"**Состояние «{self.bot.user.display_name}»**"]
         lines.append(f"⏱ Аптайм: {_fmt_uptime(time.time() - START_TS)}")
         lines.append(f"🌐 Серверов: {len(self.bot.guilds)} · пинг: {round(self.bot.latency * 1000)} мс")

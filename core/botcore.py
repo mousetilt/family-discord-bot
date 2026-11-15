@@ -180,19 +180,24 @@ class FamilyBot(commands.Bot):
 
     # ---------- ИИ и модули семьи ----------
     def ai_for(self, guild):
-        """ИИ этой семьи. Домашний сервер — ключи хоста; остальные — только свои ключи (/ии ключ), иначе ИИ выключен."""
+        """ИИ этой семьи. Домашний сервер — ключи из /ии ключ, если заданы (главнее), иначе/в запас — ключи хоста;
+        остальные — только свои ключи (/ии ключ), иначе ИИ выключен."""
         if guild is None:
             return self.ai
         gid = guild_id_of(guild)
-        if self.home_id is None or gid == self.home_id:
-            return self.ai
         keys = {p: self.db.gget(gid, f"ai:{p}") for p in ("groq", "gemini")}
         keys = {p: k for p, k in keys.items() if k}
-        sig = tuple(sorted(keys.items()))
+        home = self.home_id is None or gid == self.home_id
+        if home:
+            if not keys:
+                return self.ai
+            # свой ключ главнее; ключ хоста другого провайдера — запасной
+            keys = {**{p: k for p, k in self.ai.keys.items() if p in ("groq", "gemini")}, **keys}
+        sig = (home,) + tuple(sorted(keys.items()))
         cached = self._ai_cache.get(gid)
         if cached and cached[0] == sig:
             return cached[1]
-        ai = AI(self.db, keys=keys, scope=gid)
+        ai = AI(self.db, keys=keys, scope=None if home else gid)  # дневной лимит домашнего — общий, как раньше
         self._ai_cache[gid] = (sig, ai)
         return ai
 
