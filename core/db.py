@@ -119,6 +119,9 @@ MIGRATIONS = {
                      "manual": "INTEGER DEFAULT 0"},  # 1 — принят вручную, минуя экзамен
     "mentorships": {"reminded": "INTEGER DEFAULT 0"},  # 1 — напомнили на середине срока, 2 — за сутки до конца
     "events": {"created_at": "TEXT"},
+    # семья альянса без нашего бота: guild_id — условный отрицательный номер, участники — по роли в штабе,
+    # leaders — JSON-список Discord ID её руководства (голосуют из штаба)
+    "alliance_families": {"external": "INTEGER DEFAULT 0", "leaders": "TEXT"},
 }
 
 # ---- миграция v1 → v2 (всё на guild_id) ----

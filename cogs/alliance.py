@@ -5,7 +5,11 @@
 • Совет альянса: главы семей голосуют кнопками, у каждой семьи один голос, решение — большинством.
 • Общий чёрный список: виден всем, бот предупреждает при входе и при заявке.
 • Тревога альянса, устав, летопись, вступление новой семьи через голосование.
-• Автороль «🤝 <Семья>» у нас для участников союзных семей — бот сам видит их роль на их сервере."""
+• Автороль «🤝 <Семья>» у нас для участников союзных семей — бот сам видит их роль на их сервере.
+• Семья БЕЗ нашего бота (external=1): живёт только в штабе. guild_id — условный отрицательный номер (EXT_BASE и ниже),
+  участники — у кого роль «🤝 <Семья>» в штабе (её выдаёт руководство этой семьи: /альянс участники), руководство —
+  список leaders (Discord ID), голосует из штаба. Вступает так же — голосованием совета (/альянс добавить-семью).
+  ВАЖНО: bot.is_home(None) == True — для таких семей проверять is_ext() раньше, чем is_home(get_guild(...))."""
 import asyncio
 import datetime as dt
 import json
@@ -38,6 +42,7 @@ BOT_PERMS = discord.Permissions(view_channel=True, send_messages=True, embed_lin
                                 read_message_history=True, manage_channels=True, manage_roles=True,
                                 manage_webhooks=True, mention_everyone=True, add_reactions=True, connect=True,
                                 speak=True, move_members=True, create_instant_invite=True)
+EXT_BASE = -1000  # условные номера семей без бота: -1000, -1001, … (не пересекаются с ID серверов и ORPHAN=-1)
 ALARM_COOLDOWN = 600
 
 
@@ -82,6 +87,8 @@ class CharterModal(discord.ui.Modal, title="📜 Новая редакция у�
 class Alliance(commands.Cog):
     group = app_commands.Group(name="альянс", description=f"{A}: состав, совет, общий ЧС, тревога")
     blg = app_commands.Group(name="чс", description="Общий чёрный список альянса", parent=group)
+    members_grp = app_commands.Group(name="участники", description="Семья без бота: кто в ней (роль в штабе)",
+                                     parent=group)
 
     def __init__(self, bot):
         self.bot = bot
@@ -102,6 +109,34 @@ class Alliance(commands.Cog):
 
     def active(self):
         return self.bot.db.all("SELECT * FROM alliance_families WHERE status='active' ORDER BY joined_at")
+
+    # ---------- семьи без бота (живут в штабе) ----------
+    @staticmethod
+    def is_ext(row):
+        return bool(row and row["external"])
+
+    @staticmethod
+    def ext_leaders(row):
+        try:
+            return {int(x) for x in json.loads(row["leaders"] or "[]")}
+        except (TypeError, ValueError):
+            return set()
+
+    def hub_fam_role(self, row):
+        hub = self.hub()
+        rid = self.bot.db.get(f"hub:fam:{row['guild_id']}")
+        return hub.get_role(int(rid)) if hub and rid else None
+
+    def ext_member(self, row, uid):
+        """В семье без бота: руководство или роль семьи в штабе."""
+        if uid in self.ext_leaders(row):
+            return True
+        r = self.hub_fam_role(row)
+        return bool(r and any(m.id == uid for m in r.members))
+
+    def new_ext_id(self):
+        r = self.bot.db.one("SELECT MIN(guild_id) m FROM alliance_families WHERE guild_id<=?", EXT_BASE)
+        return min(EXT_BASE, (r["m"] or EXT_BASE + 1) - 1) if r and r["m"] is not None else EXT_BASE
 
     def home(self):
         return self.bot.get_guild(self.bot.home_id) if self.bot.home_id else None
@@ -128,6 +163,10 @@ class Alliance(commands.Cog):
         """Семьи альянса, в которых состоит человек (бот видит это на их серверах)."""
         out = []
         for row in self.active():
+            if self.is_ext(row):
+                if self.ext_member(row, uid):
+                    out.append(row)
+                continue
             g = self.bot.get_guild(row["guild_id"])
             m = g.get_member(uid) if g else None
             if not m:
@@ -143,6 +182,10 @@ class Alliance(commands.Cog):
     def leader_family(self, uid):
         """Семья, в руководстве которой человек (для голосования из штаба)."""
         for row in self.active():
+            if self.is_ext(row):
+                if uid in self.ext_leaders(row):
+                    return row
+                continue
             g = self.bot.get_guild(row["guild_id"])
             m = g.get_member(uid) if g else None
             if not m:
@@ -186,6 +229,9 @@ class Alliance(commands.Cog):
         return row["family"] if row else g.name
 
     def members_count(self, row):
+        if self.is_ext(row):
+            r = self.hub_fam_role(row)
+            return len({m.id for m in (r.members if r else []) if not m.bot} | self.ext_leaders(row))
         g = self.bot.get_guild(row["guild_id"])
         if not g:
             return 0
@@ -257,7 +303,7 @@ class Alliance(commands.Cog):
 
     async def ensure_ally_role(self, row):
         home = self.home()
-        if not home or self.bot.is_home(self.bot.get_guild(row["guild_id"])):
+        if not home or (not self.is_ext(row) and self.bot.is_home(self.bot.get_guild(row["guild_id"]))):
             return
         r = home.get_role(row["ally_role_id"]) if row["ally_role_id"] else None
         if not r:
@@ -403,14 +449,19 @@ class Alliance(commands.Cog):
         if not home or member.guild.id != home.id or member.bot:
             return
         for row in self.active():
-            if self.bot.is_home(self.bot.get_guild(row["guild_id"])) or not row["ally_role_id"]:
+            if not row["ally_role_id"]:
                 continue
-            g = self.bot.get_guild(row["guild_id"])
             role = home.get_role(row["ally_role_id"])
-            if not g or not role:
+            if not role:
                 continue
-            fm = g.get_member(member.id)
-            is_member = bool(fm and row["family_role_id"] and any(r.id == row["family_role_id"] for r in fm.roles))
+            if self.is_ext(row):
+                is_member = self.ext_member(row, member.id)
+            else:
+                g = self.bot.get_guild(row["guild_id"])
+                if not g or self.bot.is_home(g):
+                    continue
+                fm = g.get_member(member.id)
+                is_member = bool(fm and row["family_role_id"] and any(r.id == row["family_role_id"] for r in fm.roles))
             try:
                 if is_member and role not in member.roles:
                     await member.add_roles(role, reason=f"{A}: состоит в семье {row['family']}")
@@ -806,7 +857,8 @@ class Alliance(commands.Cog):
                 f"👋 Штаб «{A}»",
                 "Здесь собираются все семьи альянса: общий чат, общие голосовые, совет.\n\n"
                 "**Доступ выдаётся автоматически:** бот видит, в какой семье альянса ты состоишь, и даёт роль "
-                "этой семьи. Руководство семей получает роль «🏛 Совет альянса».\n\n"
+                "этой семьи. Руководство семей получает роль «🏛 Совет альянса».\n"
+                "Семьи без нашего бота: роль выдаёт их руководство — `/альянс участники добавить`.\n\n"
                 "Если роли нет — ты не состоишь ни в одной семье альянса. Сначала вступи в семью.\n\n"
                 "Семьи: " + (", ".join(r["family"] for r in self.active()) or "—")))
             await self.pinned(g, "charter", self.embed(f"📜 Устав «{A}»", self.charter()[:4000]))
@@ -982,6 +1034,135 @@ class Alliance(commands.Cog):
         await inter.followup.send(f"📨 Заявка семьи **{family}** отправлена. Совет альянса голосует (№{vid}, до 48 ч).",
                                   ephemeral=True)
 
+    @group.command(name="добавить-семью", description="Принять в альянс семью БЕЗ нашего бота (она будет в штабе)")
+    @app_commands.rename(family="семья", leader="глава", deputy="заместитель")
+    @app_commands.describe(family="Название семьи", leader="Глава семьи — должен быть в штабе альянса",
+                           deputy="Заместитель (необязательно) — тоже голосует в совете")
+    async def add_ext(self, inter: discord.Interaction, family: str, leader: discord.Member,
+                      deputy: discord.Member = None):
+        if not await self.need_leader(inter):
+            return
+        hub = self.hub()
+        if not hub:
+            return await inter.response.send_message(
+                "Семьи без бота живут в штабе альянса, а штаба ещё нет. Создай отдельный сервер, добавь туда бота "
+                "(`/альянс пригласить`) и запусти там `/альянс штаб`.", ephemeral=True)
+        ids = [m.id for m in (leader, deputy) if m and not m.bot]
+        if not ids:
+            return await inter.response.send_message("Глава должен быть человеком, а не ботом.", ephemeral=True)
+        missing = [m for m in (leader, deputy) if m and not hub.get_member(m.id)]
+        if missing:
+            return await inter.response.send_message(
+                f"❌ {', '.join(m.display_name for m in missing)} ещё не в штабе — пусть зайдёт: "
+                f"{self.bot.db.get('hub:invite') or '/альянс состав'}", ephemeral=True)
+        family = " ".join(family.split())[:40]
+        db = self.bot.db
+        if db.one("SELECT 1 FROM alliance_families WHERE lower(family)=lower(?) AND status IN ('active','pending')",
+                  family):
+            return await inter.response.send_message("Семья с таким названием уже в альянсе или на голосовании.",
+                                                     ephemeral=True)
+        for uid in ids:
+            other = self.leader_family(uid)
+            if other:
+                return await inter.response.send_message(f"<@{uid}> уже в руководстве семьи {other['family']}.",
+                                                         ephemeral=True)
+        await inter.response.defer(ephemeral=True, thinking=True)
+        gid = self.new_ext_id()
+        db.q("INSERT INTO alliance_families(guild_id, family, status, external, leaders, added_by) "
+             "VALUES(?,?, 'pending', 1, ?, ?)", gid, family, json.dumps(ids), inter.user.id)
+        vid = await self.start_vote(inter.user, inter.guild, "join", f"Семья {family} (без бота, в штабе)",
+                                    "Руководство: " + ", ".join(f"<@{u}>" for u in ids) + f"\nПредложил: {inter.user}\n"
+                                    "Своего сервера с ботом у семьи нет — участвует через штаб альянса.", gid, 48)
+        await inter.followup.send(f"📨 Семья **{family}** вынесена на голосование совета (№{vid}, до 48 ч). После "
+                                  "принятия её руководство получит роль совета в штабе и сможет выдавать роль семьи "
+                                  "своим: `/альянс участники добавить`.", ephemeral=True)
+
+    async def ext_gate(self, inter):
+        """Руководство семьи без бота, в штабе. Возвращает её строку или None (ответ уже отправлен)."""
+        if not self.is_hub(inter.guild):
+            await inter.response.send_message("Это делается в штабе альянса.", ephemeral=True)
+            return None
+        row = self.leader_family(inter.user.id)
+        if not row or not self.is_ext(row):
+            await inter.response.send_message("⛔ Только руководство семьи, которая в альянсе без своего бота. "
+                                              "Семьи с ботом получают роли автоматически.", ephemeral=True)
+            return None
+        return row
+
+    @members_grp.command(name="добавить", description="Дать человеку роль вашей семьи в штабе")
+    @app_commands.rename(member="кого")
+    async def ext_add(self, inter: discord.Interaction, member: discord.Member):
+        row = await self.ext_gate(inter)
+        if not row:
+            return
+        if member.bot:
+            return await inter.response.send_message("Ботов в семью не берём.", ephemeral=True)
+        if self.bot.alliance_bl_find(discord_id=member.id):
+            return await inter.response.send_message("⛔ Этот человек в ЧС альянса.", ephemeral=True)
+        others = [f["family"] for f in self.member_families(member.id) if f["guild_id"] != row["guild_id"]]
+        if others:
+            return await inter.response.send_message(f"Он уже в семье {', '.join(others)}.", ephemeral=True)
+        r = self.hub_fam_role(row)
+        if not r:
+            return await inter.response.send_message("Роль семьи в штабе не найдена — руководство альянса: "
+                                                     "`/альянс штаб` (обновить штаб).", ephemeral=True)
+        try:
+            await member.add_roles(r, reason=f"{A}: принят в семью {row['family']} ({inter.user})")
+        except discord.HTTPException:
+            return await inter.response.send_message("❌ Не хватает прав выдать роль.", ephemeral=True)
+        await inter.response.send_message(f"✅ {member.mention} — в семье **{row['family']}**.", ephemeral=True)
+        await self.record(f"👤 {member.display_name} принят в семью **{row['family']}** (штаб).")
+        await self.resync(member.id)
+
+    @members_grp.command(name="убрать", description="Снять с человека роль вашей семьи в штабе")
+    @app_commands.rename(member="кого")
+    async def ext_remove(self, inter: discord.Interaction, member: discord.Member):
+        row = await self.ext_gate(inter)
+        if not row:
+            return
+        if member.id in self.ext_leaders(row):
+            return await inter.response.send_message("Это руководство семьи — сначала `/альянс участники руководство`.",
+                                                     ephemeral=True)
+        r = self.hub_fam_role(row)
+        if r and r in member.roles:
+            try:
+                await member.remove_roles(r, reason=f"{A}: вышел из семьи {row['family']} ({inter.user})")
+            except discord.HTTPException:
+                return await inter.response.send_message("❌ Не хватает прав снять роль.", ephemeral=True)
+        await inter.response.send_message(f"✅ {member.mention} больше не в семье **{row['family']}**.", ephemeral=True)
+        await self.resync(member.id)
+
+    @members_grp.command(name="руководство", description="Добавить или убрать члена руководства вашей семьи (голос в совете)")
+    @app_commands.rename(member="кого", action="действие")
+    @app_commands.choices(action=[app_commands.Choice(name="добавить в руководство", value="add"),
+                                  app_commands.Choice(name="убрать из руководства", value="del")])
+    async def ext_lead(self, inter: discord.Interaction, member: discord.Member, action: app_commands.Choice[str]):
+        row = await self.ext_gate(inter)
+        if not row:
+            return
+        leaders = self.ext_leaders(row)
+        if action.value == "add":
+            if member.bot:
+                return await inter.response.send_message("Ботов не берём.", ephemeral=True)
+            other = self.leader_family(member.id)
+            if other and other["guild_id"] != row["guild_id"]:
+                return await inter.response.send_message(f"Он уже в руководстве семьи {other['family']}.",
+                                                         ephemeral=True)
+            leaders.add(member.id)
+        else:
+            if member.id not in leaders:
+                return await inter.response.send_message("Его нет в руководстве.", ephemeral=True)
+            if len(leaders) == 1:
+                return await inter.response.send_message("Нельзя убрать последнего — сначала добавь другого.",
+                                                         ephemeral=True)
+            leaders.discard(member.id)
+        self.bot.db.q("UPDATE alliance_families SET leaders=? WHERE guild_id=?", json.dumps(sorted(leaders)),
+                      row["guild_id"])
+        await inter.response.send_message(f"✅ Руководство семьи **{row['family']}**: "
+                                          + ", ".join(f"<@{u}>" for u in sorted(leaders)), ephemeral=True,
+                                          allowed_mentions=discord.AllowedMentions.none())
+        await self.resync(member.id)
+
     @group.command(name="состав", description="Семьи альянса")
     async def roster(self, inter: discord.Interaction):
         rows = self.bot.db.all("SELECT * FROM alliance_families WHERE status IN ('active','pending') "
@@ -994,7 +1175,7 @@ class Alliance(commands.Cog):
             if r["status"] == "active":
                 total += n
                 since = f" · с {parse_dt(r['joined_at']).strftime('%d.%m.%Y')}" if r["joined_at"] else ""
-                lines.append(f"🤝 **{r['family']}** — {n} чел.{since}")
+                lines.append(f"🤝 **{r['family']}** — {n} чел.{since}" + (" · 🏛 только в штабе" if self.is_ext(r) else ""))
             else:
                 lines.append(f"⏳ {r['family']} — заявка на голосовании")
         await inter.response.send_message(embed=self.embed(
@@ -1020,7 +1201,7 @@ class Alliance(commands.Cog):
                                   (family or "").strip())
             if not row:
                 return await inter.response.send_message("Укажи семью альянса в поле «семья».", ephemeral=True)
-            if self.bot.is_home(self.bot.get_guild(row["guild_id"])):
+            if not self.is_ext(row) and self.bot.is_home(self.bot.get_guild(row["guild_id"])):
                 return await inter.response.send_message("Семью-основателя исключить нельзя.", ephemeral=True)
             target, text = row["guild_id"], text or f"Исключить семью {row['family']}"
         if not text.strip():

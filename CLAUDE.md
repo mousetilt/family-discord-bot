@@ -30,6 +30,10 @@
 - `hub.py` 🆕 — `/помощь`, `/панель`, панель участника, раннер кнопок → команд (Фаза 1).
 - Прочее: `applications` (заявки), `diplomacy`, `alliance`, `market`, `mentorship`, `interviews`, `promo`, `boosts`, `streams`, `appeals`, `server_setup`, `daily`, `lawyer` (законы РО), `context_menus`.
 
+## Альянс: семьи без бота
+- `alliance_families.external=1`: семья без нашего бота, живёт в штабе. `guild_id` — условный отрицательный (`EXT_BASE=-1000` и ниже), `leaders` — JSON Discord ID руководства (голосуют из штаба), участники — роль `hub:fam:<gid>` в штабе (выдаёт их руководство: `/альянс участники добавить|убрать|руководство`). Принимается голосованием: `/альянс добавить-семью` (нужен штаб).
+- ВАЖНО: `bot.is_home(None) == True` — для таких семей проверять `Alliance.is_ext(row)` раньше, чем `is_home(get_guild(...))`.
+
 ## Деплой
 - Хостинг bot-hosting.net: файлы в `/home/container`, секреты — во вкладке «Окружение» (НЕ в .git). Запуск: `pip install -r requirements.txt && python3 -u bot.py`.
 - **Через GitHub:** правим код → `git push` → в Discord `/обновить` (бот делает `git fetch`, показывает список коммитов и перезапускается через `launcher.py`).
