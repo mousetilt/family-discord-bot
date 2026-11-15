@@ -180,6 +180,7 @@ class Staff(commands.Cog):
         n = await self.bot.give_warn(inter.guild, member, inter.user, reason)
         await inter.followup.send(f"✅ Выговор выдан ({n}/3).", ephemeral=True)
 
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="выговоры", description="Посмотреть выговоры")
     @app_commands.rename(member="участник")
     async def warns(self, inter: discord.Interaction, member: discord.Member = None):
@@ -221,6 +222,7 @@ class Staff(commands.Cog):
         await inter.response.send_message(f"🔇 {member.mention} замучен на {minutes} мин.", ephemeral=True)
         await self.bot.log(inter.guild, f"🔇 {member.mention} мут на {minutes} мин ({inter.user.mention}): {reason}")
 
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="отпуск", description="Уйти в отпуск (не будешь считаться неактивным)")
     @app_commands.rename(days="дней", reason="причина")
     async def vacation(self, inter: discord.Interaction, days: app_commands.Range[int, 1, 60], reason: str):
@@ -239,6 +241,7 @@ class Staff(commands.Cog):
         await self.bot.log(inter.guild, f"🌙 {inter.user.mention} в отпуске до {discord.utils.format_dt(until, 'D')}: "
                                         f"{reason}", "hrlog")
 
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="вернулся", description="Вернуться из отпуска")
     async def back(self, inter: discord.Interaction):
         self.bot.db.q("DELETE FROM vacations WHERE guild_id=? AND user_id=?", inter.guild.id, inter.user.id)

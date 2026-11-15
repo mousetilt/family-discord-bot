@@ -277,6 +277,7 @@ class Persona(commands.Cog):
             await jv.stop(guild, "")
 
     # ---------- команды ----------
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="досье", description="Что Швейцар о тебе помнит и как к тебе относится")
     async def dossier_cmd(self, inter: discord.Interaction):
         score, notes = self.get(inter.guild.id, inter.user.id)
@@ -286,11 +287,13 @@ class Persona(commands.Cog):
         e.set_footer(text="Стереть всё: /забудь_меня · Отношение портится от хамства и растёт от нормального общения")
         await inter.response.send_message(embed=e, ephemeral=True)
 
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="забудь_меня", description="Стереть всё, что Швейцар о тебе помнит")
     async def forget_cmd(self, inter: discord.Interaction):
         self.forget(inter.guild.id, inter.user.id)
         await inter.response.send_message("🧹 Стёр. Кто ты вообще такой? Начинаем с чистого листа.", ephemeral=True)
 
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="любимчики", description="Кого Швейцар любит, а кого терпеть не может")
     async def favorites_cmd(self, inter: discord.Interaction):
         rows = self.bot.db.all("SELECT user_id, score FROM persona WHERE guild_id=? AND score<>0 ORDER BY score DESC",

@@ -11,7 +11,8 @@ OWNER_PERMS = dict(view_channel=True, connect=True, speak=True, manage_channels=
 
 
 class VoiceRooms(commands.Cog):
-    room = app_commands.Group(name="комната", description="Управление личной голосовой комнатой")
+    room = app_commands.Group(name="комната", description="Управление личной голосовой комнатой",
+                              default_permissions=discord.Permissions(manage_messages=True))  # участникам — панель
 
     def __init__(self, bot):
         self.bot = bot

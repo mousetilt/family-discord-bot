@@ -1019,6 +1019,7 @@ class Assistant(commands.Cog):
         return out
 
 
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="прозвище", description="Как ещё называют участника — чтобы Швейцар понимал «Толик», «Саня»")
     @app_commands.rename(member="участник", names="прозвища")
     @app_commands.describe(names="Через запятую: Толик, Толян. Пусто — показать, «-» — удалить")

@@ -594,6 +594,7 @@ class Music(commands.Cog):
             path.unlink(missing_ok=True)  # недописанный файл не должен остаться в кэше
             raise
 
+    @app_commands.default_permissions(manage_guild=True)  # служебное: видно только админам
     @app_commands.command(name="голос", description="Выбрать голос, которым говорит бот, и послушать его")
     @app_commands.rename(voice="голос")
     @app_commands.choices(voice=[app_commands.Choice(name=v, value=k) for k, v in VOICES.items()])

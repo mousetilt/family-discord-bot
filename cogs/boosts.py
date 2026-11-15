@@ -231,7 +231,8 @@ class Boosts(commands.Cog):
         await self.bot.wait_until_ready()
 
     # ---------- команды ----------
-    group = app_commands.Group(name="буст", description="Бусты сервера семьи")
+    group = app_commands.Group(name="буст", description="Бусты сервера семьи",
+                               default_permissions=discord.Permissions(manage_messages=True))  # участникам — панель
 
     @group.command(name="прогресс", description="Сколько бустов и что откроем дальше")
     async def progress(self, inter: discord.Interaction):

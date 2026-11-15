@@ -259,7 +259,8 @@ class AddQuestionModal(discord.ui.Modal, title="Новый вопрос экза
 
 # ─────────────────────────────── COG ───────────────────────────────
 class Applications(commands.Cog):
-    exam = app_commands.Group(name="экзамен", description="Экзамен по правилам для вступления в семью")
+    exam = app_commands.Group(name="экзамен", description="Экзамен по правилам для вступления в семью",
+                              default_permissions=discord.Permissions(manage_messages=True))  # участникам — панель
 
     def __init__(self, bot):
         self.bot = bot

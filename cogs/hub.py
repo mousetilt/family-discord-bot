@@ -254,6 +254,12 @@ MEMBER_SECTIONS = {
     "learn": ("🎓", "Обучение", config.FAMILY_PLUS, ["exam_try", "lawyer", "kb_find"]),
 }
 SECTIONS = {**LEAD_SECTIONS, **MEMBER_SECTIONS}
+# Команды, скрытые из списка «/» у рядовых участников (default_permissions) — они заменены кнопками и речью.
+# Право Discord у них только прячет команду; сама команда проверяет доступ внутри, поэтому кнопки панели работают.
+# Админ сервера может вернуть любую из них ролям: Настройки сервера → Интеграции → бот.
+HIDDEN_FOR_MEMBERS = {"отпуск", "вернулся", "выговоры", "профиль", "топ", "досье", "забудь_меня", "любимчики",
+                      "эфир", "эфиры", "цена", "продать", "юрист", "спросить", "прозвище", "экзамен", "буст",
+                      "комната"}
 TEXTY = {"text", "question", "note", "reason", "what"}  # такие поля — многострочные
 
 
@@ -341,8 +347,10 @@ async def can_run(bot, inter, cmd):
     if not inter.guild or not bot.is_family(inter.guild):
         await deny(inter, "Семья на этом сервере не подключена.")
         return False
+    root = cmd.root_parent or cmd
     perms = cmd.default_permissions or (cmd.root_parent.default_permissions if cmd.root_parent else None)
-    if perms and not cmd.checks and not perms.is_subset(inter.user.guild_permissions):
+    if perms and not cmd.checks and root.name not in HIDDEN_FOR_MEMBERS \
+            and not perms.is_subset(inter.user.guild_permissions):
         await deny(inter)
         return False
     try:

@@ -108,6 +108,7 @@ class Lawyer(commands.Cog):
             await send(embed=e)
 
     # ---------- команды для всех ----------
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="юрист", description="ИИ-юрист: вопрос, разбор ситуации или составление документа")
     @app_commands.rename(question="вопрос_или_ситуация", mode="режим")
     @app_commands.choices(mode=[app_commands.Choice(name=v[0], value=k) for k, v in MODES.items()])
@@ -126,6 +127,7 @@ class Lawyer(commands.Cog):
             text, sources = f"❌ Ошибка: {e}", []
         await self.send_answer(inter.followup.send, question, text, sources, mode, inter.guild)
 
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="спросить", description="Спросить бота о правилах семьи, проекта и законах сервера")
     @app_commands.rename(question="вопрос")
     async def ask_cmd(self, inter: discord.Interaction, question: str):

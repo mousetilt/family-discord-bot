@@ -721,6 +721,7 @@ class Jarvis(commands.Cog):
             msg = await self.start(inter.guild, inter.user, inter)
         await inter.followup.send(msg, ephemeral=True)
 
+    @app_commands.default_permissions(manage_guild=True)  # служебное: видно только админам
     @app_commands.command(name="джарвис-статус", description="Диагностика голосового режима (приём звука)")
     async def jarvis_status(self, inter: discord.Interaction):
         if not self.bot.has(inter.user, self.users_roles):  # в статусе видно последнюю услышанную фразу

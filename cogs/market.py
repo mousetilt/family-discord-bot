@@ -137,6 +137,7 @@ class Market(commands.Cog):
         return msg
 
     # ---------- создание ----------
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="продать", description="Разместить объявление на рынке семьи")
     @app_commands.rename(category="категория", kind="тип", photo="фото")
     @app_commands.choices(category=[app_commands.Choice(name=v, value=k) for k, v in config.MARKET_CATEGORIES.items()],
@@ -276,6 +277,7 @@ class Market(commands.Cog):
         await inter.response.send_message(embed=self.bot.embed("🛒 Мои объявления", "\n".join(lines) or "Пусто",
                                                                config.COLOR, inter.guild), ephemeral=True)
 
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="цена", description="Сколько стоит вещь — по прошлым сделкам на рынке семьи")
     @app_commands.rename(query="что")
     @family_only()

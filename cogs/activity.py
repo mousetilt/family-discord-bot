@@ -76,6 +76,7 @@ class Activity(commands.Cog):
         self.flush(member)
 
     # ---------- паспорт ----------
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="профиль", description="Семейный паспорт участника")
     @app_commands.rename(member="участник")
     async def profile(self, inter: discord.Interaction, member: discord.Member = None):
@@ -128,6 +129,7 @@ class Activity(commands.Cog):
             extra = f"💎 Бустер семьи с {member.premium_since.strftime('%d.%m.%Y')}" + (" · " + extra if extra else "")
         await inter.followup.send(content=extra or None, file=discord.File(card, filename="passport.png"))
 
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="топ", description="Самые активные участники")
     @app_commands.rename(period="период")
     @app_commands.choices(period=[app_commands.Choice(name="За неделю", value="week"),

@@ -257,6 +257,7 @@ class Streams(commands.Cog):
         self.golive[member.id] = (msg, time.monotonic())
 
     # ---------- команды ----------
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="эфир", description="Анонсировать свой стрим (если статус «Стримит» не появился сам)")
     @app_commands.rename(url="ссылка", title="название")
     @app_commands.describe(url="Ссылка на трансляцию (Twitch, YouTube, VK Видео, Kick…)", title="О чём эфир")
@@ -278,6 +279,7 @@ class Streams(commands.Cog):
         ch = self.bot.ch(inter.guild, "streams")
         await inter.followup.send(f"✅ Анонс опубликован{' в ' + ch.mention if ch else ''}.", ephemeral=True)
 
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="эфиры", description="Кто сейчас стримит и статистика стримеров семьи")
     async def stats(self, inter: discord.Interaction):
         g, db = inter.guild, self.bot.db
