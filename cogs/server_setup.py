@@ -96,6 +96,44 @@ def find_category(bot, guild, cat):
     return discord.utils.get(guild.categories, name=cat["name"])
 
 
+# Каналы, добавленные после первой сборки сервера: при старте бот создаёт их сам (один раз, без «Собрать сервер»).
+# Значение — модуль, без которого канал не нужен. Удалили канал руками — второй раз не создаём (флаг auto:<key>).
+AUTO_CHANNELS = {"panel": None, "treasury_log": "treasury"}
+
+
+async def ensure_new_channels(bot, guild):
+    db = bot.db
+    if not db.gget(guild, "role:leader"):
+        return []  # сервер ещё не собирали — всё создаст /настройка
+    R = {k: bot.role(guild, k) for k, *_ in config.ROLES}
+    made = []
+    for cat in config.STRUCTURE:
+        for ctype, key, name, extra in cat["channels"]:
+            if key not in AUTO_CHANNELS or bot.ch(guild, key) or db.gget(guild, f"auto:{key}"):
+                continue
+            mod = AUTO_CHANNELS[key]
+            if mod and not bot.feature(guild, mod):
+                continue
+            category = find_category(bot, guild, cat)
+            if not category:
+                continue
+            ch = discord.utils.get(category.channels, name=name)
+            try:
+                if not ch:
+                    ow = build_overwrites(guild, R, extra.get("view", cat["view"]), extra.get("send", cat["send"]),
+                                          kind=ctype)
+                    ow = {t: p for t, p in ow.items() if t is not None}  # роль удалили — просто без неё
+                    ch = await guild.create_text_channel(name, category=category, overwrites=ow,
+                                                         topic=extra.get("topic"), reason="Новый канал бота")
+                    made.append(name)
+            except discord.HTTPException as e:
+                log.warning("Новый канал %s на %s: %s", key, guild.name, e)
+                continue
+            db.gset(guild, f"ch:{key}", ch.id)
+            db.gset(guild, f"auto:{key}", 1)
+    return made
+
+
 async def build_server(bot, guild, progress):
     db = bot.db
     R = {}
@@ -480,6 +518,24 @@ class WizardView(discord.ui.View):
 class ServerSetup(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self._ensured = False
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """После обновления: досоздать новые каналы и обновить панели, не заставляя жать «Собрать сервер»."""
+        if self._ensured:
+            return
+        self._ensured = True
+        hub = self.bot.get_cog("Hub")
+        for g in list(self.bot.home_guilds):
+            try:
+                made = await ensure_new_channels(self.bot, g)
+                if made:
+                    log.info("«%s»: созданы каналы %s", g.name, ", ".join(made))
+                if hub and self.bot.db.gget(g, "role:leader"):
+                    await hub.post_panels(g, False)  # панели с новой версией сами переставятся
+            except Exception:
+                log.exception("Досоздание каналов на %s", g.name)
 
     async def open_wizard(self, inter: discord.Interaction):
         if not can_manage(self.bot, inter):

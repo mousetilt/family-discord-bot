@@ -2,7 +2,7 @@
 """Упрощение UX (Фаза 1, docs/КАРТА_УПРОЩЕНИЯ_КОМАНД.md).
 /помощь — интерактивная «что я умею»: что сказать Швейцару, какую кнопку нажать, статус ИИ и голоса.
 /панель — панель руководства (разделы с кнопками); копия закреплена в канале бот-команд.
-Панель участника — закреплена в канале «о семье» (ставится при сборке сервера).
+Панель участника — закреплена в канале «🎛・панель» (видит только семья) (ставится при сборке сервера).
 Команды помнить не нужно: почти всё — речью («Швейцар, …») или кнопками панелей.
 
 Кнопка панели вызывает СУЩЕСТВУЮЩУЮ слэш-команду (её же проверки прав). Что спросить у человека, раннер понимает из
@@ -120,7 +120,7 @@ def help_home(bot, member):
     lines = ["Ничего учить не надо — есть три способа:",
              "🗣 **Сказать** — напиши в чат «**Швейцар, …**» (или упомяни меня) и попроси своими словами. "
              "В войсе — то же самое голосом.",
-             "🔘 **Нажать** — панель участника в канале «о семье»" + (", для руководства — `/панель`"
+             "🔘 **Нажать** — панель участника в канале «🎛・панель»" + (", для руководства — `/панель`"
                                                                        if is_staff(bot, member) else "") + ".",
              "⌨️ **Команда** — только для редкого; набери `/` и увидишь, что тебе доступно.", "",
              *status_lines(bot, g), "", "Выбери раздел ниже, чтобы увидеть примеры."]
@@ -619,7 +619,7 @@ class Hub(commands.Cog):
     async def panel_cmd(self, inter: discord.Interaction):
         if not is_staff(self.bot, inter.user) and not inter.user.guild_permissions.administrator:
             return await inter.response.send_message(
-                "Панель руководства — для должностных лиц. Тебе — панель участника в канале «о семье» и `/помощь`.",
+                "Панель руководства — для должностных лиц. Тебе — панель участника в канале «🎛・панель» и `/помощь`.",
                 ephemeral=True)
         await inter.response.send_message(embed=lead_embed(self.bot, inter.guild),
                                           view=panel_view(LEAD_SECTIONS, inter.user, self.bot), ephemeral=True)
@@ -634,7 +634,16 @@ class Hub(commands.Cog):
         async def lead():
             return {"embed": lead_embed(bot, guild), "view": panel_view(LEAD_SECTIONS)}
 
-        await bot.panel_once(guild, "hub_member", "welcome", repost, member, version=1)
+        if int(bot.db.gget(guild, "panelv:hub_member") or 0) < 2 and bot.ch(guild, "panel"):
+            # v1 стояла в «о семье», которую видят гости — убираем её оттуда
+            old, c = bot.db.gget(guild, "panel:hub_member"), bot.ch(guild, "welcome")
+            if old and c:
+                try:
+                    await (await c.fetch_message(int(old))).delete()
+                except discord.HTTPException:
+                    pass
+            bot.db.gdel(guild, "panel:hub_member")
+        await bot.panel_once(guild, "hub_member", "panel", repost, member, version=2)  # v2: канал только для семьи
         await bot.panel_once(guild, "hub_lead", "botcmd", repost, lead, version=2)  # v2: казна, зарплаты, штрафы
 
 

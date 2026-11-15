@@ -152,6 +152,7 @@ STRUCTURE = [
         ("voice", "diplo_voice", "🤝 Переговорная", {}),
     ]},
     {"name": "💬 СЕМЬЯ", "view": FAMILY_RANKS, "send": "all", "channels": [
+        ("text", "panel", "🎛・панель", {"send": LEAD, "topic": "Кнопки бота для семьи: отпуск, наставник, рынок, сборы и т.д."}),
         ("text", "chat", "💬・общий-чат", {}),
         ("text", "flood", "😂・флуд-и-мемы", {}),
         ("text", "screens", "📸・скриншоты", {}),
