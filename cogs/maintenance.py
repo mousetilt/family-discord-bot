@@ -73,11 +73,11 @@ def load_changelog(text=None):
 
 
 def newer(entries, since):
-    """Записи новее версии since (список новые сверху). since нет в списке — только самая свежая."""
+    """Записи новее версии since (список новые сверху). since нет в списке — до трёх последних."""
     vs = [e["v"] for e in entries]
     if since in vs:
         return entries[:vs.index(since)]
-    return entries[:1]
+    return entries[:3]
 
 
 def entry_text(e, members=False):
@@ -222,14 +222,19 @@ class Maintenance(commands.Cog):
         g = inter.guild
         if not g or not self.bot.has(inter.user, config.LEAD):
             return await inter.response.send_message("⛔ Публикует руководство семьи.", ephemeral=True)
-        e = next((x for x in load_changelog() if x["v"] == ver), None)
+        entries = load_changelog()
+        vs = [x["v"] for x in entries]
+        # эта версия и более ранние, которые семье ещё не публиковали (до трёх) — одним постом
+        todo = [x for x in entries[vs.index(ver):vs.index(ver) + 3] if x.get("members")
+                and not self.bot.db.gget(g, f"changelog:pub:{x['v']}")] if ver in vs else []
         c = self.bot.ch(g, "news")
-        if not e or not e.get("members") or not c:
-            return await inter.response.send_message("Нечего публиковать или нет канала объявлений.", ephemeral=True)
-        if self.bot.db.gget(g, f"changelog:pub:{ver}"):
+        if not c:
+            return await inter.response.send_message("Нет канала объявлений.", ephemeral=True)
+        if not todo:
             return await inter.response.send_message("✅ Уже опубликовано.", ephemeral=True)
-        emb = self.bot.embed(f"🎩 Швейцар обновился · {e.get('title', ver)}", self.bot.brand(g, entry_text(e, True)),
-                             config.GOLD, g)
+        e = todo[-1]  # заголовок — по самой крупной (ранней) из публикуемых
+        text = "\n\n".join(entry_text(x, True) for x in reversed(todo))[:3900]
+        emb = self.bot.embed(f"🎩 Швейцар обновился · {e.get('title', ver)}", self.bot.brand(g, text), config.GOLD, g)
         news = self.bot.role(g, "n_news")
         try:
             await c.send(content=news.mention if news else None, embed=emb,
@@ -237,7 +242,8 @@ class Maintenance(commands.Cog):
         except discord.HTTPException:
             return await inter.response.send_message("❌ Не смог написать в объявления — проверь права бота.",
                                                      ephemeral=True)
-        self.bot.db.gset(g, f"changelog:pub:{ver}", inter.user.id)
+        for x in todo:
+            self.bot.db.gset(g, f"changelog:pub:{x['v']}", inter.user.id)
         await inter.response.send_message(f"📢 Опубликовано в {c.mention}.", ephemeral=True)
         try:
             await inter.message.edit(view=None)

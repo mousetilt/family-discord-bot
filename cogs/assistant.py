@@ -12,6 +12,7 @@ import random
 import collections
 import re
 import time
+import types
 
 import discord
 from discord import app_commands
@@ -36,6 +37,7 @@ SAFE = {"move", "disconnect", "say", "music_play", "music_skip", "music_stop", "
         "listen_stop", "leave", "music_pause", "music_resume", "voice_mute", "voice_unmute", "remind", "invite",
         "forget"} | ASK
 LEADS = ["leader", "deputy"]
+CHANNEL_ONLY = {"purge", "slowmode", "poll"}  # работают с текущим каналом — в ЛС их не выполняем
 # болтать со Швейцаром может вся семья и друзья; им доступны только безобидные вещи
 EVERYONE = config.FAMILY_PLUS
 FOR_ALL = {"law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
@@ -422,8 +424,56 @@ class Assistant(commands.Cog):
             in_lawyer_channel = bool(law and message.channel.id == law.id)
         return not in_lawyer_channel
 
+    def dm_home(self, user):
+        """Сервер семьи, от имени которой отвечаем в ЛС: домашний, если человек там свой, иначе первый."""
+        found = []
+        for g in self.bot.home_guilds:
+            m = g.get_member(user.id)
+            if m and self.bot.has(m, EVERYONE) and self.bot.feature(g, "assistant:chat"):
+                found.append((not self.bot.is_home(g), m))
+        return min(found, key=lambda x: x[0])[1] if found else None
+
+    async def on_dm(self, message):
+        """Личка: всё, что пишут боту, — ему. Права и характер — как на сервере семьи человека."""
+        text = (message.content or "").strip()
+        if not text:
+            return
+        nick = self.bot.get_cog("NickCheck")
+        if nick and nick.waiting(message.author.id) and len(text) <= 40 and "\n" not in text:
+            return  # это ответ ником на просьбу контроля ника — его разбирает cogs/nickcheck.py
+        member = self.dm_home(message.author)
+        if not member:
+            if time.monotonic() - self.last.get(message.author.id, 0) > 600:
+                self.last[message.author.id] = time.monotonic()
+                await message.channel.send("🎩 Я Швейцар семьи — болтаю в личке только со своими (семья и друзья "
+                                           "семьи). Хочешь к нам — подай заявку на сервере.")
+            return
+        boss = self.bot.has(member, USERS)
+        if time.monotonic() - self.last.get(member.id, 0) < (4 if boss else 8):
+            return
+        self.last[member.id] = time.monotonic()
+        if not boss and not self.spend(member.id):
+            if self.spend(member.id, warn=True):
+                await message.channel.send("Всё, на сегодня я с тобой наговорился. Завтра приходи.")
+            return
+        self.note(message)
+        ctx = types.SimpleNamespace(guild=member.guild, author=member, channel=message.channel, content=text,
+                                    mentions=[], id=message.id, reference=message.reference, dm=True,
+                                    attachments=message.attachments)
+
+        async def send(**kw):
+            sent = await message.channel.send(**kw)
+            self.mine[sent.id] = member.id
+            while len(self.mine) > 300:
+                self.mine.pop(next(iter(self.mine)))
+            return sent
+        async with message.channel.typing():
+            await self.handle(ctx, text, send)
+
     @commands.Cog.listener()
     async def on_message(self, message):
+        if message.guild is None and not message.author.bot:
+            return await self.on_dm(message)
         if not message.guild or not self.bot.is_family(message.guild):
             return
         self.note(message)
@@ -495,6 +545,12 @@ class Assistant(commands.Cog):
             self.remember(ctx, request, reply, ask="?" in reply)
             await send(content=reply)
             return reply
+        if getattr(ctx, "dm", False):  # в ЛС нет канала сервера — то, что работает с каналом, не выполняем
+            here = [a for a in plan if a["type"] in CHANNEL_ONLY]
+            if here:
+                what = ", ".join(dict.fromkeys(LABEL[a["type"]] for a in here))
+                await send(content=f"🙅 {what} — это делается в канале сервера, а не в личке. Напиши там.")
+                return "Это только в канале сервера"
         denied = [a for a in plan if not self.may(ctx.author, a["type"])]
         if denied:
             what = ", ".join(dict.fromkeys(LABEL[a["type"]] for a in denied))

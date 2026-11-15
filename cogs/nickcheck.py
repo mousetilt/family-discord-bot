@@ -122,6 +122,11 @@ class NickCheck(commands.Cog):
         rx = compile_template(self.template(guild))
         return rx is None or bool(rx.match(nick or ""))
 
+    def waiting(self, user_id):
+        """Просили ли этого человека поправить ник (тогда его короткий ответ в ЛС — это ник)."""
+        return any(self.on(g) and self.bot.db.gget(g, f"nick:asked:{user_id}") and g.get_member(user_id)
+                   for g in self.bot.home_guilds)
+
     def exempt(self, m):
         return m.bot or m.id == m.guild.owner_id or m.guild_permissions.administrator or not self.bot.in_family(m)
 
