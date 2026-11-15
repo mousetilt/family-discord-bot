@@ -374,7 +374,7 @@ class Assistant(commands.Cog):
         """Берёт ли помощник это сообщение. «Швейцар, …» — всегда; упоминание бота — везде, кроме канала юриста
         (там упоминание — вопрос юристу). Ответ на сообщение бота (reply) упоминанием не считается."""
         text = message.content or ""
-        if not self.bot.has(message.author, EVERYONE) or not self.bot.feature(message.guild, "ai_chat"):
+        if not self.bot.has(message.author, EVERYONE) or not self.bot.feature(message.guild, "assistant:chat"):
             return False
         if TRIGGER.match(text) or NAME_ANYWHERE.search(text):
             return True

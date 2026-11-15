@@ -3,7 +3,7 @@
 /ии ключ     — семья вставляет СВОЙ бесплатный ключ Groq и/или Gemini (модалка; бот проверяет ключ перед сохранением)
 /ии статус   — какой ИИ работает у семьи и сколько запросов потрачено сегодня
 /ии удалить  — убрать ключи семьи
-/настройки   — включить/выключить модули (ИИ-модерация, Швейцар в войсе, сводка, бэкап…)
+/настройки   — дерево модулей: модуль целиком и его отдельные действия (mod:<модуль>:<действие>)
 На домашнем сервере ИИ работает на ключах хоста; у остальных семей — только на своих (без ключа ИИ выключен)."""
 import logging
 
@@ -13,7 +13,7 @@ from discord.ext import commands
 
 from core import config
 from core.ai import AI, NAMES
-from core.family import FEATURES
+from core.family import MODULES, action_on, module_on, set_action, set_module
 
 log = logging.getLogger("family-bot.control")
 PROVIDERS = {"groq": "Groq — console.groq.com → API Keys", "gemini": "Gemini — aistudio.google.com → Get API key"}
@@ -64,34 +64,101 @@ class KeyModal(discord.ui.Modal, title="Ключи ИИ семьи (беспла
         await inter.followup.send("\n".join(out), ephemeral=True)
 
 
-class FeatureSelect(discord.ui.Select):
+# ─────────────── дерево модулей (/настройки и шаг «Модули» мастера) ───────────────
+def render(bot, guild, mod=None):
+    if mod:
+        title, acts = MODULES[mod]
+        on = module_on(bot.db, guild.id, mod)
+        lines = [f"**{title}** — модуль {'🟢 включён' if on else '⚫ выключен целиком'}",
+                 "Отметь в списке, какие действия должны работать:" if on else
+                 "Включи модуль кнопкой, чтобы настроить его действия.", ""]
+        for a, label in acts.items():
+            mark = "🟢" if on and action_on(bot.db, guild.id, mod, a) else "⚫"
+            lines.append(f"{mark} {label}")
+        return "\n".join(lines)
+    lines = ["**⚙️ Настройки семьи** — выбери модуль в списке, чтобы включить или выключить его действия.", ""]
+    for m, (title, acts) in MODULES.items():
+        if not module_on(bot.db, guild.id, m):
+            lines.append(f"⚫ **{title}** — выключен")
+            continue
+        n = sum(action_on(bot.db, guild.id, m, a) for a in acts)
+        lines.append(f"{'🟢' if n == len(acts) else '🟡' if n else '⚫'} **{title}** — {n}/{len(acts)}: "
+                     + ", ".join(label.split(" (")[0] for a, label in acts.items()
+                                 if action_on(bot.db, guild.id, m, a))[:150])
+    return "\n".join(lines)
+
+
+class ModulePick(discord.ui.Select):
     def __init__(self, bot, guild):
         self.bot = bot
-        opts = [discord.SelectOption(label=label[:100], value=key, default=bot.feature(guild, key))
-                for key, label in FEATURES.items()]
+        opts = [discord.SelectOption(label=title[:100], value=m,
+                                     description=", ".join(acts.values())[:100])
+                for m, (title, acts) in MODULES.items()]
+        super().__init__(placeholder="Выбери модуль…", options=opts)
+
+    async def callback(self, inter: discord.Interaction):
+        if not allowed(self.bot, inter):
+            return await inter.response.send_message("⛔ Только для Главы, заместителя или владельца.", ephemeral=True)
+        m = self.values[0]
+        await inter.response.edit_message(content=render(self.bot, inter.guild, m),
+                                          view=ModulesView(self.bot, inter.guild, m, self.view.back))
+
+
+class ActionSelect(discord.ui.Select):
+    def __init__(self, bot, guild, mod):
+        self.bot, self.mod = bot, mod
+        acts = MODULES[mod][1]
+        opts = [discord.SelectOption(label=label[:100], value=a, default=action_on(bot.db, guild.id, mod, a))
+                for a, label in acts.items()]
         super().__init__(placeholder="Отметь, что должно работать", min_values=0, max_values=len(opts), options=opts)
 
     async def callback(self, inter: discord.Interaction):
         if not allowed(self.bot, inter):
             return await inter.response.send_message("⛔ Только для Главы, заместителя или владельца.", ephemeral=True)
         on = set(self.values)
-        for key in FEATURES:
-            self.bot.db.gset(inter.guild, f"feat:{key}", "1" if key in on else "0")
-        await inter.response.edit_message(content=render(self.bot, inter.guild) + "\n\n✅ Сохранено.",
-                                          view=FeaturesView(self.bot, inter.guild))
+        for a in MODULES[self.mod][1]:
+            set_action(self.bot.db, inter.guild.id, self.mod, a, a in on)
+        log.warning("Настройки «%s»: %s → %s (%s)", inter.guild.name, self.mod, sorted(on), inter.user)
+        await inter.response.edit_message(content=render(self.bot, inter.guild, self.mod) + "\n\n✅ Сохранено.",
+                                          view=ModulesView(self.bot, inter.guild, self.mod, self.view.back))
 
 
-class FeaturesView(discord.ui.View):
-    def __init__(self, bot, guild):
-        super().__init__(timeout=300)
-        self.add_item(FeatureSelect(bot, guild))
+class ModulesView(discord.ui.View):
+    """mod=None — список модулей; mod — один модуль: рубильник + действия. back — колбэк «назад в мастер» (или None)."""
 
+    def __init__(self, bot, guild, mod=None, back=None):
+        super().__init__(timeout=600)
+        self.bot, self.mod, self.back = bot, mod, back
+        if mod is None:
+            self.add_item(ModulePick(bot, guild))
+            if back:
+                b = discord.ui.Button(label="Назад в мастер", emoji="↩️", style=discord.ButtonStyle.secondary, row=4)
+                b.callback = back
+                self.add_item(b)
+            return
+        on = module_on(bot.db, guild.id, mod)
+        if on:
+            self.add_item(ActionSelect(bot, guild, mod))
+        tg = discord.ui.Button(label="Выключить модуль целиком" if on else "Включить модуль",
+                               emoji="⏻", style=discord.ButtonStyle.danger if on else discord.ButtonStyle.success, row=4)
+        tg.callback = self._toggle
+        up = discord.ui.Button(label="Ко всем модулям", emoji="↩️", style=discord.ButtonStyle.secondary, row=4)
+        up.callback = self._up
+        self.add_item(tg)
+        self.add_item(up)
 
-def render(bot, guild):
-    lines = ["**⚙️ Модули семьи** — отметь в списке, что должно работать:"]
-    for key, label in FEATURES.items():
-        lines.append(f"{'🟢' if bot.feature(guild, key) else '⚫'} {label}")
-    return "\n".join(lines)
+    async def _toggle(self, inter: discord.Interaction):
+        if not allowed(self.bot, inter):
+            return await inter.response.send_message("⛔ Только для Главы, заместителя или владельца.", ephemeral=True)
+        on = not module_on(self.bot.db, inter.guild.id, self.mod)
+        set_module(self.bot.db, inter.guild.id, self.mod, on)
+        log.warning("Настройки «%s»: модуль %s → %s (%s)", inter.guild.name, self.mod, on, inter.user)
+        await inter.response.edit_message(content=render(self.bot, inter.guild, self.mod),
+                                          view=ModulesView(self.bot, inter.guild, self.mod, self.back))
+
+    async def _up(self, inter: discord.Interaction):
+        await inter.response.edit_message(content=render(self.bot, inter.guild),
+                                          view=ModulesView(self.bot, inter.guild, None, self.back))
 
 
 class Control(commands.Cog):
@@ -140,13 +207,13 @@ class Control(commands.Cog):
             self.bot.db.gdel(inter.guild, f"ai:{prov}")
         await inter.response.send_message("🗑 Ключи ИИ семьи удалены.", ephemeral=True)
 
-    @app_commands.command(name="настройки", description="Включить или выключить модули бота для семьи")
+    @app_commands.command(name="настройки", description="Модули бота и их отдельные действия: что включить, что выключить")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.guild_only()
     async def settings_cmd(self, inter: discord.Interaction):
         if not allowed(self.bot, inter):
             return await self._deny(inter)
-        await inter.response.send_message(render(self.bot, inter.guild), view=FeaturesView(self.bot, inter.guild),
+        await inter.response.send_message(render(self.bot, inter.guild), view=ModulesView(self.bot, inter.guild),
                                           ephemeral=True)
 
 

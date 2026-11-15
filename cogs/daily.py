@@ -117,7 +117,7 @@ class Daily(commands.Cog):
     async def backup(self, guild):
         t = now()
         key = f"backup:{t.date()}"
-        if t.hour < BACKUP_HOUR or self.bot.db.gget(guild, key) or not self.bot.feature(guild, "backup"):
+        if t.hour < BACKUP_HOUR or self.bot.db.gget(guild, key) or not self.bot.feature(guild, "service:backup"):
             return
         self.bot.db.gset(guild, key, 1)
         if not await self.send_backup(guild):
@@ -233,7 +233,7 @@ class Daily(commands.Cog):
         return e
 
     async def digest(self, guild):
-        if config.DIGEST_DAYS <= 0 or not self.bot.feature(guild, "digest"):
+        if config.DIGEST_DAYS <= 0 or not self.bot.feature(guild, "reports:digest"):
             return
         t = now()
         last = self.bot.db.gget(guild, "digest:last")

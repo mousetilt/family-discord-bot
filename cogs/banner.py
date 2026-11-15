@@ -39,7 +39,7 @@ class Banner(commands.Cog):
         for g in self.bot.home_guilds:
             t = now()
             key = f"banner:{t.date()}"
-            if t.hour < BANNER_HOUR or self.bot.db.gget(g, key) or not self.bot.feature(g, "banner"):
+            if t.hour < BANNER_HOUR or self.bot.db.gget(g, key) or not self.bot.feature(g, "service:banner"):
                 continue
             self.bot.db.gset(g, key, 1)
             await self.refresh(g)

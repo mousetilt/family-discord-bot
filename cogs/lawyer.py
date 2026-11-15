@@ -135,7 +135,7 @@ class Lawyer(commands.Cog):
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not message.content:
             return
-        if not self.bot.feature(message.guild, "lawyer_channel"):
+        if not self.bot.feature(message.guild, "lawyer:channel"):
             return
         lawyer_ch = self.bot.ch(message.guild, "lawyer")
         in_channel = lawyer_ch and message.channel.id == lawyer_ch.id

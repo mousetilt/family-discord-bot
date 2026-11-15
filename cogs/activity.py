@@ -208,7 +208,7 @@ class Activity(commands.Cog):
             return
         key = f"report:{t.date()}"
         for g in self.bot.home_guilds:
-            if self.bot.db.gget(g, key) or not self.bot.feature(g, "weekly_report"):
+            if self.bot.db.gget(g, key) or not self.bot.feature(g, "reports:weekly"):
                 continue
             c = self.bot.ch(g, "reports")
             if c:

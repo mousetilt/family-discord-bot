@@ -13,12 +13,12 @@ from core.botcore import guarded, now, now_iso, safe_dm
 
 log = logging.getLogger("family-bot.mod")
 
-RULES = [
-    ("Реклама другого сервера", "medium",
+RULES = [  # (флаг в /настройки, категория, тяжесть, шаблон)
+    ("invites", "Реклама другого сервера", "medium",
      re.compile(r"(discord\.gg/|discord(?:app)?\.com/invite/)\S+", re.I)),
-    ("Скам / фишинг", "high",
+    ("scam", "Скам / фишинг", "high",
      re.compile(r"(free\s*nitro|бесплатн\w*\s*нитро|steamcommunity\.(?!com)\w+|dlscord|disc0rd|discorcl)", re.I)),
-    ("Сделка за реальные деньги (PermBan на проекте!)", "medium",
+    ("realmoney", "Сделка за реальные деньги (PermBan на проекте!)", "medium",
      re.compile(r"(прода[мю]|куплю|покупаю|продаю|обменяю)[^\n]{0,40}(вирт|валют|акк|аккаунт|кк\b|лям)[^\n]{0,60}"
                 r"(руб|₽|реал|карт[уыа]|сбер|тиньк|киви|qiwi|usdt|крипт|донат\s*за)", re.I)),
 ]
@@ -113,7 +113,7 @@ class Moderation(commands.Cog):
         fid = cur.lastrowid
         auto = ""
         lead = bot.has(message.author, config.MOD_EXEMPT)
-        if severity == "high" and not lead:
+        if severity == "high" and not lead and bot.feature(message.guild, "moderation:autopunish"):
             try:
                 await message.delete()
             except discord.HTTPException:
@@ -154,8 +154,8 @@ class Moderation(commands.Cog):
         if self.skip(message):
             return
         lead = self.bot.has(message.author, config.MOD_EXEMPT)
-        for category, severity, rx in RULES:
-            if not lead and rx.search(message.content or ""):
+        for key, category, severity, rx in RULES:
+            if not lead and self.bot.feature(message.guild, f"moderation:{key}") and rx.search(message.content or ""):
                 if category.startswith("Реклама") and not await self.foreign_invite(message):
                     continue
                 await self.flag(message, category, severity, "Сработало правило автомодерации", False)
@@ -163,7 +163,7 @@ class Moderation(commands.Cog):
                     await safe_dm(message.author, "⚠️ Осторожно: сделки за реальные деньги на проекте «Россия Онлайн» "
                                                   "караются PermBan (п. 6.21 правил). Сообщение передано руководству семьи.")
                 return
-        if config.AI_MODERATION and len(message.content or "") >= 6 and self.bot.feature(message.guild, "ai_moderation") \
+        if config.AI_MODERATION and len(message.content or "") >= 6 and self.bot.feature(message.guild, "moderation:ai") \
                 and self.bot.ai_for(message.guild).on:
             self.buffer.append(message)
             if len(self.buffer) > 200:

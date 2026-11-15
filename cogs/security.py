@@ -63,7 +63,8 @@ class Security(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message):
         m = message.author
-        if message.guild is None or m.bot or not isinstance(m, discord.Member) or self.trusted(m):
+        if message.guild is None or m.bot or not isinstance(m, discord.Member) or self.trusted(m) \
+                or not self.bot.feature(message.guild, "moderation:antispam"):
             return
         t = time.monotonic()
         q = self.msgs[m.id]

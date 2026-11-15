@@ -126,6 +126,8 @@ class Persona(commands.Cog):
         note = " ".join(str(remember or "").split())[:120]
         if not mood and not note:
             return
+        if not self.bot.feature(gid, "persona:memory"):
+            return  # семья выключила память Швейцара
         score, notes = self.get(gid, uid)
         if note and note.lower() not in {n["s"].lower() for n in notes}:
             notes.append({"d": msk().strftime("%d.%m"), "s": note})
@@ -133,12 +135,21 @@ class Persona(commands.Cog):
 
     def card(self, member):
         """Кусок подсказки для ИИ: время, настроение и досье на автора."""
-        score, notes = self.get(member.guild.id, member.id)
-        lines = [mood_now(), f"Досье на автора ({member.display_name}): отношение {score:+d} из 100 — {attitude(score)}."]
-        if notes:
-            lines.append("Твои заметки о нём (дата — что было): " + "; ".join(f"{n.get('d', '')} — {n['s']}" for n in notes))
+        g = member.guild
+        lines = [mood_now()]
+        if self.bot.feature(g, "persona:memory"):
+            score, notes = self.get(g.id, member.id)
+            lines.append(f"Досье на автора ({member.display_name}): отношение {score:+d} из 100 — {attitude(score)}.")
+            if notes:
+                lines.append("Твои заметки о нём (дата — что было): "
+                             + "; ".join(f"{n.get('d', '')} — {n['s']}" for n in notes))
+            else:
+                lines.append("Заметок о нём пока нет.")
         else:
-            lines.append("Заметок о нём пока нет.")
+            lines.append("Память о людях выключена руководством семьи: досье не ведёшь, обид не помнишь.")
+        if not self.bot.feature(g, "persona:tease"):
+            lines.append("ВАЖНО: подколы выключены руководством семьи. Ты вежливый и спокойный швейцар: без мата, "
+                         "без язвительности и подколов, по-доброму помогаешь.")
         return "\n".join(lines)
 
     # ---------- реплики голосом ----------
@@ -159,7 +170,7 @@ class Persona(commands.Cog):
     async def greet(self, guild, member):
         """Человек зашёл в войс, где сидит Швейцар: иногда встречаем личной фразой."""
         t = time.monotonic()
-        if member.bot or not self.bot.has(member, config.FAMILY_PLUS) or not self.bot.feature(guild, "voice_greet"):
+        if member.bot or not self.bot.has(member, config.FAMILY_PLUS) or not self.bot.feature(guild, "persona:greet"):
             return
         if t - self.last_greet < GREET_GAP or t - self.greeted.get(member.id, -1e9) < GREET_EVERY:
             return
@@ -185,7 +196,7 @@ class Persona(commands.Cog):
         seen = set()
         for g in self.bot.home_guilds:
             jv, music = self.bot.get_cog("Jarvis"), self.bot.get_cog("Music")
-            if not jv or not music or not self.bot.feature(g, "voice_visit"):
+            if not jv or not music or not self.bot.feature(g, "persona:visit"):
                 continue
             afk = self.bot.ch(g, "afk")
             for ch in g.voice_channels:
