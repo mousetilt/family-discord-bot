@@ -152,19 +152,20 @@ async def build_server(bot, guild, progress):
                     if ch:
                         await ch.edit(name=name, category=category)
                         break
+            mapped = bool(ch and db.gget(guild, f"chmap:{key}"))  # канал семьи, привязанный в мастере — не трогаем
             if ctype == "text":
                 if not ch:
                     ch = await guild.create_text_channel(name, category=category, overwrites=c_ow,
                                                          topic=extra.get("topic"),
                                                          slowmode_delay=extra.get("slowmode", 0))
-                else:
+                elif not mapped:
                     await ch.edit(overwrites=c_ow, topic=extra.get("topic") or ch.topic)
             else:
                 if not ch:
                     ch = await guild.create_voice_channel(name, category=category, overwrites=c_ow,
                                                           user_limit=extra.get("limit", 0),
                                                           bitrate=int(guild.bitrate_limit))
-                else:
+                elif not mapped:
                     await ch.edit(overwrites=c_ow)
             db.gset(guild, f"ch:{key}", ch.id)
         await progress(f"✅ {cat['name']}")
@@ -233,9 +234,258 @@ class SelfRoleButton(discord.ui.DynamicItem[discord.ui.Button], template=r"selfr
             await inter.response.send_message(f"🔔 {role.name} — включено", ephemeral=True)
 
 
+# ─────────────── мастер /настройка ───────────────
+def can_manage(bot, inter):
+    return bool(inter.guild) and (inter.user.id == inter.guild.owner_id or bot.has(inter.user, ["leader", "deputy"])
+                                  or inter.user.guild_permissions.administrator)
+
+
+async def deny(inter):
+    await inter.response.send_message("⛔ Только для владельца сервера, Главы или заместителя.", ephemeral=True)
+
+
+CH_CATS = [c for c in config.STRUCTURE if c["channels"]]  # категории, где есть каналы для привязки
+CH_PAGE = 3
+
+
+def render_chmap(bot, guild, ci):
+    cat = CH_CATS[ci]
+    lines = [f"**📺 Привязка каналов · {cat['name']}**",
+             "Если у семьи уже есть такой канал — выбери его: бот будет им пользоваться и не тронет его права. "
+             "Непривязанные `/настройка` создаст сама.", ""]
+    for ctype, key, name, _ in cat["channels"]:
+        c = bot.ch(guild, key)
+        if c and bot.db.gget(guild, f"chmap:{key}"):
+            lines.append(f"✅ {name} → {c.mention}")
+        elif c:
+            lines.append(f"🤖 {name} — канал бота {c.mention}")
+        else:
+            lines.append(f"▫️ {name} — бот создаст")
+    return "\n".join(lines)[:1900]
+
+
+class ChanCatSelect(discord.ui.Select):
+    def __init__(self, ci):
+        opts = [discord.SelectOption(label=c["name"][:100], value=str(i), default=i == ci) for i, c in enumerate(CH_CATS)]
+        super().__init__(placeholder="Категория…", options=opts[:25], row=0)
+
+    async def callback(self, inter: discord.Interaction):
+        ci = int(self.values[0])
+        await inter.response.edit_message(content=render_chmap(inter.client, inter.guild, ci),
+                                          view=ChanMapView(inter.client, inter.guild, ci))
+
+
+class ChanMapSelect(discord.ui.ChannelSelect):
+    def __init__(self, bot, guild, key, name, ctype, row):
+        self.key, self.name = key, name
+        cur = bot.ch(guild, key) if bot.db.gget(guild, f"chmap:{key}") else None
+        types = [discord.ChannelType.text, discord.ChannelType.news] if ctype == "text" else \
+            [discord.ChannelType.voice, discord.ChannelType.stage_voice]
+        super().__init__(placeholder=f"{name} — какой канал у вас?"[:150], channel_types=types, min_values=0,
+                         max_values=1, row=row,
+                         default_values=[discord.Object(cur.id, type=discord.abc.GuildChannel)] if cur else [])
+
+    async def callback(self, inter: discord.Interaction):
+        bot, g = inter.client, inter.guild
+        if not can_manage(bot, inter):
+            return await deny(inter)
+        if self.values:
+            c = self.values[0]
+            bot.db.gset(g, f"ch:{self.key}", c.id)
+            bot.db.gset(g, f"chmap:{self.key}", 1)
+            msg = f"✅ {self.name} → <#{c.id}>"
+        else:
+            bot.db.gdel(g, f"chmap:{self.key}")
+            bot.db.gdel(g, f"ch:{self.key}")
+            msg = f"↩️ {self.name}: привязка снята — `/настройка` создаст свой канал"
+        log.warning("Каналы «%s»: %s (%s)", g.name, msg, inter.user)
+        await inter.response.send_message(msg, ephemeral=True)
+
+
+class ChanMapView(discord.ui.View):
+    def __init__(self, bot, guild, ci=0, page=0):
+        super().__init__(timeout=600)
+        self.ci, self.page = ci, page
+        chans = CH_CATS[ci]["channels"]
+        pages = max(1, (len(chans) + CH_PAGE - 1) // CH_PAGE)
+        self.add_item(ChanCatSelect(ci))
+        part = chans[page * CH_PAGE:(page + 1) * CH_PAGE]  # ряд 0 — категории, 1–3 — каналы, 4 — листалка
+        for i, (ctype, key, name, _) in enumerate(part):
+            self.add_item(ChanMapSelect(bot, guild, key, name, ctype, row=i + 1))
+        if pages > 1:
+            prev = discord.ui.Button(label="◀", style=discord.ButtonStyle.secondary, disabled=page == 0, row=4)
+            nxt = discord.ui.Button(label=f"▶ {page + 1}/{pages}", style=discord.ButtonStyle.secondary,
+                                    disabled=page >= pages - 1, row=4)
+            prev.callback, nxt.callback = self._go(page - 1), self._go(page + 1)
+            self.add_item(prev)
+            self.add_item(nxt)
+
+    def _go(self, page):
+        async def cb(inter: discord.Interaction):
+            await inter.response.edit_message(content=render_chmap(inter.client, inter.guild, self.ci),
+                                              view=ChanMapView(inter.client, inter.guild, self.ci, page))
+        return cb
+
+
+def audit(bot, guild):
+    """Быстрая проверка: права бота, положение его роли, дубли ролей и каналов. Возвращает (строки, есть_проблемы)."""
+    me, out, bad = guild.me, [], False
+    p = me.guild_permissions
+    if p.administrator:
+        out.append("✅ У бота права администратора")
+    else:
+        need = ["manage_roles", "manage_channels", "moderate_members", "move_members", "manage_messages",
+                "kick_members", "ban_members", "manage_guild"]
+        miss = [n for n in need if not getattr(p, n)]
+        out.append("⚠️ Боту не хватает прав: " + ", ".join(miss) if miss else "✅ Права бота в порядке")
+        bad |= bool(miss)
+    above = [r for r in guild.roles if r > me.top_role and not r.managed]
+    ours = set()
+    for key, *_ in config.ROLES:
+        rid = bot.db.gget(guild, f"role:{key}")
+        if rid:
+            ours.add(int(rid))
+    blocked = [r.name for r in above if r.id in ours]
+    if blocked:
+        out.append("❌ Роли семьи выше роли бота — их он выдать не сможет: " + ", ".join(blocked[:5])
+                   + ". Перетащи роль бота выше в настройках сервера.")
+        bad = True
+    elif above:
+        out.append(f"💡 Над ролью бота ещё {len(above)} роль(ей) — это нормально, если это не роли семьи")
+    else:
+        out.append("✅ Роль бота на самом верху")
+    names = {}
+    for r in guild.roles:
+        names.setdefault(r.name, 0)
+        names[r.name] += 1
+    dup = [n for n in config.ROLE_NAMES.values() if names.get(n, 0) > 1]
+    if dup:
+        out.append("⚠️ Дубли ролей: " + ", ".join(dup[:5]) + " — лишние можно удалить")
+        bad = True
+    cnames = {}
+    for c in guild.channels:
+        cnames[c.name] = cnames.get(c.name, 0) + 1
+    want = {name for cat in config.STRUCTURE for _, _, name, _ in cat["channels"]}
+    cdup = [n for n in want if cnames.get(n, 0) > 1]
+    if cdup:
+        out.append("⚠️ Дубли каналов: " + ", ".join(sorted(cdup)[:5]))
+        bad = True
+    if not bot.intents.members:
+        out.append("⚠️ Выключен интент участников (Server Members Intent) — роли и активность работать не будут")
+        bad = True
+    return out, bad
+
+
+def wizard_embed(bot, guild):
+    db, fam = bot.db, bot.family(guild)
+    prof = bool(db.gget(guild, "family:name")) or bot.is_home(guild)
+    fam_mod = bot.get_cog("Families")
+    nroles = sum(1 for k, *_ in config.ROLES if db.gget(guild, f"rolemap:{k}"))
+    nchan = sum(1 for cat in CH_CATS for _, key, *_ in cat["channels"] if db.gget(guild, f"chmap:{key}"))
+    built = sum(1 for cat in CH_CATS for _, key, *_ in cat["channels"] if bot.ch(guild, key))
+    total = sum(len(cat["channels"]) for cat in CH_CATS)
+    from core.family import MODULES, module_on
+    mods = sum(module_on(db, guild.id, m) for m in MODULES)
+    ai = bot.ai_for(guild)
+    _, bad = audit(bot, guild)
+    steps = [
+        ("1", "🏠 Семья", prof, f"«{fam['name']}», сервер {fam['server']}" if prof else "заполни название и сервер"),
+        ("2", "🎭 Роли", True, f"привязано своих ролей: {nroles}" if nroles else "свои роли не привязаны — бот создаст"),
+        ("3", "📺 Каналы", True, f"привязано своих каналов: {nchan}" if nchan else "свои каналы не привязаны — бот создаст"),
+        ("4", "⚙️ Модули", True, f"включено модулей: {mods}/{len(MODULES)}"),
+        ("5", "🤖 ИИ", ai.on, ai.name if ai.on else "нет ключа — ИИ-функции выключены"),
+        ("6", "🔐 Проверка", not bad, "замечаний нет" if not bad else "есть замечания — открой"),
+        ("7", "🏗 Собрать сервер", built >= total, f"каналов на месте: {built}/{total}"),
+    ]
+    lines = ["Проходи шаги по порядку, любой можно повторить. Выбор в шагах сохраняется сразу, а роли и каналы "
+             "на сервере создаются только кнопкой «Собрать сервер».", ""]
+    for n, title, ok, note in steps:
+        lines.append(f"{'✅' if ok else '▫️'} **{n}. {title}** — {note}")
+    if not fam_mod:
+        lines.append("\n⚠️ Модуль семей не загружен — шаги 1–2 недоступны.")
+    return bot.embed("🧙 Мастер настройки", "\n".join(lines), config.COLOR, guild)
+
+
+class WizardView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=1800)
+        self.cog = cog
+        for label, emoji, fn, style, row in (
+                ("Семья", "🏠", self.s_profile, discord.ButtonStyle.secondary, 0),
+                ("Роли", "🎭", self.s_roles, discord.ButtonStyle.secondary, 0),
+                ("Каналы", "📺", self.s_channels, discord.ButtonStyle.secondary, 0),
+                ("Модули", "⚙️", self.s_modules, discord.ButtonStyle.secondary, 0),
+                ("ИИ", "🤖", self.s_ai, discord.ButtonStyle.secondary, 1),
+                ("Проверка", "🔐", self.s_audit, discord.ButtonStyle.secondary, 1),
+                ("Собрать сервер", "🏗", self.s_build, discord.ButtonStyle.success, 1),
+                ("Обновить", "🔄", self.s_refresh, discord.ButtonStyle.secondary, 1)):
+            b = discord.ui.Button(label=label, emoji=emoji, style=style, row=row)
+            b.callback = fn
+            self.add_item(b)
+
+    async def interaction_check(self, inter: discord.Interaction) -> bool:
+        if can_manage(inter.client, inter):
+            return True
+        await deny(inter)
+        return False
+
+    async def s_refresh(self, inter):
+        await inter.response.edit_message(embed=wizard_embed(inter.client, inter.guild), view=self)
+
+    async def s_profile(self, inter):
+        from cogs.families import ProfileModal
+        await inter.response.send_modal(ProfileModal(inter.client, inter.guild))
+
+    async def s_roles(self, inter):
+        from cogs.families import RoleMapView, render_map
+        await inter.response.send_message(render_map(inter.client, inter.guild), view=RoleMapView(inter.client, inter.guild),
+                                          ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+    async def s_channels(self, inter):
+        await inter.response.send_message(render_chmap(inter.client, inter.guild, 0),
+                                          view=ChanMapView(inter.client, inter.guild, 0), ephemeral=True)
+
+    async def s_modules(self, inter):
+        from cogs.control import ModulesView, render
+        await inter.response.send_message(render(inter.client, inter.guild), view=ModulesView(inter.client, inter.guild),
+                                          ephemeral=True)
+
+    async def s_ai(self, inter):
+        bot, g = inter.client, inter.guild
+        if bot.is_home(g):
+            ai = bot.ai_for(g)
+            return await inter.response.send_message(
+                f"🏠 Домашний сервер: ИИ работает на ключах хоста — **{ai.name if ai.on else 'ключей нет'}**.",
+                ephemeral=True)
+        from cogs.control import KeyModal
+        await inter.response.send_modal(KeyModal(bot))
+
+    async def s_audit(self, inter):
+        lines, _ = audit(inter.client, inter.guild)
+        v = discord.ui.View(timeout=600)
+        b = discord.ui.Button(label="Права по каналам", emoji="🔐", style=discord.ButtonStyle.secondary)
+
+        async def perms(i):
+            await self.cog.perms_cmd.callback(self.cog, i)
+        b.callback = perms
+        v.add_item(b)
+        await inter.response.send_message("**🔐 Проверка сервера**\n" + "\n".join(lines), view=v, ephemeral=True)
+
+    async def s_build(self, inter):
+        if not inter.user.guild_permissions.administrator:
+            return await inter.response.send_message("⛔ Собрать сервер может только администратор.", ephemeral=True)
+        await self.cog.build(inter)
+
+
 class ServerSetup(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    async def open_wizard(self, inter: discord.Interaction):
+        if not can_manage(self.bot, inter):
+            return await deny(inter)
+        await inter.response.send_message(embed=wizard_embed(self.bot, inter.guild), view=WizardView(self),
+                                          ephemeral=True)
 
     async def post_panels(self, guild, repost):
         bot = self.bot
@@ -266,14 +516,20 @@ class ServerSetup(commands.Cog):
         await bot.panel_once(guild, "welcome", "welcome", repost, welcome, version=3)
         await bot.panel_once(guild, "selfroles", "selfroles", repost, selfroles, version=4)
 
-    @app_commands.command(name="настройка", description="Собрать/обновить сервер: роли, каналы, права, оформление, панели")
+    @app_commands.command(name="настройка", description="Мастер настройки: семья, роли, каналы, модули, ИИ, сборка сервера")
     @app_commands.rename(repost="перепостить_панели", branding="обновить_оформление")
-    @app_commands.describe(repost="Заново отправить все панели (правила, заявки и т.д.)",
-                           branding="Заново поставить герб на иконку сервера и баннер")
+    @app_commands.describe(repost="Сразу собрать сервер и заново отправить все панели (без мастера)",
+                           branding="Сразу собрать сервер и заново поставить герб на иконку и баннер (без мастера)")
     @app_commands.default_permissions(administrator=True)
     async def setup_cmd(self, inter: discord.Interaction, repost: bool = False, branding: bool = False):
-        if not inter.user.guild_permissions.administrator:
-            return await inter.response.send_message("⛔ Только для администратора.", ephemeral=True)
+        if repost or branding:  # старый путь: сразу собрать
+            if not inter.user.guild_permissions.administrator:
+                return await inter.response.send_message("⛔ Только для администратора.", ephemeral=True)
+            return await self.build(inter, repost, branding)
+        await self.open_wizard(inter)
+
+    async def build(self, inter: discord.Interaction, repost=False, branding=False):
+        """Сборка сервера (роли, каналы, права, оформление, панели) с прогрессом в эфемерном сообщении."""
         await inter.response.defer(ephemeral=True, thinking=True)
         lines = []
 
