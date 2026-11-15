@@ -194,6 +194,12 @@ ACTIONS = {
     "digest": ("🗞", "Сводка", "сводка", {}),
     "gather": ("📣", "Объявить сбор", "сбор", {}),
     "announce": ("📢", "Объявление", "объявление", {}),
+    "draft": ("📝", "ИИ-черновик", "черновик", {}),
+    "sched": ("⏰", "Объявление на время", "запланировать", {}),
+    "sched_list": ("🗓", "Запланированные", "запланированные", {}),
+    "relay_set": ("📰", "Ретранслятор новостей", "ретранслятор настроить", {}),
+    "missed": ("🕰", "Что я пропустил", "пропустил", {}),
+    "search": ("🔎", "Поиск в интернете", "поиск", {}),
     "chron": ("📖", "Глава летописи", "летопись глава", {}),
     # модерация
     "sec": ("🛡", "Защита: статус", "защита статус", {}),
@@ -276,7 +282,8 @@ LEAD_SECTIONS = {
                                                      "exam_q", "rec_stats", "rec_rate"]),
     "staff": ("🎖", "Кадры", config.LEAD + ["hr_head", "senior"],
               ["rank", "post", "warn", "warns", "unwarn", "mute", "expel", "nick_tpl", "nick_check"]),
-    "activity": ("📊", "Активность", STAFF, ["report", "top", "inactive", "digest", "gather", "announce", "chron"]),
+    "activity": ("📊", "Активность", STAFF, ["report", "top", "inactive", "digest", "gather", "announce", "draft", "sched",
+                                         "sched_list", "relay_set", "chron"]),
     "mod": ("🛡", "Модерация", config.LEAD + ["hr_head", "senior"],
             ["sec", "raid_on", "raid_off", "bl_list", "bl_check", "bl_add"]),
     "diplo": ("🤝", "Дипломатия", config.DIPLO, ["treaties", "nego", "rel_set", "treaty_add"]),
@@ -291,7 +298,7 @@ LEAD_SECTIONS = {
     "setup": ("⚙️", "Настройка", SETUP_ROLES, ["wizard", "modules", "ai", "perms"]),
 }
 MEMBER_SECTIONS = {
-    "me": ("👤", "Моё", config.FAMILY_PLUS, ["profile", "dossier", "my_warns", "forget"]),
+    "me": ("👤", "Моё", config.FAMILY_PLUS, ["profile", "missed", "search", "dossier", "my_warns", "forget"]),
     "vac": ("🌴", "Отпуск", config.FAMILY_PLUS, ["vac", "back"]),
     "room": ("🔊", "Моя комната", config.FAMILY_PLUS, ["r_open", "r_close", "r_name", "r_limit", "r_kick", "r_give"]),
     "market": ("🛒", "Рынок", config.FAMILY_PLUS, ["mk_search", "mk_mine", "mk_sell", "mk_price"]),
@@ -704,8 +711,8 @@ class Hub(commands.Cog):
                 except discord.HTTPException:
                     pass
             bot.db.gdel(guild, "panel:hub_member")
-        await bot.panel_once(guild, "hub_member", "panel", repost, member, version=3)  # v2: канал только для семьи, v3: сдать экзамен
-        await bot.panel_once(guild, "hub_lead", "botcmd", repost, lead, version=3)  # v3: ручной приём, срок
+        await bot.panel_once(guild, "hub_member", "panel", repost, member, version=4)  # v2: канал только для семьи, v3: сдать экзамен
+        await bot.panel_once(guild, "hub_lead", "botcmd", repost, lead, version=4)  # v3: ручной приём, срок
         for key, (_, _, mod) in CHANNEL_PANELS.items():
             if mod and not bot.feature(guild, mod):
                 continue

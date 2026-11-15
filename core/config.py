@@ -340,4 +340,5 @@ EXTENSIONS = [
     "cogs.streams", "cogs.appeals", "cogs.promo", "cogs.interviews", "cogs.alliance", "cogs.boosts", "cogs.assistant", "cogs.jarvis", "cogs.daily", "cogs.persona",
     "cogs.maintenance", "cogs.families", "cogs.control", "cogs.hub",
     "cogs.treasury", "cogs.recruit", "cogs.nickcheck",
+    "cogs.automation",
 ]

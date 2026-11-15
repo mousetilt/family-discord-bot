@@ -28,6 +28,7 @@ MOD = config.LEAD + ["hr_head"]
 INFO = "\u200b"   # пометка «это ответ-справка»: показываем целиком и зачитываем в голосе
 # справки — только чтение, выполняются сразу
 ASK = {"law", "profile", "top", "inactive", "warns", "bl_check", "market", "digest", "queue", "roll", "recruit_stats",
+       "web_search", "missed", "draft",
        "treasury_balance", "treasury_debtors", "salary_rates", "fine_list"}
 # казна (cogs/treasury.py): запись — после «Выполнить», справки — сразу
 TREASURY_ACTS = {"treasury_in", "treasury_out", "treasury_due", "treasury_balance", "treasury_debtors", "dues_set",
@@ -40,7 +41,7 @@ LEADS = ["leader", "deputy"]
 CHANNEL_ONLY = {"purge", "slowmode", "poll"}  # работают с текущим каналом — в ЛС их не выполняем
 # болтать со Швейцаром может вся семья и друзья; им доступны только безобидные вещи
 EVERYONE = config.FAMILY_PLUS
-FOR_ALL = {"law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
+FOR_ALL = {"web_search", "missed", "law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
            "music_pause", "music_resume", "music_volume", "listen", "listen_stop", "leave", "invite", "forget"}
 INVITE_GAP = 10 * 60  # один человек зовёт кого-то в войс через бота не чаще раза в 10 минут
 # живые отговорки вместо казённых фраз
@@ -63,7 +64,8 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "warns
          "chronicle": config.LEAD, "invite": USERS, "forget": USERS,
          "leave": USERS, "listen": USERS, "listen_stop": USERS, "move": USERS, "disconnect": USERS, "say": USERS, "music_play": USERS, "music_skip": USERS,
          "music_stop": USERS, "music_volume": USERS, "gather": config.ORGANIZERS, "announce": config.ORGANIZERS,
-         "alarm": config.LEAD, "accept": config.HR, "recruit_stats": config.HR + ["treasurer"], "mute": MOD, "unmute": MOD, "warn": MOD, "purge": MOD, "rank": config.LEAD,
+         "alarm": config.LEAD, "web_search": USERS, "missed": USERS, "draft": config.LEAD + ["events", "hr_head", "recruiter", "diplomat"],
+         "accept": config.HR, "recruit_stats": config.HR + ["treasurer"], "mute": MOD, "unmute": MOD, "warn": MOD, "purge": MOD, "rank": config.LEAD,
          **{t: config.TREASURY for t in TREASURY_ACTS}, "dues_set": LEADS, "salary_rate_set": LEADS,
          "fine_add": config.TREASURY + ["hr_head"], "fine_list": config.TREASURY + ["hr_head"]}
 LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив",
@@ -78,7 +80,8 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "music_play": "🎵 Включить", "music_skip": "⏭ Пропустить трек", "music_stop": "⏹ Выключить музыку",
          "music_volume": "🔊 Громкость", "gather": "📣 Сбор", "announce": "📢 Объявление", "alarm": "🚨 Тревога",
          "mute": "🔇 Мут", "unmute": "🔊 Снять мут", "warn": "⚖️ Выговор", "purge": "🧹 Очистить чат",
-         "rank": "🔁 Ранг", "accept": "🛂 Принять в семью", "recruit_stats": "📊 Статистика рекрутёров", "treasury_in": "➕ Приход в казну", "treasury_out": "➖ Расход из казны",
+         "rank": "🔁 Ранг", "accept": "🛂 Принять в семью", "web_search": "🔎 Поиск", "missed": "🕰 Что я пропустил", "draft": "📝 Черновик",
+         "recruit_stats": "📊 Статистика рекрутёров", "treasury_in": "➕ Приход в казну", "treasury_out": "➖ Расход из казны",
          "treasury_due": "✅ Взнос", "treasury_balance": "💰 Баланс казны", "treasury_debtors": "📋 Должники",
          "dues_set": "⚙️ Настройка взноса", "salary_rates": "💸 Ставки зарплат",
          "salary_rate_set": "💸 Ставка зарплаты", "salary_ranks": "💸 Зарплата по ставкам",
@@ -145,6 +148,9 @@ ACT_ALL = """ДЕЙСТВИЯ, доступные всем (поле "type"):
 - music_play: {"query":"песня или ссылка"}; music_skip; music_stop; music_pause; music_resume;
   music_volume: {"percent":5..150}; queue — что играет
 - law: {"question":"..."} — ЛЮБОЙ вопрос про законы, штрафы, правила проекта и устав; сам по памяти не отвечай
+- web_search: {"query":"что искать"} — свежие факты, новости, курсы, погода, что угодно из интернета, чего ты
+  точно не знаешь. Анекдоты, шутки, тосты, стишки — рассказывай САМ в "reply", без поиска
+- missed: {"hours":1..72} — «что я пропустил», сводка семьи за последние часы (по умолчанию 12)
 - market: {"query":"..."} — рынок семьи; top: {"period":"week"|"all"}; roll: {"max":2..1000000}
 - profile: {"user":id} — профиль; remind: {"minutes":1..1440,"text":"..."} — напомнить автору
 - listen — зайти в войс автора и СЛУШАТЬ команды (голое «зайди», «слушай», «залезай в войс»). Но если просят
@@ -163,7 +169,8 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
   «зайди к X и спроси/скажи», «спроси у X как дела», «передай X…», «поздоровайся в войсе» — это say с ГОТОВОЙ
   фразой от себя, напр. {{"type":"say","text":"Дарья, ну как ты, рассказывай!"}}. Если ещё и слушать команды —
   добавь отдельным действием listen. gather: {{"what":"...","when":"...","where":"..."}} — сбор
-- announce: {{"title":"...","text":"...","voice":true|false}}; alarm: {{"text":"..."}} — тревога во всех войсах
+- announce: {{"title":"...","text":"...","voice":true|false,"at":"когда, если просят позже: «в 20:00», «завтра 18:00», «через 2 часа»; иначе null"}};
+- draft: {{"kind":"announce"|"event"|"pr"|"recruit"|"congrats","topic":"о чём"}} — написать черновик текста (не публикуя); alarm: {{"text":"..."}} — тревога во всех войсах
 - mute: {{"users":[...],"minutes":1..1440,"reason":"..."}}; unmute: {{"users":[...]}}; purge: {{"count":1..100}}
 - warn: {{"user":id,"reason":"...","fine":"30к" или null — если просят ещё и штраф}}; unwarn: {{"user":id}}; warns: {{"user":id}} — показать выговоры
 - rank: {{"user":id,"rank":"newbie"|"member"|"senior"}}; post: {{"user":id,"post":{"|".join(config.STAFF_POSTS)},"add":true|false}}
@@ -762,6 +769,21 @@ class Assistant(commands.Cog):
         if t in TREASURY_ACTS:
             tr = bot.get_cog("Treasury")
             return await tr.speech(g, me, a) if tr else "Казна не загружена."
+        if t in ("web_search", "missed", "draft"):
+            auto = bot.get_cog("Automation")
+            if not auto:
+                return "Модуль автоматизации не загружен."
+            if t == "web_search":
+                return await auto.search_answer(g, me.id, str(a.get("query") or "")[:200])
+            if t == "missed":
+                try:
+                    hours = int(a.get("hours") or 12)
+                except (TypeError, ValueError):
+                    hours = 12
+                return await auto.missed(me, hours)
+            title_, text = await auto.draft(g, str(a.get("kind") or "announce"), str(a.get("topic") or ""))
+            return (f"📝 **{title_}**\n{text}\n\n_Это черновик. Опубликовать: «Швейцар, объяви это» или `/черновик`._"
+                    if text else title_)
         if t == "recruit_stats":
             rec = bot.get_cog("Recruit")
             try:
@@ -1018,6 +1040,10 @@ class Assistant(commands.Cog):
                                           (str(a.get("where"))[:100] if a.get("where") else None), 0, 0,
                                           message.channel)
                     out.append(f"📣 Сбор создан: {msg.jump_url}")
+                elif t == "announce" and a.get("at") and bot.get_cog("Automation"):
+                    out.append(bot.get_cog("Automation").schedule(g, me, str(a.get("title") or "Объявление"),
+                                                                  str(a.get("text", "")), a.get("at"),
+                                                                  voice=bool(a.get("voice"))))
                 elif t == "announce":
                     c = bot.ch(g, "news") or message.channel
                     e = bot.embed(f"📢 {str(a.get('title', 'Объявление'))[:200]}", str(a.get("text", ""))[:3500],

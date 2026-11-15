@@ -51,6 +51,7 @@ class AI:
         self._anthropic = None
         self.cool = {}    # (провайдер, модель) -> до какого момента не трогаем: лимит исчерпан
         self.dead = set() # (провайдер, модель), которых у провайдера больше нет
+        self._no_search = set()  # модели Gemini без поиска Google (для grounded)
         # второй бесплатный ИИ как подстраховка: кончился лимит у одного — отвечает другой
         self.backup = ("gemini" if self.provider == "groq" and self.keys.get("gemini") else
                        "groq" if self.provider == "gemini" and self.keys.get("groq") else None)
@@ -218,6 +219,45 @@ class AI:
         cands = data.get("candidates") or []
         parts = (cands[0].get("content") or {}).get("parts", []) if cands else []
         return "".join(p.get("text", "") for p in parts if not p.get("thought"))
+
+    async def grounded(self, system, prompt, max_tokens=600):
+        """Ответ Gemini с поиском Google (бесплатно на ключе Gemini) → (текст, [(название, ссылка)]).
+        Нет ключа Gemini или поиск не ответил — AIUnavailable."""
+        key = self.keys.get("gemini")
+        if not key:
+            raise AIUnavailable("Для поиска в интернете нужен бесплатный ключ Gemini (/ии ключ)")
+        last, now = None, time.monotonic()
+        for model in DEFAULTS["gemini"]:
+            k = ("gemini", model)
+            if k in self.dead or k in self._no_search or self.cool.get(k, 0) > now:
+                continue
+            payload = {"systemInstruction": {"parts": [{"text": system}]},
+                       "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                       "tools": [{"google_search": {}}],
+                       "generationConfig": {"maxOutputTokens": max_tokens + 2048, "temperature": 0.3}}
+            try:
+                data = await self._post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                                        payload, {"x-goog-api-key": key})
+            except _ModelMissing as e:  # модель есть, но без поиска — для обычных ответов её не трогаем
+                self._no_search.add(k)
+                last = e
+                continue
+            except _RateLimited as e:
+                self.cool[k] = now + retry_after(str(e))
+                last = e
+                continue
+            except (AIUnavailable, aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
+                last = e
+                continue
+            cand = (data.get("candidates") or [{}])[0]
+            text = "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", []) if not p.get("thought"))
+            chunks = (cand.get("groundingMetadata") or {}).get("groundingChunks") or []
+            src = [((c.get("web") or {}).get("title", ""), (c.get("web") or {}).get("uri", "")) for c in chunks
+                   if c.get("web")]
+            if text.strip():
+                self._count()
+                return text.strip(), src
+        raise AIUnavailable(f"Поиск не ответил: {str(last)[:120]}")
 
     async def _ollama(self, model, system, prompt, max_tokens):
         payload = {"model": model, "stream": False, "options": {"num_predict": max_tokens},

@@ -25,7 +25,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from core import config
-from core.botcore import guarded, safe_dm
+from core.botcore import guarded
 
 log = logging.getLogger("family-bot.maintenance")
 REMOTE_CHANGELOG = "https://raw.githubusercontent.com/mousetilt/family-discord-bot/main/data/changelog.json"
