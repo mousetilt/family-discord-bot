@@ -13,14 +13,15 @@ import re
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from core import config
-from core.botcore import now, safe_dm
+from core.botcore import guarded, now, safe_dm
 
 log = logging.getLogger("family-bot.treasury")
 TREASURY = config.TREASURY
 DUES_SETTERS = ["leader", "deputy"]  # взнос и ставки зарплат настраивают Глава и заместитель
+FINERS = TREASURY + ["hr_head"]  # штраф выписывают ещё и кадры (вместе с выговором); оплату отмечает казна
 RATE_ROLES = list(config.ROSTER_ORDER)  # роли, на которые можно поставить ставку зарплаты
 ROLE_CHOICES = [app_commands.Choice(name=config.ROLE_NAMES[k], value=k) for k in RATE_ROLES][:25]
 MAX_AMOUNT = 10 ** 12
@@ -131,10 +132,10 @@ class PayView(discord.ui.View):
         await inter.response.edit_message(content="Отменено. Казна не тронута.", view=None)
 
 
-def treasury_only():
+def treasury_only(keys=None):
     async def pred(inter: discord.Interaction):
         cog = inter.client.get_cog("Treasury")
-        return bool(cog) and await cog.gate(inter)
+        return bool(cog) and await cog.gate(inter, None, keys or TREASURY)
     return app_commands.check(pred)
 
 
@@ -144,6 +145,10 @@ class Treasury(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self.remind_loop.start()
+
+    def cog_unload(self):
+        self.remind_loop.cancel()
 
     # ---------- доступ ----------
     def allowed(self, member, keys=TREASURY):
@@ -304,6 +309,11 @@ class Treasury(commands.Cog):
         line = f"💰 Казна: {fmt(self.balance(guild.id))}"
         if self.dues(guild)[0] and self.bot.feature(guild, "treasury:dues"):
             line += f" · должников по взносу: {len(self.debtors(guild))}"
+        if self.bot.feature(guild, "treasury:fines"):
+            rows = self.unpaid(guild)
+            if rows:
+                line += (f"\n🧾 Неоплаченных штрафов: {len({r['user_id'] for r in rows})} чел. на "
+                         f"{fmt(sum(int(r['amount']) for r in rows))}")
         return line
 
     # ---------- зарплаты ----------
@@ -392,6 +402,96 @@ class Treasury(commands.Cog):
         return (f"💸 Выплачено {len(pairs)} чел. на **{fmt(total)}** — {reason}. Баланс: **{fmt(bal)}**"
                 + (" ⚠️ казна в минусе!" if bal < 0 else "."))
 
+    # ---------- штрафы ----------
+    def unpaid(self, guild, user_id=None):
+        if user_id:
+            return self.bot.db.all("SELECT * FROM fines WHERE guild_id=? AND user_id=? AND paid=0 ORDER BY id",
+                                   guild.id, user_id)
+        return self.bot.db.all("SELECT * FROM fines WHERE guild_id=? AND paid=0 ORDER BY user_id, id", guild.id)
+
+    async def fine(self, guild, actor, member, amount, reason):
+        reason = clean(reason, 200) or "без причины"
+        cur = self.bot.db.q("INSERT INTO fines(guild_id, user_id, actor_id, amount, reason, ts) VALUES(?,?,?,?,?,?)",
+                            guild.id, member.id, actor.id, int(amount), reason, int(now().timestamp()))
+        fid = cur.lastrowid
+        total = sum(int(r["amount"]) for r in self.unpaid(guild, member.id))
+        await safe_dm(member, f"💸 Тебе штраф в семье {self.bot.family(guild)['name']}: **{fmt(amount)}** — {reason} "
+                              f"(№{fid}).\nВсего неоплачено: {fmt(total)}. Сдай казначею или руководству.")
+        await self.journal(guild, f"🧾 Штраф №{fid}: {member.mention} — **{fmt(amount)}** · {reason}\n"
+                                  f"Выписал: {actor.mention} · всего на нём: {fmt(total)}", 0xE53935)
+        log.info("Казна «%s»: штраф %s %s (%s)", guild.name, member, amount, actor)
+        return f"🧾 Штраф №{fid} {member.display_name}: **{fmt(amount)}** — {reason}. Неоплачено у него: {fmt(total)}."
+
+    async def fine_paid(self, guild, actor, member, fid=None):
+        rows = self.unpaid(guild, member.id)
+        if fid:
+            rows = [r for r in rows if r["id"] == int(fid)]
+        if not rows:
+            return f"У {member.display_name} нет неоплаченных штрафов" + (f" с №{fid}" if fid else "") + "."
+        ts = int(now().timestamp())
+        for r in rows:
+            self.bot.db.q("UPDATE fines SET paid=1, paid_ts=? WHERE id=?", ts, r["id"])
+            await self.tx(guild, "in", r["amount"], actor, member.id, f"штраф №{r['id']}: {r['reason']}", quiet=True)
+        total = sum(int(r["amount"]) for r in rows)
+        nums = ", ".join(f"№{r['id']}" for r in rows)
+        await self.journal(guild, f"✅ Оплачены штрафы {member.mention} ({nums}): **{fmt(total)}** → в казну\n"
+                                  f"Отметил: {actor.mention} · баланс: **{fmt(self.balance(guild.id))}**", config.GREEN)
+        return f"✅ {member.display_name} оплатил {nums} — **{fmt(total)}** ушло в казну."
+
+    async def fine_cancel(self, guild, actor, fid):
+        r = self.bot.db.one("SELECT * FROM fines WHERE guild_id=? AND id=? AND paid=0", guild.id, int(fid))
+        if not r:
+            return f"❌ Неоплаченного штрафа №{fid} нет."
+        self.bot.db.q("UPDATE fines SET paid=-1, paid_ts=? WHERE id=?", int(now().timestamp()), r["id"])
+        await self.journal(guild, f"↩️ Штраф №{r['id']} (<@{r['user_id']}>, {fmt(r['amount'])}) отменён — "
+                                  f"{actor.mention}")
+        return f"↩️ Штраф №{r['id']} отменён."
+
+    def fines_text(self, guild):
+        rows = self.unpaid(guild)
+        if not rows:
+            return "✅ Неоплаченных штрафов нет."
+        per = {}
+        for r in rows:
+            per.setdefault(r["user_id"], []).append(r)
+        total = sum(int(r["amount"]) for r in rows)
+        lines = [f"🧾 Неоплаченные штрафы: {len(per)} чел. на **{fmt(total)}**"]
+        for uid, rs in list(per.items())[:25]:
+            lines.append(f"• <@{uid}> — {fmt(sum(int(r['amount']) for r in rs))}: "
+                         + "; ".join(f"№{r['id']} {fmt(r['amount'])} {r['reason'][:40]}" for r in rs[:4]))
+        return "\n".join(lines)[:1900]
+
+    @tasks.loop(minutes=30)
+    @guarded
+    async def remind_loop(self):
+        """Раз в день (после 12:00 МСК) — ЛС тем, у кого неоплаченные штрафы."""
+        t = msk_now()
+        if t.hour < 12:
+            return
+        day = t.strftime("%Y-%m-%d")
+        for g in self.bot.home_guilds:
+            if not self.bot.feature(g, "treasury:fines") or not self.bot.feature(g, "treasury:remind"):
+                continue
+            if self.bot.db.gget(g, "fines:reminded") == day:
+                continue
+            self.bot.db.gset(g, "fines:reminded", day)
+            per = {}
+            for r in self.unpaid(g):
+                per.setdefault(r["user_id"], []).append(r)
+            fam = self.bot.family(g)["name"]
+            for uid, rs in per.items():
+                m = g.get_member(uid)
+                if not m:
+                    continue
+                await safe_dm(m, f"⏰ Напоминаю: на тебе неоплаченные штрафы в семье {fam} — "
+                                 f"**{fmt(sum(int(r['amount']) for r in rs))}** ("
+                                 + "; ".join(f"№{r['id']} {r['reason'][:60]}" for r in rs[:5])
+                                 + "). Сдай казначею или руководству.")
+
+    @remind_loop.before_loop
+    async def _before(self):
+        await self.bot.wait_until_ready()
+
     # ---------- речь (вызывает assistant.py) ----------
     def describe(self, guild, a, who=None):
         """Строка для окна «Подтверди»."""
@@ -407,6 +507,10 @@ class Treasury(commands.Cog):
             return f"✅ Взнос {who.display_name if who else '❓кто'}: {s if amount else 'сумма взноса по умолчанию'}"
         if t == "dues_set":
             return f"⚙️ Взнос {s} в {PERIODS.get(a.get('period'), 'неделю')}"
+        if t == "fine_add":
+            return f"🧾 Штраф {who.display_name if who else '❓кому'}: {s} — {clean(a.get('reason'), 100)}"
+        if t == "fine_paid":
+            return f"✅ {who.display_name if who else '❓кто'} оплатил штраф" + (f" №{a['id']}" if a.get("id") else "ы")
         if t == "salary_rate_set":
             key = a.get("role")
             return f"💸 Ставка «{config.ROLE_NAMES.get(key, '❓роль')}»: {s if amount else 'убрать'}"
@@ -431,9 +535,31 @@ class Treasury(commands.Cog):
         act = {"treasury_due": "dues", "dues_set": "dues", "treasury_debtors": "dues"}.get(t)
         if t.startswith("salary_"):
             act = "salary"
-        why = self.why_not(guild, actor, act, DUES_SETTERS if t in ("dues_set", "salary_rate_set") else TREASURY)
+        if t.startswith("fine_"):
+            act = "fines"
+        keys = DUES_SETTERS if t in ("dues_set", "salary_rate_set") else FINERS if t in ("fine_add", "fine_list") \
+            else TREASURY
+        why = self.why_not(guild, actor, act, keys)
         if why:
             return why
+        if t == "fine_list":
+            return self.fines_text(guild)
+        if t == "fine_paid":
+            if not who:
+                return "❌ Не понял, кто оплатил штраф — назови ник точнее."
+            fid = a.get("id")
+            try:
+                fid = int(fid) if fid else None
+            except (TypeError, ValueError):
+                fid = None
+            return await self.fine_paid(guild, actor, who, fid)
+        if t == "fine_add":
+            amount = parse_amount(a.get("amount"))
+            if not who or who.bot:
+                return "❌ Не понял, кому штраф — назови ник точнее."
+            if not amount:
+                return "❌ Не понял сумму штрафа. Пиши как в игре: 30к, 1кк."
+            return await self.fine(guild, actor, who, amount, a.get("reason") or "")
         if t == "treasury_balance":
             return self.balance_text(guild)
         if t == "treasury_debtors":
@@ -564,6 +690,43 @@ class Treasury(commands.Cog):
             text = self.set_dues(inter.guild, n, period.value)
             await self.journal(inter.guild, f"{text}\nНастроил: {inter.user.mention}")
             await inter.response.send_message(text, ephemeral=True)
+
+    # ---------- штрафы ----------
+    @group.command(name="штраф", description="Выписать штраф участнику (в ЛС придёт уведомление)")
+    @app_commands.rename(member="участник", amount="сумма", reason="за_что")
+    @treasury_only(FINERS)
+    async def c_fine(self, inter: discord.Interaction, member: discord.Member, amount: str, reason: str):
+        if not await self.gate(inter, "fines", FINERS):
+            return
+        if member.bot:
+            return await inter.response.send_message("Боту штраф не выписать 🙂", ephemeral=True)
+        n = await self._amount(inter, amount)
+        if n:
+            await inter.response.send_message(await self.fine(inter.guild, inter.user, member, n, reason),
+                                              ephemeral=True)
+
+    @group.command(name="штрафы", description="Кто не оплатил штрафы")
+    @treasury_only(FINERS)
+    async def c_fines(self, inter: discord.Interaction):
+        if await self.gate(inter, "fines", FINERS):
+            await inter.response.send_message(self.fines_text(inter.guild), ephemeral=True,
+                                              allowed_mentions=discord.AllowedMentions.none())
+
+    @group.command(name="штраф-оплачен", description="Отметить оплату штрафа — деньги уходят в казну")
+    @app_commands.rename(member="участник", fid="номер")
+    @app_commands.describe(fid="Номер штрафа; пусто — все неоплаченные штрафы участника")
+    @treasury_only()
+    async def c_fine_paid(self, inter: discord.Interaction, member: discord.Member, fid: int = None):
+        if await self.gate(inter, "fines"):
+            await inter.response.send_message(await self.fine_paid(inter.guild, inter.user, member, fid),
+                                              ephemeral=True)
+
+    @group.command(name="штраф-отменить", description="Отменить ошибочный штраф по номеру")
+    @app_commands.rename(fid="номер")
+    @treasury_only()
+    async def c_fine_cancel(self, inter: discord.Interaction, fid: int):
+        if await self.gate(inter, "fines"):
+            await inter.response.send_message(await self.fine_cancel(inter.guild, inter.user, fid), ephemeral=True)
 
     # ---------- зарплаты ----------
     @group.command(name="ставки", description="Ставки зарплат по ролям и сколько уйдёт на выплату")

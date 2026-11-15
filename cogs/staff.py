@@ -168,9 +168,10 @@ class Staff(commands.Cog):
 
     @app_commands.default_permissions(moderate_members=True)
     @app_commands.command(name="выговор", description="Выдать выговор")
-    @app_commands.rename(member="участник", reason="причина")
+    @app_commands.rename(member="участник", reason="причина", fine="штраф")
+    @app_commands.describe(fine="Сразу выписать штраф, например 30к (если казна включена)")
     @staff_only(config.LEAD + ["hr_head"])
-    async def warn(self, inter: discord.Interaction, member: discord.Member, reason: str):
+    async def warn(self, inter: discord.Interaction, member: discord.Member, reason: str, fine: str = None):
         if member.bot:
             return await inter.response.send_message("Боту выговор не выдать 🙂", ephemeral=True)
         if not self.bot.outranks(inter.user, member):
@@ -178,7 +179,12 @@ class Staff(commands.Cog):
                                                      ephemeral=True)
         await inter.response.defer(ephemeral=True)
         n = await self.bot.give_warn(inter.guild, member, inter.user, reason)
-        await inter.followup.send(f"✅ Выговор выдан ({n}/3).", ephemeral=True)
+        extra = ""
+        tr = self.bot.get_cog("Treasury")
+        if fine and tr:  # выговор + штраф
+            extra = "\n" + await tr.speech(inter.guild, inter.user, {"type": "fine_add", "amount": fine,
+                                                                      "reason": reason}, member)
+        await inter.followup.send(f"✅ Выговор выдан ({n}/3).{extra}", ephemeral=True)
 
     @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="выговоры", description="Посмотреть выговоры")

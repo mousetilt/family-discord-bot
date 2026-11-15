@@ -27,10 +27,11 @@ MOD = config.LEAD + ["hr_head"]
 INFO = "\u200b"   # пометка «это ответ-справка»: показываем целиком и зачитываем в голосе
 # справки — только чтение, выполняются сразу
 ASK = {"law", "profile", "top", "inactive", "warns", "bl_check", "market", "digest", "queue", "roll",
-       "treasury_balance", "treasury_debtors", "salary_rates"}
+       "treasury_balance", "treasury_debtors", "salary_rates", "fine_list"}
 # казна (cogs/treasury.py): запись — после «Выполнить», справки — сразу
 TREASURY_ACTS = {"treasury_in", "treasury_out", "treasury_due", "treasury_balance", "treasury_debtors", "dues_set",
-                 "salary_rates", "salary_rate_set", "salary_ranks", "salary_role", "salary_pay"}
+                 "salary_rates", "salary_rate_set", "salary_ranks", "salary_role", "salary_pay",
+                 "fine_add", "fine_list", "fine_paid"}
 SAFE = {"move", "disconnect", "say", "music_play", "music_skip", "music_stop", "music_volume", "listen",
         "listen_stop", "leave", "music_pause", "music_resume", "voice_mute", "voice_unmute", "remind", "invite",
         "forget"} | ASK
@@ -61,7 +62,8 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "warns
          "leave": USERS, "listen": USERS, "listen_stop": USERS, "move": USERS, "disconnect": USERS, "say": USERS, "music_play": USERS, "music_skip": USERS,
          "music_stop": USERS, "music_volume": USERS, "gather": config.ORGANIZERS, "announce": config.ORGANIZERS,
          "alarm": config.LEAD, "mute": MOD, "unmute": MOD, "warn": MOD, "purge": MOD, "rank": config.LEAD,
-         **{t: config.TREASURY for t in TREASURY_ACTS}, "dues_set": LEADS, "salary_rate_set": LEADS}
+         **{t: config.TREASURY for t in TREASURY_ACTS}, "dues_set": LEADS, "salary_rate_set": LEADS,
+         "fine_add": config.TREASURY + ["hr_head"], "fine_list": config.TREASURY + ["hr_head"]}
 LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив",
          "warns": "⚖️ Выговоры", "bl_check": "⛔ Проверка ЧС", "market": "🛒 Рынок", "queue": "🎶 Очередь",
          "roll": "🎲 Кубик", "digest": "🗞 Сводка", "music_pause": "⏸ Пауза", "music_resume": "▶️ Продолжить",
@@ -78,7 +80,8 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "treasury_due": "✅ Взнос", "treasury_balance": "💰 Баланс казны", "treasury_debtors": "📋 Должники",
          "dues_set": "⚙️ Настройка взноса", "salary_rates": "💸 Ставки зарплат",
          "salary_rate_set": "💸 Ставка зарплаты", "salary_ranks": "💸 Зарплата по ставкам",
-         "salary_role": "💸 Выплата роли", "salary_pay": "💸 Выплата"}
+         "salary_role": "💸 Выплата роли", "salary_pay": "💸 Выплата", "fine_add": "🧾 Штраф",
+         "fine_list": "🧾 Неоплаченные штрафы", "fine_paid": "✅ Оплата штрафа"}
 
 # как каналы называют в разговоре (ключ канала из настроек → слова)
 CHANNEL_HINTS = {
@@ -160,7 +163,7 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
   добавь отдельным действием listen. gather: {{"what":"...","when":"...","where":"..."}} — сбор
 - announce: {{"title":"...","text":"...","voice":true|false}}; alarm: {{"text":"..."}} — тревога во всех войсах
 - mute: {{"users":[...],"minutes":1..1440,"reason":"..."}}; unmute: {{"users":[...]}}; purge: {{"count":1..100}}
-- warn: {{"user":id,"reason":"..."}}; unwarn: {{"user":id}}; warns: {{"user":id}} — показать выговоры
+- warn: {{"user":id,"reason":"...","fine":"30к" или null — если просят ещё и штраф}}; unwarn: {{"user":id}}; warns: {{"user":id}} — показать выговоры
 - rank: {{"user":id,"rank":"newbie"|"member"|"senior"}}; post: {{"user":id,"post":{"|".join(config.STAFF_POSTS)},"add":true|false}}
 - expel: {{"user":id,"reason":"..."}}; kick / ban: {{"user":id,"reason":"..."}}; nick: {{"user":id,"nick":"..."}}
 - bl_add: {{"user":id или "nick":"...","static":"...","reason":"...","days":0}}; bl_check: {{"user":id или "nick":"...","static":"..."}}
@@ -189,6 +192,8 @@ ACT_TREASURY = """КАЗНА семьи (внутриигровые вирты; 
 - salary_role: {"role":"<роль>","amount":"50к","reason":"..."} — выплатить всем с ролью («организаторам по 50к»)
 - salary_ranks — начислить зарплаты всем по ставкам; salary_rates — показать ставки
 - salary_rate_set: {"role":"<роль>","amount":"30к" (0 — убрать)} — ставка зарплаты для роли
+- fine_add: {"user":id,"names":["как назвал"],"amount":"30к","reason":"за что"} — штраф («штраф Пете 30к за опоздание»)
+- fine_list — кто со штрафами; fine_paid: {"user":id,"names":[...],"id":номер или null} — человек оплатил штраф
 """
 ACT_TREASURY += "Роли: " + ", ".join(f"{k} — {config.ROLE_NAMES[k]}" for k in config.ROSTER_ORDER) + "\n"
 ACT_TREASURY += """Сумму пиши как сказал автор («50к», «1.5кк», «200000»). Для справок "reply" оставь пустым.
@@ -542,7 +547,7 @@ class Assistant(commands.Cog):
         if t in ("mute",):
             return f"{LABEL[t]} {who} на {a.get('minutes', 10)} мин · {a.get('reason', '')}"
         if t == "warn":
-            return f"{LABEL[t]} {who} · {a.get('reason', '')}"
+            return f"{LABEL[t]} {who} · {a.get('reason', '')}" + (f" + штраф {a['fine']}" if a.get("fine") else "")
         if t == "rank":
             return f"{LABEL[t]} {who} → {config.BASE_RANKS.get(a.get('rank'), a.get('rank'))}"
         if t == "announce":
@@ -981,6 +986,10 @@ class Assistant(commands.Cog):
                     else:
                         n = await bot.give_warn(g, m, me, str(a.get("reason") or "без причины")[:300])
                         out.append(f"⚖️ Выговор {m.display_name} ({n}/3).")
+                        tr = bot.get_cog("Treasury")
+                        if a.get("fine") and tr:  # выговор + штраф одной фразой
+                            out.append(await tr.speech(g, me, {"type": "fine_add", "amount": a.get("fine"),
+                                                               "reason": a.get("reason") or "выговор"}, m))
                 elif t == "rank":
                     m, key = next(iter(self.find_members(message.guild, a)), None), a.get("rank")
                     if not m or key not in config.BASE_RANKS:

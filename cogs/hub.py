@@ -70,7 +70,8 @@ HELP = {
         "🗣 «внеси в казну 50к от Пети за сделку» · «расход 20к на тачку» · «Петя сдал взнос» · «сколько в казне?»",
         "🗣 «кто не сдал взнос?» · Глава/зам: «взнос 100к в неделю» · «ставка рекрутёрам 30к»",
         "🗣 «начисли зарплаты по ставкам» · «выплати организаторам по 50к за ивент» · «заплати Пете 30к»",
-        "🔘 `/панель` → **Казна**: баланс, внести, расход, взнос, должники, история, отчёт · **Зарплаты**",
+        "🗣 «штраф Пете 30к за опоздание» · «выговор Пете за неявку и штраф 50к» · «кто со штрафами?» · «Петя оплатил штраф»",
+        "🔘 `/панель` → **Казна**: баланс, внести, расход, взнос, должники, история, отчёт · **Зарплаты** · **Штрафы**",
     ]),
     "guard": ("🛡", "Модерация и ЧС", True, [
         "Бот сам ловит спам, рекламу, скам и сделки за реал — решения приходят в канал модерации с кнопками",
@@ -216,6 +217,11 @@ ACTIONS = {
     "tr_history": ("🧾", "История", "казна история", {}),
     "tr_report": ("📊", "Отчёт", "казна отчёт", {}),
     "tr_dues": ("⚙️", "Настроить взнос", "казна настроить-взнос", {}),
+    # штрафы
+    "fine_add": ("🧾", "Выписать штраф", "казна штраф", {}),
+    "fine_list": ("📋", "Кто не оплатил", "казна штрафы", {}),
+    "fine_paid": ("✅", "Отметить оплату", "казна штраф-оплачен", {}),
+    "fine_cancel": ("↩️", "Отменить штраф", "казна штраф-отменить", {}),
     # зарплаты
     "sal_rates": ("📋", "Ставки", "казна ставки", {}),
     "sal_rate": ("✏️", "Задать ставку", "казна ставка", {}),
@@ -266,6 +272,7 @@ LEAD_SECTIONS = {
     "treasury": ("💰", "Казна", config.TREASURY, ["tr_balance", "tr_in", "tr_out", "tr_due", "tr_debtors",
                                                "tr_history", "tr_report", "tr_dues"]),
     "salary": ("💸", "Зарплаты", config.TREASURY, ["sal_rates", "sal_rate", "sal_all", "sal_pay", "sal_role"]),
+    "fines": ("🧾", "Штрафы", config.TREASURY + ["hr_head"], ["fine_add", "fine_list", "fine_paid", "fine_cancel"]),
     "kb": ("📚", "База знаний", config.LEAD + ["hr_head", "mentor"],
            ["kb_list", "kb_find", "kb_text", "kb_link", "kb_rules", "kb_update"]),
     "setup": ("⚙️", "Настройка", SETUP_ROLES, ["wizard", "modules", "ai", "perms"]),
@@ -628,7 +635,7 @@ class Hub(commands.Cog):
             return {"embed": lead_embed(bot, guild), "view": panel_view(LEAD_SECTIONS)}
 
         await bot.panel_once(guild, "hub_member", "welcome", repost, member, version=1)
-        await bot.panel_once(guild, "hub_lead", "botcmd", repost, lead, version=1)
+        await bot.panel_once(guild, "hub_lead", "botcmd", repost, lead, version=2)  # v2: казна, зарплаты, штрафы
 
 
 async def setup(bot):
