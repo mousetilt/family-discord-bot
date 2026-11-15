@@ -515,12 +515,14 @@ class Applications(commands.Cog):
             db.q("UPDATE applications SET status='taken', reviewer_id=? WHERE id=?", inter.user.id, app_id)
         elif action == "interview":
             db.q("UPDATE applications SET status='interview', reviewer_id=? WHERE id=?", inter.user.id, app_id)
+            self.stat(inter.guild, app_id, inter.user.id, "interview")
         elif action == "accept":
             if not member:
                 return await inter.response.send_message("Игрок уже покинул сервер.", ephemeral=True)
             await inter.response.defer()
             db.q("UPDATE applications SET status='accepted', reviewer_id=?, decided_at=? WHERE id=?",
                  inter.user.id, now_iso(), app_id)
+            self.stat(inter.guild, app_id, inter.user.id, "accepted")
             await self.accept(inter.guild, inter.user, a, member)
             a = db.one("SELECT * FROM applications WHERE id=?", app_id)
             return await inter.edit_original_response(embed=app_embed(bot, a, member, inter.guild),
@@ -566,6 +568,12 @@ class Applications(commands.Cog):
         bot.emit(g, "accepted", member=member, by=by, nick=a["nick"], app_id=a["id"])
         self.refresh_panel(g)
 
+    def stat(self, g, app_id, reviewer_id, outcome):
+        """Решение по заявке → статистика рекрутёров (cogs/recruit.py)."""
+        rec = self.bot.get_cog("Recruit")
+        if rec:
+            rec.record(g, app_id, reviewer_id, outcome)
+
     def refresh_panel(self, g):
         """Счётчики заявок на закреплённой панели канала заявок."""
         hub = self.bot.get_cog("Hub")
@@ -599,6 +607,7 @@ class Applications(commands.Cog):
                           "created_at,decided_at) VALUES(?,?,?,?,'accepted',1,?,?,?)", g.id, member.id, nick, static,
                           by.id, now_iso(), now_iso()).lastrowid
         a = db.one("SELECT * FROM applications WHERE id=?", app_id)
+        self.stat(g, app_id, by.id, "accepted")
         await self.accept(g, by, a, member)
         review = bot.ch(g, "review")
         if a["message_id"] and review:  # карточка в канале заявок — закрыть кнопки
@@ -637,6 +646,7 @@ class Applications(commands.Cog):
             return await inter.response.send_message("Заявка уже закрыта.", ephemeral=True)
         db.q("UPDATE applications SET status='denied', reviewer_id=?, deny_reason=?, decided_at=? WHERE id=?",
              inter.user.id, reason, now_iso(), app_id)
+        self.stat(inter.guild, app_id, inter.user.id, "denied")
         a = db.one("SELECT * FROM applications WHERE id=?", app_id)
         member = inter.guild.get_member(a["user_id"])
         if member:

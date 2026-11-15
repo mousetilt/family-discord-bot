@@ -63,6 +63,9 @@ class Interviews(commands.Cog):
             log.warning("Перенос на собеседование: %s", e)
             return False
         db = self.bot.db
+        rec = self.bot.get_cog("Recruit")
+        if rec and app:  # перенос на собеседование = обзвон в статистику рекрутёра
+            rec.record(cand.guild, app["id"], recruiter.id, "interview")
         if app and not app["reviewer_id"]:
             db.q("UPDATE applications SET reviewer_id=?, status='interview' WHERE id=?", recruiter.id, app["id"])
         elif app and app["status"] == "new":

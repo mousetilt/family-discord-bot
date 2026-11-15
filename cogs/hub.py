@@ -169,6 +169,9 @@ ACTIONS = {
     "m_top": ("🏆", "Рейтинг наставников", "наставник рейтинг", {}),
     "exam_q": ("❓", "Вопросы экзамена", "экзамен вопросы", {}),
     "manual": ("🛂", "Принять вручную", "принять", {}),
+    "rec_stats": ("📊", "Статистика рекрутёров", "рекрутёры статистика", {}),
+    "rec_rate": ("✏️", "Ставка рекрутёрам", "рекрутёры ставка", {}),
+    "rec_pay": ("💸", "Выплатить рекрутёрам", "рекрутёры выплатить", {}),
     "m_days": ("⏳", "Срок испытательного", "наставник срок", {}),
     "exam_pass": ("📝", "Сдать экзамен (новичкам)", "экзамен сдать", {}),
     # кадры
@@ -179,6 +182,8 @@ ACTIONS = {
     "unwarn": ("⚪", "Снять выговор", "снять-выговор", {}),
     "mute": ("🔇", "Мут", "мут", {}),
     "expel": ("🚪", "Исключить", "исключить", {}),
+    "nick_tpl": ("✏️", "Шаблон ника", "ник шаблон", {}),
+    "nick_check": ("🔎", "Кто с ником не по форме", "ник проверка", {}),
     # активность
     "report": ("📊", "Отчёт", "отчёт", {}),
     "top": ("🏆", "Топ", "топ", {}),
@@ -265,9 +270,9 @@ SETUP_ROLES = ["leader", "deputy"]
 # раздел: ключ → (эмодзи, название, кому виден (None — всем в семье), [действия])
 LEAD_SECTIONS = {
     "apps": ("📋", "Заявки", config.HR + ["mentor"], ["apps", "manual", "appeals", "m_assign", "m_list", "m_days", "m_top",
-                                                     "exam_q"]),
+                                                     "exam_q", "rec_stats", "rec_rate"]),
     "staff": ("🎖", "Кадры", config.LEAD + ["hr_head", "senior"],
-              ["rank", "post", "warn", "warns", "unwarn", "mute", "expel"]),
+              ["rank", "post", "warn", "warns", "unwarn", "mute", "expel", "nick_tpl", "nick_check"]),
     "activity": ("📊", "Активность", STAFF, ["report", "top", "inactive", "digest", "gather", "announce", "chron"]),
     "mod": ("🛡", "Модерация", config.LEAD + ["hr_head", "senior"],
             ["sec", "raid_on", "raid_off", "bl_list", "bl_check", "bl_add"]),
@@ -275,7 +280,8 @@ LEAD_SECTIONS = {
     "alliance": ("🏰", "Альянс", config.LEAD + ["diplomat"], ["al_roster", "al_charter", "al_chron", "al_alarm"]),
     "treasury": ("💰", "Казна", config.TREASURY, ["tr_balance", "tr_in", "tr_out", "tr_due", "tr_debtors",
                                                "tr_history", "tr_report", "tr_dues"]),
-    "salary": ("💸", "Зарплаты", config.TREASURY, ["sal_rates", "sal_rate", "sal_all", "sal_pay", "sal_role"]),
+    "salary": ("💸", "Зарплаты", config.TREASURY, ["sal_rates", "sal_rate", "sal_all", "sal_pay", "sal_role",
+                                                         "rec_pay"]),
     "fines": ("🧾", "Штрафы", config.TREASURY + ["hr_head"], ["fine_add", "fine_list", "fine_paid", "fine_cancel"]),
     "kb": ("📚", "База знаний", config.LEAD + ["hr_head", "mentor"],
            ["kb_list", "kb_find", "kb_text", "kb_link", "kb_rules", "kb_update"]),

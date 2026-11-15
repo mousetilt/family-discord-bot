@@ -134,7 +134,7 @@ REBUILD = {
 }
 # Глобальные ключи settings (остальные переезжают в guild_settings домашнего сервера)
 GLOBAL_KEYS = ("home_guild", "alliance_charter", "bot_avatar_set")  # аватар — у бота один на всех
-GLOBAL_PREFIXES = ("hub:", "whisper:", "tts:")  # tts:voice — пока общий голос (озвучка не знает сервер)
+GLOBAL_PREFIXES = ("hub:", "whisper:", "tts:", "update:")  # tts:voice — пока общий голос (озвучка не знает сервер)
 ORPHAN = -1  # guild_id «ещё не знаем, чей» — проставится, когда бот узнает свой сервер
 
 

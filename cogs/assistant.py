@@ -26,7 +26,7 @@ USERS = config.ORGANIZERS + config.HR + ["senior", "treasurer"]
 MOD = config.LEAD + ["hr_head"]
 INFO = "\u200b"   # пометка «это ответ-справка»: показываем целиком и зачитываем в голосе
 # справки — только чтение, выполняются сразу
-ASK = {"law", "profile", "top", "inactive", "warns", "bl_check", "market", "digest", "queue", "roll",
+ASK = {"law", "profile", "top", "inactive", "warns", "bl_check", "market", "digest", "queue", "roll", "recruit_stats",
        "treasury_balance", "treasury_debtors", "salary_rates", "fine_list"}
 # казна (cogs/treasury.py): запись — после «Выполнить», справки — сразу
 TREASURY_ACTS = {"treasury_in", "treasury_out", "treasury_due", "treasury_balance", "treasury_debtors", "dues_set",
@@ -61,7 +61,7 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "warns
          "chronicle": config.LEAD, "invite": USERS, "forget": USERS,
          "leave": USERS, "listen": USERS, "listen_stop": USERS, "move": USERS, "disconnect": USERS, "say": USERS, "music_play": USERS, "music_skip": USERS,
          "music_stop": USERS, "music_volume": USERS, "gather": config.ORGANIZERS, "announce": config.ORGANIZERS,
-         "alarm": config.LEAD, "accept": config.HR, "mute": MOD, "unmute": MOD, "warn": MOD, "purge": MOD, "rank": config.LEAD,
+         "alarm": config.LEAD, "accept": config.HR, "recruit_stats": config.HR + ["treasurer"], "mute": MOD, "unmute": MOD, "warn": MOD, "purge": MOD, "rank": config.LEAD,
          **{t: config.TREASURY for t in TREASURY_ACTS}, "dues_set": LEADS, "salary_rate_set": LEADS,
          "fine_add": config.TREASURY + ["hr_head"], "fine_list": config.TREASURY + ["hr_head"]}
 LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив",
@@ -76,7 +76,7 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "music_play": "🎵 Включить", "music_skip": "⏭ Пропустить трек", "music_stop": "⏹ Выключить музыку",
          "music_volume": "🔊 Громкость", "gather": "📣 Сбор", "announce": "📢 Объявление", "alarm": "🚨 Тревога",
          "mute": "🔇 Мут", "unmute": "🔊 Снять мут", "warn": "⚖️ Выговор", "purge": "🧹 Очистить чат",
-         "rank": "🔁 Ранг", "accept": "🛂 Принять в семью", "treasury_in": "➕ Приход в казну", "treasury_out": "➖ Расход из казны",
+         "rank": "🔁 Ранг", "accept": "🛂 Принять в семью", "recruit_stats": "📊 Статистика рекрутёров", "treasury_in": "➕ Приход в казну", "treasury_out": "➖ Расход из казны",
          "treasury_due": "✅ Взнос", "treasury_balance": "💰 Баланс казны", "treasury_debtors": "📋 Должники",
          "dues_set": "⚙️ Настройка взноса", "salary_rates": "💸 Ставки зарплат",
          "salary_rate_set": "💸 Ставка зарплаты", "salary_ranks": "💸 Зарплата по ставкам",
@@ -174,6 +174,7 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
   из списка; «напиши Платону» → id Платона, НЕ автора). Всем — {{"source":"family","text":"..."}}. Кого не нашёл в
   списке — НЕ шли автору, верни actions:[] и переспроси ник. chronicle: {{"text":"..."}} — запись в летопись
 - inactive: {{"days":1..90}}; digest — сводка по семье
+- recruit_stats: {{"days":7}} — статистика рекрутёров: обзвоны, принятые, отклонённые («как рекрутёры за месяц» → 30)
 «нас», «всех нас», «всех» в разговоре про войс — source "my"; «всех со всего сервера» — source "all"; «меня» — автор.
 КАНАЛЫ понимай по смыслу и с ошибками распознавания речи: «на двоих», «вдвоём» — канал «На двоих», «курилка» —
 «Балкон»; смотри столбец «ещё называют» и бери самый похожий, не отвечай, что канала нет.
@@ -705,6 +706,13 @@ class Assistant(commands.Cog):
         if t in TREASURY_ACTS:
             tr = bot.get_cog("Treasury")
             return await tr.speech(g, me, a) if tr else "Казна не загружена."
+        if t == "recruit_stats":
+            rec = bot.get_cog("Recruit")
+            try:
+                days = int(a.get("days") if a.get("days") is not None else 7)
+            except (TypeError, ValueError):
+                days = 7
+            return rec.report_text(g, days) if rec else "Статистика не загружена."
         if t == "roll":
             top = max(2, min(1_000_000, int(a.get("max") or 6)))
             return f"🎲 Выпало **{random.randint(1, top)}** (из {top})"
