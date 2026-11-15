@@ -492,6 +492,7 @@ class Jarvis(commands.Cog):
         self.bot = bot
         self.listeners = {}
         self._whisper_by_key = {}  # ключ Groq -> метки последних распознаваний (минутный лимит)
+        self.whisper_fail_since, self.whisper_fail_reason = None, ""  # для сторожа (cogs/maintenance.py)
         from cogs.assistant import USERS
         self.users_roles = USERS
 
@@ -543,8 +544,12 @@ class Jarvis(commands.Cog):
                                   headers={"Authorization": f"Bearer {key}"}) as r:
                     if r.status != 200:
                         log.warning("Whisper %s: %s", r.status, (await r.text())[:200])
+                        if r.status != 429:  # минутный лимит — штатно; остальное — сбой для сторожа
+                            self.whisper_fail_since = self.whisper_fail_since or time.time()
+                            self.whisper_fail_reason = f"ошибка {r.status}"
                         return None
                     data = await r.json()
+                    self.whisper_fail_since = None
                     segs = data.get("segments")
                     if isinstance(segs, list) and segs:
                         # выкидываем куски, где распознаватель сам не уверен, что это речь
@@ -555,6 +560,8 @@ class Jarvis(commands.Cog):
                     return (data.get("text") or "").strip()
         except Exception as e:
             log.warning("Whisper: %s", e)
+            self.whisper_fail_since = self.whisper_fail_since or time.time()
+            self.whisper_fail_reason = type(e).__name__
             return None
 
     async def say(self, guild, text):

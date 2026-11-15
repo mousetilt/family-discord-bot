@@ -121,7 +121,18 @@ class AI:
         return f"ни одна модель не ответила ({last})"
 
     async def ask(self, system, prompt, max_tokens=800, smart=False, cache=False, light=False):
-        """Запрос к ИИ, возвращает текст ответа."""
+        """Запрос к ИИ, возвращает текст ответа. Заодно — здоровье для сторожа (ok_ts / fail_since / fail_reason)."""
+        try:
+            text = await self._ask(system, prompt, max_tokens, smart, cache, light)
+        except AIUnavailable as e:
+            if self.on:
+                self.fail_since = getattr(self, "fail_since", None) or time.time()
+                self.fail_reason = str(e)[:200]
+            raise
+        self.ok_ts, self.fail_since = time.time(), None
+        return text
+
+    async def _ask(self, system, prompt, max_tokens=800, smart=False, cache=False, light=False):
         if not self.on:
             raise AIUnavailable("ИИ не подключён. Руководство может вставить бесплатный ключ Groq или Gemini "
                                 "командой /ии ключ" if self.own_keys else

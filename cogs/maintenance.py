@@ -121,13 +121,110 @@ class Maintenance(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self._announced = False
+        self._alerted, self._voice_down, self._offline_since, self._probe_ts = set(), None, None, 0.0
         self.update_loop.start()
+        self.watchdog.start()
 
     def cog_unload(self):
         self.update_loop.cancel()
+        self.watchdog.cancel()
 
     def home(self):
         return next((g for g in self.bot.guilds if self.bot.is_home(g)), None)
+
+    # ---------- сторож (watchdog) ----------
+    def problems(self):
+        """[(ключ, что, с какого времени, почему)] — что сейчас не работает."""
+        out, home = [], self.home()
+        ai = self.bot.ai_for(home) if home else self.bot.ai
+        if ai.on and getattr(ai, "fail_since", None):
+            out.append(("ai", "🤖 ИИ", ai.fail_since, getattr(ai, "fail_reason", "")))
+        j = self.bot.get_cog("Jarvis")
+        if j and getattr(j, "whisper_fail_since", None):
+            out.append(("whisper", "🎙 Распознавание речи", j.whisper_fail_since, j.whisper_fail_reason))
+        music = self.bot.get_cog("Music")
+        dn = getattr(music, "dn", None)
+        if dn is not None and not dn.is_ready():
+            self._voice_down = self._voice_down or time.time()
+            out.append(("voice", "🔊 Голосовой модуль", self._voice_down, "не подключён к Discord"))
+        else:
+            self._voice_down = None
+        return out
+
+    def health_line(self):
+        now_ = time.time()
+        bad = self.problems()
+        if not bad:
+            return "🐕 Сторож: всё работает"
+        return "🐕 Сторож: " + "; ".join(f"{t} не работает {int((now_ - s) // 60)} мин ({r[:80]})"
+                                        for _, t, s, r in bad)
+
+    async def alert(self, text):
+        """Главе домашнего сервера (владельцу и роли Главы) в ЛС + в бот-команды."""
+        home = self.home()
+        if not home or not self.bot.feature(home, "service:watchdog"):
+            return
+        e = self.bot.embed("🐕 Сторож", text, config.GOLD, home)
+        people = {home.owner} | set(getattr(self.bot.role(home, "leader"), "members", []))
+        for m in filter(None, people):
+            if not m.bot:
+                try:
+                    await m.send(embed=e)
+                except discord.HTTPException:
+                    pass
+        c = self.bot.ch(home, "botcmd")
+        if c:
+            try:
+                await c.send(embed=e)
+            except discord.HTTPException:
+                pass
+
+    @tasks.loop(minutes=2)
+    @guarded
+    async def watchdog(self):
+        now_ = time.time()
+        home = self.home()
+        ai = self.bot.ai_for(home) if home else self.bot.ai
+        if ai.on and getattr(ai, "fail_since", None) and now_ - self._probe_ts >= 300:
+            # ИИ числится упавшим — проверим сами крошечным запросом (иначе флаг висит, пока никто не спросит)
+            self._probe_ts = now_
+            try:
+                await ai.ask("Ответь одним словом: ок", "проверка связи", max_tokens=5, light=True)
+            except Exception:
+                pass
+        bad = {k: (t, s, r) for k, t, s, r in self.problems()}
+        for k, (t, s, r) in bad.items():
+            if now_ - s >= 600 and k not in self._alerted:
+                self._alerted.add(k)
+                await self.alert(f"⚠️ {t} не работает уже **{int((now_ - s) // 60)} мин**.\nПричина: {r or '—'}\n"
+                                 "Если не пройдёт само — `/перезапуск`, а для ИИ проверь ключ: `/ии статус`.")
+        for k in list(self._alerted):
+            if k not in bad:
+                self._alerted.discard(k)
+                await self.alert(f"✅ {dict(ai='🤖 ИИ', whisper='🎙 Распознавание речи', voice='🔊 Голосовой модуль').get(k, k)}"
+                                 " снова работает.")
+
+    @watchdog.before_loop
+    async def _wd_before(self):
+        await self.bot.wait_until_ready()
+
+    @commands.Cog.listener("on_disconnect")
+    async def _wd_disconnect(self):
+        self._offline_since = self._offline_since or time.time()
+
+    @commands.Cog.listener("on_resumed")
+    async def _wd_resumed(self):
+        await self._wd_back()
+
+    @commands.Cog.listener("on_ready")
+    async def _wd_ready(self):
+        await self._wd_back()
+
+    async def _wd_back(self):
+        since, self._offline_since = self._offline_since, None
+        if since and time.time() - since >= 600:
+            await self.alert(f"📡 Бот был без связи с Discord **{int((time.time() - since) // 60)} мин** "
+                             f"(с <t:{int(since)}:t>). Сейчас всё снова на связи.")
 
     # ---------- уведомления об обновлениях ----------
     @tasks.loop(minutes=30)
@@ -300,6 +397,7 @@ class Maintenance(commands.Cog):
             lines.append("🔊 В голосовых: " + ", ".join(f"«{v.channel.name}»" for v in vcs if v.channel))
         else:
             lines.append("🔇 Не в голосовых каналах")
+        lines.append(self.health_line())
         await inter.response.send_message("\n".join(lines), ephemeral=True)
 
     # ---------- перезапуск ----------

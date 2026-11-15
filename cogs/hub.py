@@ -124,6 +124,9 @@ def help_home(bot, member):
                                                                        if is_staff(bot, member) else "") + ".",
              "⌨️ **Команда** — только для редкого; набери `/` и увидишь, что тебе доступно.", "",
              *status_lines(bot, g), "", "Выбери раздел ниже, чтобы увидеть примеры."]
+    mt = bot.get_cog("Maintenance")
+    if mt and is_staff(bot, member):  # руководству — состояние бота от сторожа
+        lines.insert(-2, mt.health_line())
     e = bot.embed("🎩 Что я умею", "\n".join(lines), config.COLOR, g)
     return e
 
