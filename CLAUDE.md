@@ -30,6 +30,11 @@
 - `hub.py` 🆕 — `/помощь`, `/панель`, панель участника, раннер кнопок → команд (Фаза 1).
 - Прочее: `applications` (заявки), `diplomacy`, `alliance`, `market`, `mentorship`, `interviews`, `promo`, `boosts`, `streams`, `appeals`, `server_setup`, `daily`, `lawyer` (законы РО), `context_menus`.
 
+## Ошибки бота → разработчику → Claude
+- `cogs/errorwatch.py`: `ErrorCollector` (logging ERROR+) → таблица `bot_errors` (подпись «тип+код Discord+место в нашем коде», повторы — `count`), шум сети отсеивается (`NOISE`), секреты/ID вычищаются (`clean`). Раз в 10 мин новые → ЛС разработчику (`dev:user`, по умолчанию владелец домашнего сервера) + файл `errors.txt`; если задан токен (`/разработчик github`, `dev:gh_token`/`dev:gh_repo`) — issue с меткой `bot-error`.
+- **В начале сессии с Claude:** проверить новые ошибки. Репозиторий публичный — читать без токена: `curl -s "https://api.github.com/repos/mousetilt/family-discord-bot/issues?labels=bot-error&state=open"`. Если станет приватным — нужен `gh` (`winget install GitHub.cli`, `gh auth login`), тогда `gh issue list --label bot-error`. Починил → в коммите `Fixes #N` (закроет задачу) → запись в changelog.
+- Или владелец пересылает файл `errors.txt` из ЛС бота прямо в чат.
+
 ## Альянс: семьи без бота
 - `alliance_families.external=1`: семья без нашего бота, живёт в штабе. `guild_id` — условный отрицательный (`EXT_BASE=-1000` и ниже), `leaders` — JSON Discord ID руководства (голосуют из штаба), участники — роль `hub:fam:<gid>` в штабе (выдаёт их руководство: `/альянс участники добавить|убрать|руководство`). Принимается голосованием: `/альянс добавить-семью` (нужен штаб).
 - ВАЖНО: `bot.is_home(None) == True` — для таких семей проверять `Alliance.is_ext(row)` раньше, чем `is_home(get_guild(...))`.
