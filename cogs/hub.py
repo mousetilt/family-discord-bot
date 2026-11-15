@@ -168,6 +168,9 @@ ACTIONS = {
     "m_list": ("📋", "Наставники", "наставник список", {}),
     "m_top": ("🏆", "Рейтинг наставников", "наставник рейтинг", {}),
     "exam_q": ("❓", "Вопросы экзамена", "экзамен вопросы", {}),
+    "manual": ("🛂", "Принять вручную", "принять", {}),
+    "m_days": ("⏳", "Срок испытательного", "наставник срок", {}),
+    "exam_pass": ("📝", "Сдать экзамен (новичкам)", "экзамен сдать", {}),
     # кадры
     "rank": ("🔁", "Ранг", "ранг", {}),
     "post": ("🎖", "Должность", "должность", {}),
@@ -261,7 +264,8 @@ ACTIONS = {
 SETUP_ROLES = ["leader", "deputy"]
 # раздел: ключ → (эмодзи, название, кому виден (None — всем в семье), [действия])
 LEAD_SECTIONS = {
-    "apps": ("📋", "Заявки", config.HR + ["mentor"], ["apps", "appeals", "m_assign", "m_list", "m_top", "exam_q"]),
+    "apps": ("📋", "Заявки", config.HR + ["mentor"], ["apps", "manual", "appeals", "m_assign", "m_list", "m_days", "m_top",
+                                                     "exam_q"]),
     "staff": ("🎖", "Кадры", config.LEAD + ["hr_head", "senior"],
               ["rank", "post", "warn", "warns", "unwarn", "mute", "expel"]),
     "activity": ("📊", "Активность", STAFF, ["report", "top", "inactive", "digest", "gather", "announce", "chron"]),
@@ -283,7 +287,7 @@ MEMBER_SECTIONS = {
     "room": ("🔊", "Моя комната", config.FAMILY_PLUS, ["r_open", "r_close", "r_name", "r_limit", "r_kick", "r_give"]),
     "market": ("🛒", "Рынок", config.FAMILY_PLUS, ["mk_search", "mk_mine", "mk_sell", "mk_price"]),
     "fun": ("🔴", "Эфиры и бусты", config.FAMILY_PLUS, ["stream", "streams", "boost", "boost_role"]),
-    "learn": ("🎓", "Обучение", config.FAMILY_PLUS, ["exam_try", "lawyer", "kb_find"]),
+    "learn": ("🎓", "Обучение", config.FAMILY_PLUS, ["exam_try", "exam_pass", "lawyer", "kb_find"]),
 }
 SECTIONS = {**LEAD_SECTIONS, **MEMBER_SECTIONS}
 # Команды, скрытые из списка «/» у рядовых участников (default_permissions) — они заменены кнопками и речью.
@@ -586,6 +590,54 @@ class ActionButton(discord.ui.DynamicItem[discord.ui.Button], template=r"hub:a:(
         await start_action(inter.client, inter, self.k)
 
 
+# Панели в каналах модулей: канал → (заголовок, разделы, модуль-рубильник). Кнопки — сразу действия разделов,
+# сверху — живая сводка (status). Права проверяет сама команда, так что кнопки безопасны в любом канале.
+CHANNEL_PANELS = {
+    "treasury_log": ("💰 Казна семьи", ["treasury", "salary", "fines"], "treasury"),
+    "review": ("📋 Набор в семью", ["apps"], None),
+    "warns": ("🎖 Кадры", ["staff"], None),
+    "modqueue": ("🛡 Модерация", ["mod"], None),
+    "diplo_archive": ("🤝 Дипломатия", ["diplo"], None),
+}
+
+
+def channel_status(bot, guild, key):
+    """Живая сводка для панели канала (или None)."""
+    try:
+        if key == "treasury_log":
+            tr = bot.get_cog("Treasury")
+            return tr.digest_line(guild) if tr else None
+        if key == "review":
+            db = bot.db
+            apps = db.one("SELECT COUNT(*) n FROM applications WHERE guild_id=? AND status IN ('new','taken','interview')",
+                          guild.id)["n"]
+            prob = db.one("SELECT COUNT(*) n FROM mentorships WHERE guild_id=? AND status='active'", guild.id)["n"]
+            return f"📥 Открытых заявок: **{apps}** · 🎓 на испытательном сроке: **{prob}**"
+    except Exception:
+        log.exception("Сводка панели %s", key)
+    return None
+
+
+def channel_panel(bot, guild, key):
+    title, secs, _ = CHANNEL_PANELS[key]
+    lines = []
+    status = channel_status(bot, guild, key)
+    if status:
+        lines += [status, ""]
+    v, n = discord.ui.View(timeout=None), 0
+    for sec in secs:
+        e, t, _, acts = SECTIONS[sec]
+        lines.append(f"{e} **{t}** — " + ", ".join(ACTIONS[a][1] for a in acts))
+        for a in acts:
+            if n < 25:
+                v.add_item(ActionButton(a, row=n // 5))
+                n += 1
+    lines += ["", "🗣 Или скажи: «Швейцар, …» — своими словами."]
+    emb = bot.embed(title, "\n".join(lines), config.GOLD if key == "treasury_log" else config.COLOR, guild)
+    emb.set_footer(text="Панель обновляется сама · " + bot.brand(guild, config.FOOTER))
+    return {"embed": emb, "view": v}
+
+
 def lead_embed(bot, guild):
     lines = ["Всё управление — кнопками. Нажми раздел, потом действие: бот сам спросит, кого и что.",
              "🗣 А можно просто сказать: «Швейцар, выговор Пете за опоздание».", ""]
@@ -643,8 +695,33 @@ class Hub(commands.Cog):
                 except discord.HTTPException:
                     pass
             bot.db.gdel(guild, "panel:hub_member")
-        await bot.panel_once(guild, "hub_member", "panel", repost, member, version=2)  # v2: канал только для семьи
-        await bot.panel_once(guild, "hub_lead", "botcmd", repost, lead, version=2)  # v2: казна, зарплаты, штрафы
+        await bot.panel_once(guild, "hub_member", "panel", repost, member, version=3)  # v2: канал только для семьи, v3: сдать экзамен
+        await bot.panel_once(guild, "hub_lead", "botcmd", repost, lead, version=3)  # v3: ручной приём, срок
+        for key, (_, _, mod) in CHANNEL_PANELS.items():
+            if mod and not bot.feature(guild, mod):
+                continue
+            old = bot.db.gget(guild, f"panel:ch_{key}")
+            msg = await bot.panel_once(guild, f"ch_{key}", key, repost,
+                                       lambda k=key: _wrap(channel_panel(bot, guild, k)), version=1)
+            if msg and str(msg.id) != str(old or ""):
+                try:
+                    await msg.pin(reason="Панель модуля")
+                except discord.HTTPException:
+                    pass
+
+    async def refresh_channel(self, guild, key):
+        """Обновить сводку на панели канала (после операции в казне, новой заявки и т.п.)."""
+        mid, c = self.bot.db.gget(guild, f"panel:ch_{key}"), self.bot.ch(guild, key)
+        if not mid or not c or key not in CHANNEL_PANELS:
+            return
+        try:
+            await c.get_partial_message(int(mid)).edit(**channel_panel(self.bot, guild, key))
+        except discord.HTTPException:
+            pass
+
+
+async def _wrap(x):
+    return x
 
 
 async def setup(bot):

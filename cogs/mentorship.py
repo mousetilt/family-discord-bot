@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Наставничество: каждому принятому новичку — наставник, личная ветка, чек-лист и решение через N дней."""
+"""Наставничество и испытательный срок: каждому новичку — наставник, личная ветка, чек-лист и решение через N дней.
+• Срок — /наставник срок (probation:days, по умолчанию config.MENTOR_DAYS). Срок заводится и без наставника
+  (mentor_id=0, без ветки) — тогда напоминания и решение идут в кадровый журнал.
+• /настройки → Кадры: «auto» — по окончании срока бот сам переводит в Члены семьи, если экзамен сдан (или выключен)
+  и за срок не было выговоров; иначе спрашивает. «remind» — напоминания на середине срока и за сутки до конца."""
 import datetime as dt
 import json
 import logging
@@ -72,12 +76,25 @@ class Mentorship(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self._assigning = set()  # (guild, newbie): событие «ранг новичок» и «принят» приходят почти одновременно
         self.due_loop.start()
 
     def cog_unload(self):
         self.due_loop.cancel()
 
     # ---------- данные ----------
+    def days(self, guild):
+        try:
+            return max(1, min(60, int(self.bot.db.gget(guild, "probation:days") or config.MENTOR_DAYS)))
+        except (TypeError, ValueError):
+            return config.MENTOR_DAYS
+
+    def exam_ok(self, guild, user_id):
+        if not self.bot.feature(guild, "hr:exam"):
+            return True
+        apps = self.bot.get_cog("Applications")
+        return apps.exam_passed(guild, user_id) if apps else True
+
     def stats(self, row):
         db = self.bot.db
         gid = row["guild_id"]
@@ -104,9 +121,13 @@ class Mentorship(commands.Cog):
                   "left": "🚪 Ушёл с сервера"}.get(row["status"], row["status"])
         lines = "\n".join(f"{'✅' if i < len(checklist) and checklist[i] else '⬜'} **{i + 1}.** {t}"
                           for i, t in enumerate(config.MENTOR_CHECKLIST))
+        mentor = f"<@{row['mentor_id']}>" if row["mentor_id"] else "не назначен"
+        exam = "" if not self.bot.feature(guild, "hr:exam") else \
+            ("\n**Экзамен:** ✅ сдан" if self.exam_ok(guild, row["newbie_id"]) else
+             "\n**Экзамен:** ❌ не сдан — `/экзамен сдать`")
         e = self.bot.embed(
             "🎓 Испытательный срок",
-            f"**Новичок:** <@{row['newbie_id']}>\n**Наставник:** <@{row['mentor_id']}>\n**Статус:** {status}\n"
+            f"**Новичок:** <@{row['newbie_id']}>\n**Наставник:** {mentor}\n**Статус:** {status}{exam}\n"
             f"**Начало:** {discord.utils.format_dt(parse_dt(row['started_at']), 'D')} · "
             f"**Решение:** {discord.utils.format_dt(parse_dt(row['due_at']), 'R')}\n\n"
             f"**Чек-лист** `{bar}` {done}/{total}\n{lines}\n\n"
@@ -158,37 +179,66 @@ class Mentorship(commands.Cog):
         low = min(load.values())
         return random.choice([m for m in cands if load[m.id] == low])
 
-    async def assign(self, guild, newbie, mentor=None, by=None):
+    async def assign(self, guild, newbie, mentor=None, by=None, keep=None):
+        """Завести испытательный срок (и наставника, если есть). keep — строка старого срока без наставника:
+        даты сохраняются. Без наставника срок всё равно идёт — решение придёт в кадровый журнал."""
+        lock = (guild.id, newbie.id)
+        if lock in self._assigning:
+            return None
+        self._assigning.add(lock)
+        try:
+            return await self._assign(guild, newbie, mentor, by, keep)
+        finally:
+            self._assigning.discard(lock)
+
+    async def _assign(self, guild, newbie, mentor, by, keep):
         bot, db = self.bot, self.bot.db
+        if not keep:
+            row = db.one("SELECT * FROM mentorships WHERE guild_id=? AND newbie_id=? AND status='active'",
+                         guild.id, newbie.id)
+            if row:
+                return row  # срок уже идёт
         mentor = mentor or self.pick_mentor(guild, newbie.id)
-        if not mentor:
-            await bot.log(guild, f"⚠️ Для {newbie.mention} не нашлось свободного наставника. Назначьте вручную: "
-                                 f"`/наставник назначить`", "hrlog", 0xFB8C00)
-            return None
-        ch = bot.ch(guild, "mentoring")
-        if not ch:
-            return None
-        thread = await ch.create_thread(name=f"🎓 {newbie.display_name}"[:100], type=discord.ChannelType.private_thread,
-                                        invitable=False, auto_archive_duration=10080)
-        for u in (newbie, mentor):
-            try:
-                await thread.add_user(u)
-            except discord.HTTPException:
-                pass
-        a = db.one("SELECT voice_seconds FROM activity WHERE guild_id=? AND user_id=?", guild.id, newbie.id)
-        start = now()
-        cur = db.q("INSERT INTO mentorships(guild_id, newbie_id, mentor_id, thread_id, checklist, started_at, due_at, "
-                   "voice_start) VALUES(?,?,?,?,?,?,?,?)", guild.id, newbie.id, mentor.id, thread.id,
-                   json.dumps([False] * len(config.MENTOR_CHECKLIST)), start.isoformat(),
-                   (start + dt.timedelta(days=config.MENTOR_DAYS)).isoformat(), a["voice_seconds"] if a else 0)
-        row = db.one("SELECT * FROM mentorships WHERE id=?", cur.lastrowid)
+        ch = bot.ch(guild, "mentoring") if mentor else None
+        thread = None
+        if ch:
+            thread = await ch.create_thread(name=f"🎓 {newbie.display_name}"[:100],
+                                            type=discord.ChannelType.private_thread, invitable=False,
+                                            auto_archive_duration=10080)
+            for u in (newbie, mentor):
+                try:
+                    await thread.add_user(u)
+                except discord.HTTPException:
+                    pass
+        days = self.days(guild)
+        if keep:
+            db.q("UPDATE mentorships SET mentor_id=?, thread_id=? WHERE id=?", mentor.id if thread else 0,
+                 thread.id if thread else None, keep["id"])
+            rid = keep["id"]
+        else:
+            a = db.one("SELECT voice_seconds FROM activity WHERE guild_id=? AND user_id=?", guild.id, newbie.id)
+            start = now()
+            rid = db.q("INSERT INTO mentorships(guild_id, newbie_id, mentor_id, thread_id, checklist, started_at, "
+                       "due_at, voice_start) VALUES(?,?,?,?,?,?,?,?)", guild.id, newbie.id,
+                       mentor.id if thread else 0, thread.id if thread else None,
+                       json.dumps([False] * len(config.MENTOR_CHECKLIST)), start.isoformat(),
+                       (start + dt.timedelta(days=days)).isoformat(), a["voice_seconds"] if a else 0).lastrowid
+        row = db.one("SELECT * FROM mentorships WHERE id=?", rid)
+        if not thread:
+            await bot.log(guild, f"⚠️ {newbie.mention}: испытательный срок начат ({days} дн.), но свободного "
+                                 f"наставника нет. Назначьте: `/наставник назначить`", "hrlog", 0xFB8C00)
+            return row
         msg = await thread.send(content=f"{newbie.mention} {mentor.mention}", embed=self.card(guild, row),
                                 view=self.view(row))
         db.q("UPDATE mentorships SET message_id=? WHERE id=?", msg.id, row["id"])
+        exam = ""
+        if not self.exam_ok(guild, newbie.id):
+            exam = "\n📕 Экзамен по правилам ты ещё не сдавал — сдай за срок: `/экзамен сдать`."
         await thread.send(f"👋 {newbie.mention}, это твоя личная ветка с наставником {mentor.mention}. "
                           f"Здесь можно задавать любые вопросы — о семье, правилах, игре.\n"
-                          f"Испытательный срок — **{config.MENTOR_DAYS} дн.** Наставник отмечает пункты чек-листа, "
-                          f"а в конце решает, переводить ли тебя в 👥 Члены семьи. Удачи!")
+                          f"Испытательный срок — до {discord.utils.format_dt(parse_dt(row['due_at']), 'D')}. "
+                          f"Наставник отмечает пункты чек-листа, а в конце решается, переводить ли тебя "
+                          f"в 👥 Члены семьи. Удачи!{exam}")
         await safe_dm(mentor, f"🎓 Тебе назначен новичок **{newbie.display_name}**. Ветка: {thread.jump_url}")
         await bot.log(guild, f"🎓 {mentor.mention} — наставник для {newbie.mention}{' (назначил ' + by.mention + ')' if by else ''}",
                       "hrlog", 0x26A69A)
@@ -197,7 +247,8 @@ class Mentorship(commands.Cog):
 
     @commands.Cog.listener()
     async def on_family_event(self, guild, kind, data):
-        if kind == "accepted" and data.get("member"):
+        # приняли по заявке или вручную выдали ранг «Новичок» — стартует испытательный срок
+        if (kind == "accepted" or (kind == "rank" and data.get("rank") == "newbie")) and data.get("member"):
             try:
                 await self.assign(guild, data["member"])
             except Exception:
@@ -269,12 +320,7 @@ class Mentorship(commands.Cog):
             db.q("UPDATE mentorships SET status='left', closed_at=? WHERE id=?", now_iso(), mid)
             return await inter.followup.send("Новичок уже не на сервере.")
         if action == "promote":
-            await bot.set_rank(newbie, "member", inter.user, reason="Испытательный срок пройден")
-            db.q("UPDATE mentorships SET status='done', closed_at=? WHERE id=?", now_iso(), mid)
-            await safe_dm(newbie, f"🎓 Поздравляем! Испытательный срок пройден — теперь ты 👥 Член семьи {config.FAMILY}!")
-            text = f"🎓 {newbie.mention} прошёл испытательный срок и стал 👥 Членом семьи! Решение: {inter.user.mention}"
-            mentor = inter.guild.get_member(row["mentor_id"])
-            bot.emit(inter.guild, "mentor_done", member=newbie, mentor=mentor)
+            text = await self.promote(inter.guild, row, newbie, inter.user)
         else:
             await bot.expel(newbie, inter.user, "Не прошёл испытательный срок")
             db.q("UPDATE mentorships SET status='failed', closed_at=? WHERE id=?", now_iso(), mid)
@@ -299,25 +345,123 @@ class Mentorship(commands.Cog):
     @guarded
     async def due_loop(self):
         db = self.bot.db
-        for row in db.all("SELECT * FROM mentorships WHERE status='active' AND asked=0 AND due_at<=?", now_iso()):
-            for guild in filter(None, [self.bot.get_guild(row["guild_id"])]):
-                th = await self.get_thread(guild, row["thread_id"])
-                if not th:
-                    continue
-                v = discord.ui.View(timeout=None)
-                for a in DECISIONS:
-                    v.add_item(MentorDecision(row["id"], a))
-                hr = self.bot.role(guild, "hr_head")
+        for row in db.all("SELECT * FROM mentorships WHERE status='active' AND asked=0"):
+            guild = self.bot.get_guild(row["guild_id"])
+            if not guild or not self.bot.is_family(guild):
+                continue
+            try:
+                if parse_dt(row["due_at"]) <= now():
+                    await self.term_over(guild, row)
+                elif self.bot.feature(guild, "hr:remind"):
+                    await self.remind(guild, row)
+            except Exception:
+                log.exception("Испытательный срок №%s", row["id"])
+
+    async def where(self, guild, row):
+        """Куда писать по сроку: ветка наставника, иначе кадровый журнал."""
+        return await self.get_thread(guild, row["thread_id"]) or self.bot.ch(guild, "hrlog")
+
+    async def remind(self, guild, row):
+        """Напоминание наставнику: на середине срока и за сутки до конца (mentorships.reminded: 1, 2)."""
+        start, due = parse_dt(row["started_at"]), parse_dt(row["due_at"])
+        left = due - now()
+        stage = 2 if left <= dt.timedelta(days=1) else 1 if now() >= start + (due - start) / 2 else 0
+        if stage <= (row["reminded"] or 0):
+            return
+        c = await self.where(guild, row)
+        if not c:
+            return
+        checklist = json.loads(row["checklist"] or "[]")
+        done, total = sum(1 for x in checklist if x), len(config.MENTOR_CHECKLIST)
+        voice, gatherings, warns = self.stats(row)
+        todo = []
+        if done < total:
+            todo.append(f"отметить чек-лист ({done}/{total})")
+        if not self.exam_ok(guild, row["newbie_id"]):
+            todo.append("новичку — сдать экзамен (`/экзамен сдать`)")
+        head = "⏳ Завтра конец испытательного срока" if stage == 2 else "🕐 Половина испытательного срока позади"
+        who = f"<@{row['mentor_id']}>" if row["mentor_id"] else (getattr(self.bot.role(guild, "hr_head"), "mention", ""))
+        try:
+            await c.send(content=who or None,
+                         embed=self.bot.embed(head, f"Новичок: <@{row['newbie_id']}> · решение "
+                                                    f"{discord.utils.format_dt(due, 'R')}\n"
+                                                    f"📊 🎙 {fmt_hours(voice)} · 📣 сборов: {gatherings} · "
+                                                    f"⚖️ выговоров: {warns}\n"
+                                              + (("Осталось: " + "; ".join(todo)) if todo else "Всё готово ✅"),
+                                              config.GOLD, guild),
+                         allowed_mentions=discord.AllowedMentions(users=True, roles=True))
+        except discord.HTTPException:
+            return
+        self.bot.db.q("UPDATE mentorships SET reminded=? WHERE id=?", stage, row["id"])
+
+    async def term_over(self, guild, row):
+        bot, db = self.bot, self.bot.db
+        newbie = guild.get_member(row["newbie_id"])
+        if not newbie:
+            db.q("UPDATE mentorships SET status='left', closed_at=? WHERE id=?", now_iso(), row["id"])
+            return
+        _, _, warns = self.stats(row)
+        exam = self.exam_ok(guild, newbie.id)
+        if bot.feature(guild, "hr:auto") and exam and not warns:
+            # авто-перевод: срок вышел, экзамен сдан (или не нужен), выговоров за срок нет
+            db.q("UPDATE mentorships SET asked=1 WHERE id=?", row["id"])
+            await self.promote(guild, row, newbie, guild.me, auto=True)
+            return
+        why = []
+        if not exam:
+            why.append("📕 экзамен не сдан")
+        if warns:
+            why.append(f"⚖️ выговоров за срок: {warns}")
+        if bot.feature(guild, "hr:auto") and why:
+            why.insert(0, "Автоперевод не сработал:")
+        c = await self.where(guild, row)
+        if not c:
+            return
+        v = discord.ui.View(timeout=None)
+        for a in DECISIONS:
+            v.add_item(MentorDecision(row["id"], a))
+        hr = bot.role(guild, "hr_head")
+        mention = (f"<@{row['mentor_id']}> " if row["mentor_id"] else "") + (hr.mention if hr else "")
+        try:
+            await c.send(content=mention or None,
+                         embed=bot.embed("⏰ Испытательный срок закончился",
+                                         f"Пора решить судьбу <@{row['newbie_id']}>. Решение принимает наставник или "
+                                         "руководство." + ("\n" + " ".join(why) if why else ""), config.GOLD, guild),
+                         view=v, allowed_mentions=discord.AllowedMentions(users=True, roles=True))
+        except discord.HTTPException:
+            return
+        db.q("UPDATE mentorships SET asked=1 WHERE id=?", row["id"])
+
+    async def promote(self, guild, row, newbie, by, auto=False):
+        """Перевод в Члены семьи по итогам срока (кнопкой или автоматически)."""
+        bot, db = self.bot, self.bot.db
+        db.q("UPDATE mentorships SET status='done', closed_at=? WHERE id=?", now_iso(), row["id"])
+        await bot.set_rank(newbie, "member", by, reason="Испытательный срок пройден" + (" (автоматически)" if auto else ""))
+        await safe_dm(newbie, f"🎓 Поздравляем! Испытательный срок пройден — теперь ты 👥 Член семьи {config.FAMILY}!")
+        bot.emit(guild, "mentor_done", member=newbie, mentor=guild.get_member(row["mentor_id"] or 0))
+        text = (f"🎓 {newbie.mention} прошёл испытательный срок и стал 👥 Членом семьи! "
+                + ("Перевёл бот автоматически: срок вышел, экзамен сдан, выговоров нет." if auto
+                   else f"Решение: {by.mention}"))
+        if auto:
+            c = await self.where(guild, row)
+            if c:
                 try:
-                    await th.send(content=f"<@{row['mentor_id']}> {hr.mention if hr else ''}",
-                                  embed=self.bot.embed("⏰ Испытательный срок закончился",
-                                                       f"Пора решить судьбу <@{row['newbie_id']}>. "
-                                                       "Решение принимает наставник или руководство.", config.GOLD, guild),
-                                  view=v, allowed_mentions=discord.AllowedMentions(users=True, roles=True))
+                    await c.send(text)
                 except discord.HTTPException:
-                    continue
-                db.q("UPDATE mentorships SET asked=1 WHERE id=?", row["id"])
-                break
+                    pass
+            await self.close_card(guild, row["id"])
+        return text
+
+    async def close_card(self, guild, mid):
+        row = self.bot.db.one("SELECT * FROM mentorships WHERE id=?", mid)
+        th = await self.get_thread(guild, row["thread_id"])
+        if th and row["message_id"]:
+            try:
+                m = await th.fetch_message(row["message_id"])
+                await m.edit(embed=self.card(guild, row), view=None)
+                await th.edit(archived=True, locked=True)
+            except discord.HTTPException:
+                pass
 
     @due_loop.before_loop
     async def _before(self):
@@ -331,6 +475,12 @@ class Mentorship(commands.Cog):
         db = self.bot.db
         row = db.one("SELECT * FROM mentorships WHERE guild_id=? AND newbie_id=? AND status='active'", inter.guild.id,
                      newbie.id)
+        if row and not row["thread_id"]:  # срок идёт без наставника — назначаем, даты сохраняем
+            await inter.response.defer(ephemeral=True)
+            r = await self.assign(inter.guild, newbie, mentor, by=inter.user, keep=row)
+            ok = bool(r and r["thread_id"])
+            return await inter.followup.send("✅ Наставник назначен." if ok else
+                                             "❌ Не нашлось наставника (нужна роль 🎓 Наставник).", ephemeral=True)
         if row:
             if not mentor:
                 return await inter.response.send_message("У новичка уже есть наставник. Укажи нового, чтобы сменить.",
@@ -351,6 +501,19 @@ class Mentorship(commands.Cog):
         await inter.followup.send("✅ Наставник назначен." if r else "❌ Не нашлось наставника (нужна роль 🎓 Наставник).",
                                   ephemeral=True)
 
+    @group.command(name="срок", description="Длительность испытательного срока для новых новичков (в днях)")
+    @app_commands.rename(days="дней")
+    @app_commands.describe(days="1–60 дней (по умолчанию 7)")
+    @staff_only(config.LEAD + ["hr_head"])
+    async def days_cmd(self, inter: discord.Interaction, days: app_commands.Range[int, 1, 60]):
+        self.bot.db.gset(inter.guild, "probation:days", int(days))
+        auto = self.bot.feature(inter.guild, "hr:auto")
+        await self.bot.log(inter.guild, f"⚙️ Испытательный срок: **{days} дн.** ({inter.user.mention})", "hrlog")
+        await inter.response.send_message(
+            f"✅ Испытательный срок — **{days} дн.** (для тех, кого примут дальше; у текущих срок не меняется).\n"
+            f"По окончании бот {'сам переводит в 👥 Члены семьи, если экзамен сдан и выговоров нет' if auto else 'спрашивает решение у наставника и кадровика'}"
+            " — переключается в `/настройки` → «Кадры».", ephemeral=True)
+
     @group.command(name="список", description="Новички на испытательном сроке")
     @staff_only(config.MENTORS + ["recruiter"])
     async def list_cmd(self, inter: discord.Interaction):
@@ -359,7 +522,8 @@ class Mentorship(commands.Cog):
         lines = []
         for r in rows:
             done = sum(1 for x in json.loads(r["checklist"] or "[]") if x)
-            lines.append(f"<@{r['newbie_id']}> ← <@{r['mentor_id']}> · {done}/{len(config.MENTOR_CHECKLIST)} · "
+            mentor = f"<@{r['mentor_id']}>" if r["mentor_id"] else "без наставника"
+            lines.append(f"<@{r['newbie_id']}> ← {mentor} · {done}/{len(config.MENTOR_CHECKLIST)} · "
                          f"решение {discord.utils.format_dt(parse_dt(r['due_at']), 'R')}")
         await inter.response.send_message(embed=self.bot.embed(f"🎓 На испытательном сроке: {len(rows)}",
                                                                "\n".join(lines)[:4000] or "Никого", config.GOLD,

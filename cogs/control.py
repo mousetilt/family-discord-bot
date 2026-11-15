@@ -140,7 +140,7 @@ class ModulesView(discord.ui.View):
         if on:
             self.add_item(ActionSelect(bot, guild, mod))
         tg = discord.ui.Button(label="Выключить модуль целиком" if on else "Включить модуль",
-                               emoji="⏻", style=discord.ButtonStyle.danger if on else discord.ButtonStyle.success, row=4)
+                               emoji="🔌", style=discord.ButtonStyle.danger if on else discord.ButtonStyle.success, row=4)
         tg.callback = self._toggle
         up = discord.ui.Button(label="Ко всем модулям", emoji="↩️", style=discord.ButtonStyle.secondary, row=4)
         up.callback = self._up
@@ -155,6 +155,17 @@ class ModulesView(discord.ui.View):
         log.warning("Настройки «%s»: модуль %s → %s (%s)", inter.guild.name, self.mod, on, inter.user)
         await inter.response.edit_message(content=render(self.bot, inter.guild, self.mod),
                                           view=ModulesView(self.bot, inter.guild, self.mod, self.back))
+
+    async def on_error(self, inter: discord.Interaction, error: Exception, item):
+        log.exception("Настройки «%s»: ошибка кнопки", getattr(inter.guild, "name", "?"), exc_info=error)
+        text = "⚠️ Не получилось применить настройку. Открой `/настройки` заново и попробуй ещё раз."
+        try:
+            if inter.response.is_done():
+                await inter.followup.send(text, ephemeral=True)
+            else:
+                await inter.response.send_message(text, ephemeral=True)
+        except discord.HTTPException:
+            pass
 
     async def _up(self, inter: discord.Interaction):
         await inter.response.edit_message(content=render(self.bot, inter.guild),

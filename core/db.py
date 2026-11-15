@@ -115,7 +115,9 @@ CREATE INDEX IF NOT EXISTS ix_mentorships_g ON mentorships(guild_id, status);
 # Колонки, которые могли появиться в новых версиях (для старых баз)
 MIGRATIONS = {
     "applications": {"exam_score": "INTEGER", "exam_total": "INTEGER", "exam_attempt": "INTEGER",
-                     "exam_wrong": "TEXT", "situational": "TEXT", "ai_review": "TEXT", "decided_at": "TEXT"},
+                     "exam_wrong": "TEXT", "situational": "TEXT", "ai_review": "TEXT", "decided_at": "TEXT",
+                     "manual": "INTEGER DEFAULT 0"},  # 1 — принят вручную, минуя экзамен
+    "mentorships": {"reminded": "INTEGER DEFAULT 0"},  # 1 — напомнили на середине срока, 2 — за сутки до конца
     "events": {"created_at": "TEXT"},
 }
 

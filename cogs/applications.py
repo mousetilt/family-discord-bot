@@ -103,6 +103,8 @@ def app_embed(bot, a, user, guild):
         e.add_field(name="🧠 Тест по правилам", value=txt[:1024], inline=False)
     for item in json.loads(a["situational"] or "[]"):
         e.add_field(name=f"💬 {item['q'][:250]}", value=(item["a"] or "—")[:350], inline=False)
+    if a["manual"]:
+        e.add_field(name="🛂 Принят вручную", value="минуя экзамен — решение руководства", inline=False)
     if a["ai_review"]:
         e.add_field(name="🤖 ИИ-оценка", value=a["ai_review"][:1024], inline=False)
     e.add_field(name="⛔ Чёрный список", value="чисто", inline=True)
@@ -122,6 +124,8 @@ ACTIONS = {
     "accept": ("Принять", "✅", discord.ButtonStyle.success),
     "deny": ("Отклонить", "❌", discord.ButtonStyle.danger),
 }
+# кнопки не на карточке заявки: «Принять вручную» — под записью «не сдал тест» в кадровом журнале
+EXTRA_ACTIONS = {"manual": ("Принять вручную", "🛂", discord.ButtonStyle.success)}
 
 
 def app_view(app_id, closed=False):
@@ -215,7 +219,8 @@ class SituationalModal(discord.ui.Modal):
 
 class AppAction(discord.ui.DynamicItem[discord.ui.Button], template=r"app:(?P<action>[a-z]+):(?P<id>\d+)"):
     def __init__(self, action, app_id):
-        label, emoji, style = ACTIONS[action]
+        label, emoji, style = ACTIONS.get(action) or EXTRA_ACTIONS.get(action) or ("?", None,
+                                                                                discord.ButtonStyle.secondary)
         super().__init__(discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=f"app:{action}:{app_id}"))
         self.action, self.app_id = action, app_id
 
@@ -335,7 +340,8 @@ class Applications(commands.Cog):
             return await inter.response.send_message("К сожалению, мы не можем принять твою заявку.", ephemeral=True)
         attempt = db.one("SELECT COUNT(*) n FROM exam_attempts WHERE guild_id=? AND user_id=? AND training=0",
                          gid, u.id)["n"] + 1
-        questions = pick_questions(db, gid, config.EXAM_QUESTIONS)
+        # экзамен можно выключить в /настройки → Кадры: тогда анкета сразу идёт к вопросам о себе
+        questions = pick_questions(db, gid, config.EXAM_QUESTIONS) if bot.feature(inter.guild, "hr:exam") else []
         if not questions:
             return await inter.response.send_message(
                 embed=bot.embed("✅ Анкета сохранена", "Последний шаг — ответь на 2 вопроса о себе.", config.GREEN),
@@ -395,12 +401,32 @@ class Applications(commands.Cog):
                           f"(нужно {need}).\n\n" + (f"**Ошибки:**\n{wrong_text}" if wrong else "Без единой ошибки! 🔥"),
                           config.GREEN if passed else config.RED, inter.guild)
             return await inter.response.edit_message(embed=e, view=None)
+        if not s.app_id:  # новичок досдаёт экзамен уже в семье (его приняли вручную)
+            await bot.log(inter.guild, f"{'📗' if passed else '📕'} Новичок <@{s.user_id}> "
+                                       f"{'сдал' if passed else 'не сдал'} экзамен: {score}/{total}", "hrlog",
+                          config.GREEN if passed else config.RED)
+            e = bot.embed("✅ Экзамен сдан!" if passed else "📕 Экзамен не сдан",
+                          f"Результат: **{score}/{total}**, нужно {need}.\n\n"
+                          + ("Теперь после испытательного срока тебя можно переводить в 👥 Члены семьи."
+                             if passed else f"**Где ошибся:**\n{wrong_text}\n\nПопробуй снова через "
+                                            f"{config.EXAM_RETRY_MIN} мин: `/экзамен сдать`"),
+                          config.GREEN if passed else config.RED, inter.guild)
+            return await inter.response.edit_message(embed=e, view=None)
         db.q("UPDATE applications SET exam_score=?, exam_total=?, exam_attempt=?, exam_wrong=? WHERE id=?",
              score, total, s.attempt, json.dumps([q["q"] for q in wrong], ensure_ascii=False), s.app_id)
         if not passed:
             db.q("UPDATE applications SET status='exam_failed' WHERE id=?", s.app_id)
-            await bot.log(inter.guild, f"📕 <@{s.user_id}> не сдал тест: {score}/{total} (заявка №{s.app_id}, "
-                                       f"попытка {s.attempt})", "hrlog")
+            hrlog = bot.ch(inter.guild, "hrlog")
+            if hrlog:  # руководство может принять и без экзамена — кнопкой прямо отсюда
+                v = discord.ui.View(timeout=None)
+                v.add_item(AppAction("manual", s.app_id))
+                try:
+                    await hrlog.send(embed=discord.Embed(
+                        description=f"📕 <@{s.user_id}> не сдал тест: {score}/{total} (заявка №{s.app_id}, "
+                                    f"попытка {s.attempt}). Принять всё равно — кнопкой ниже.",
+                        color=0x607D8B, timestamp=now()), view=v)
+                except discord.HTTPException:
+                    pass
             e = bot.embed("📕 Тест не сдан",
                           f"Результат: **{score}/{total}**, нужно минимум **{need}**.\n\n**Где ошибся:**\n{wrong_text}\n\n"
                           f"Перечитай #📜・правила. Повторить можно через **{config.EXAM_RETRY_MIN} мин**.",
@@ -428,6 +454,7 @@ class Applications(commands.Cog):
         msg = await review.send(content=ping.mention if ping else None, embed=app_embed(bot, a, inter.user, inter.guild),
                                 view=app_view(app_id), allowed_mentions=discord.AllowedMentions(roles=True))
         db.q("UPDATE applications SET message_id=? WHERE id=?", msg.id, app_id)
+        self.refresh_panel(inter.guild)
         if bot.ai_for(inter.guild).on:
             asyncio.create_task(self.ai_review(inter.guild, app_id, msg, inter.user))
 
@@ -477,6 +504,8 @@ class Applications(commands.Cog):
         if not bot.has(inter.user, config.HR):
             return await inter.response.send_message("⛔ Только отдел кадров.", ephemeral=True)
         a = db.one("SELECT * FROM applications WHERE id=?", app_id)
+        if action == "manual":
+            return await self.manual_button(inter, a)
         if not a or a["status"] not in OPEN:
             return await inter.response.send_message("Заявка уже закрыта.", ephemeral=True)
         member = inter.guild.get_member(a["user_id"])
@@ -486,37 +515,39 @@ class Applications(commands.Cog):
             db.q("UPDATE applications SET status='taken', reviewer_id=? WHERE id=?", inter.user.id, app_id)
         elif action == "interview":
             db.q("UPDATE applications SET status='interview', reviewer_id=? WHERE id=?", inter.user.id, app_id)
-            if member:
-                waiting = bot.ch(inter.guild, "waiting")
-                await safe_dm(member, f"🎤 Тебя вызывают на собеседование в семью **{config.FAMILY}**!\n"
-                                      f"Зайди в голосовой канал **{waiting.name if waiting else 'Ожидание собеседования'}**"
-                                      f" — тебя заберёт {inter.user.display_name}.")
         elif action == "accept":
             if not member:
                 return await inter.response.send_message("Игрок уже покинул сервер.", ephemeral=True)
             await inter.response.defer()
             db.q("UPDATE applications SET status='accepted', reviewer_id=?, decided_at=? WHERE id=?",
                  inter.user.id, now_iso(), app_id)
-            await self.accept(inter, a, member)
+            await self.accept(inter.guild, inter.user, a, member)
             a = db.one("SELECT * FROM applications WHERE id=?", app_id)
             return await inter.edit_original_response(embed=app_embed(bot, a, member, inter.guild),
                                                       view=app_view(app_id, True))
         a = db.one("SELECT * FROM applications WHERE id=?", app_id)
-        try:
+        try:  # сначала ответить на нажатие (у Discord на это 3 секунды), ЛС — потом
             await inter.response.edit_message(embed=app_embed(bot, a, member, inter.guild), view=app_view(app_id))
         except discord.NotFound:
             pass  # кнопку нажали со старого сообщения — взаимодействие уже протухло
+        if action == "interview" and member:
+            waiting = bot.ch(inter.guild, "waiting")
+            await safe_dm(member, f"🎤 Тебя вызывают на собеседование в семью **{config.FAMILY}**!\n"
+                                  f"Зайди в голосовой канал **{waiting.name if waiting else 'Ожидание собеседования'}**"
+                                  f" — тебя заберёт {inter.user.display_name}.")
+        self.refresh_panel(inter.guild)
 
-    async def accept(self, inter, a, member):
-        bot, g = self.bot, inter.guild
+    async def accept(self, g, by, a, member):
+        bot = self.bot
         try:
-            await bot.set_rank(member, "newbie", inter.user, reason=f"Заявка №{a['id']}", silent=True)
+            await bot.set_rank(member, "newbie", by, reason=f"Заявка №{a['id']}", silent=True)
         except discord.HTTPException:
             pass
-        try:
-            await member.edit(nick=f"{a['nick']} [{a['static_id']}]"[:32])
-        except discord.HTTPException:
-            pass
+        if a["nick"] and a["static_id"]:
+            try:
+                await member.edit(nick=f"{a['nick']} [{a['static_id']}]"[:32])
+            except discord.HTTPException:
+                pass
         await safe_dm(member, f"🎉 Поздравляем! Ты принят в семью **{config.FAMILY}**!\n"
                               "Сейчас у тебя ранг 🆕 Новичок — испытательный срок. Скоро за тобой закрепят наставника.")
         chat = bot.ch(g, "chat")
@@ -527,11 +558,77 @@ class Applications(commands.Cog):
                 avatar = None
             card = images.welcome_card(avatar, "Новый член семьи", a["nick"] or member.display_name,
                                        f"Добро пожаловать в семью {bot.family(g)['gen']}!")
-            await chat.send(content=f"🎉 Встречайте нового члена семьи — {member.mention}! Принял: {inter.user.mention}",
+            await chat.send(content=f"🎉 Встречайте нового члена семьи — {member.mention}! Принял: {by.mention}",
                             file=discord.File(card, filename="new_member.png"))
-        await bot.log(g, f"✅ {member.mention} принят в семью (заявка №{a['id']}) — {inter.user.mention}", "hrlog",
+        manual = " **вручную, минуя экзамен**" if a["manual"] else ""
+        await bot.log(g, f"✅ {member.mention} принят в семью{manual} (заявка №{a['id']}) — {by.mention}", "hrlog",
                       config.GREEN)
-        bot.emit(g, "accepted", member=member, by=inter.user, nick=a["nick"], app_id=a["id"])
+        bot.emit(g, "accepted", member=member, by=by, nick=a["nick"], app_id=a["id"])
+        self.refresh_panel(g)
+
+    def refresh_panel(self, g):
+        """Счётчики заявок на закреплённой панели канала заявок."""
+        hub = self.bot.get_cog("Hub")
+        if hub:
+            asyncio.create_task(hub.refresh_channel(g, "review"))
+
+    # ---------- ручной приём (минуя экзамен) ----------
+    async def manual_accept(self, g, by, member, nick=None, static=None):
+        """Принять в семью по решению руководства: без экзамена и собеседования. Возвращает (ok, текст)."""
+        bot, db = self.bot, self.bot.db
+        if member.bot:
+            return False, "Ботов в семью не принимаем."
+        if bot.in_family(member):
+            return False, f"{member.display_name} уже в семье."
+        static = "".join(ch for ch in str(static or "") if ch.isdigit())[:10] or None
+        nick = str(nick or "").strip()[:32] or None
+        bl = bot.blacklist_find(g, discord_id=member.id, static=static, nick=nick)
+        if bl:
+            return False, (f"⛔ {member.display_name} в чёрном списке (№{bl['id']}: {bl['reason']}). "
+                           "Сначала убери из ЧС.")
+        # незакрытую заявку (в т.ч. «тест не сдан») закрываем приёмом, иначе заводим новую запись
+        a = db.one("SELECT * FROM applications WHERE guild_id=? AND user_id=? AND status IN "
+                   "('exam','exam_failed','new','taken','interview') ORDER BY id DESC LIMIT 1", g.id, member.id)
+        if a:
+            db.q("UPDATE applications SET status='accepted', manual=1, reviewer_id=?, decided_at=?, "
+                 "nick=COALESCE(?, nick), static_id=COALESCE(?, static_id) WHERE id=?",
+                 by.id, now_iso(), nick, static, a["id"])
+            app_id = a["id"]
+        else:
+            app_id = db.q("INSERT INTO applications(guild_id,user_id,nick,static_id,status,manual,reviewer_id,"
+                          "created_at,decided_at) VALUES(?,?,?,?,'accepted',1,?,?,?)", g.id, member.id, nick, static,
+                          by.id, now_iso(), now_iso()).lastrowid
+        a = db.one("SELECT * FROM applications WHERE id=?", app_id)
+        await self.accept(g, by, a, member)
+        review = bot.ch(g, "review")
+        if a["message_id"] and review:  # карточка в канале заявок — закрыть кнопки
+            try:
+                await review.get_partial_message(a["message_id"]).edit(embed=app_embed(bot, a, member, g),
+                                                                       view=app_view(app_id, True))
+            except discord.HTTPException:
+                pass
+        note = "" if self.exam_passed(g, member.id) or not bot.feature(g, "hr:exam") else \
+            " Экзамен не сдавал — пусть досдаст за испытательный срок: `/экзамен сдать`."
+        return True, f"✅ {member.display_name} принят в семью вручную (заявка №{app_id}).{note}"
+
+    def exam_passed(self, g, user_id):
+        return bool(self.bot.db.one("SELECT 1 FROM exam_attempts WHERE guild_id=? AND user_id=? AND passed=1 AND "
+                                    "training=0 LIMIT 1", getattr(g, "id", g), user_id))
+
+    async def manual_button(self, inter, a):
+        if not self.bot.has(inter.user, config.HR):
+            return await inter.response.send_message("⛔ Только отдел кадров и руководство.", ephemeral=True)
+        member = inter.guild.get_member(a["user_id"]) if a else None
+        if not member:
+            return await inter.response.send_message("Игрок уже покинул сервер.", ephemeral=True)
+        await inter.response.defer(ephemeral=True)
+        ok, text = await self.manual_accept(inter.guild, inter.user, member)
+        if ok:
+            try:
+                await inter.message.edit(view=None)
+            except discord.HTTPException:
+                pass
+        await inter.followup.send(text, ephemeral=True)
 
     async def deny(self, inter: discord.Interaction, app_id, reason):
         bot, db = self.bot, self.bot.db
@@ -545,6 +642,7 @@ class Applications(commands.Cog):
         if member:
             await safe_dm(member, f"😔 Твоя заявка в семью **{config.FAMILY}** отклонена.\nПричина: {reason}\n"
                                   "Подать новую можно через 24 часа.")
+        self.refresh_panel(inter.guild)
         await bot.log(inter.guild, f"❌ Заявка №{app_id} (<@{a['user_id']}>) отклонена — {inter.user.mention}: {reason}",
                       "hrlog", config.RED)
         await inter.response.edit_message(embed=app_embed(bot, a, member, inter.guild), view=app_view(app_id, True))
@@ -576,6 +674,43 @@ class Applications(commands.Cog):
         e.add_field(name="Лучшие рекрутеры", value="\n".join(f"<@{r['reviewer_id']}> — {r['n']}" for r in top) or "—",
                     inline=True)
         await inter.response.send_message(embed=e, ephemeral=True)
+
+    @app_commands.command(name="принять", description="Принять в семью вручную — без экзамена и собеседования")
+    @app_commands.rename(member="участник", nick="ник", static="static_id")
+    @app_commands.describe(nick="Ник в игре (Имя_Фамилия) — необязательно", static="Static ID — необязательно")
+    @app_commands.default_permissions(move_members=True)
+    @staff_only(config.HR)
+    async def manual_cmd(self, inter: discord.Interaction, member: discord.Member, nick: str = None,
+                         static: str = None):
+        await inter.response.defer(ephemeral=True)
+        ok, text = await self.manual_accept(inter.guild, inter.user, member, nick, static)
+        await inter.followup.send(text, ephemeral=True)
+
+    @exam.command(name="сдать", description="Сдать экзамен по правилам (для новичков, принятых без экзамена)")
+    async def exam_pass(self, inter: discord.Interaction):
+        bot, db, u, g = self.bot, self.bot.db, inter.user, inter.guild
+        newbie = bot.role(g, "newbie")
+        if not newbie or newbie not in u.roles:
+            return await inter.response.send_message(
+                "Сдавать экзамен здесь — для новичков на испытательном сроке. Чтобы вступить — подай заявку.",
+                ephemeral=True)
+        if self.exam_passed(g, u.id):
+            return await inter.response.send_message("✅ Экзамен у тебя уже сдан.", ephemeral=True)
+        last_fail = db.one("SELECT created_at FROM exam_attempts WHERE guild_id=? AND user_id=? AND passed=0 AND "
+                           "training=0 ORDER BY id DESC LIMIT 1", g.id, u.id)
+        if last_fail:
+            left = parse_dt(last_fail["created_at"]) + dt.timedelta(minutes=config.EXAM_RETRY_MIN) - now()
+            if left.total_seconds() > 0:
+                return await inter.response.send_message(
+                    f"📕 Повторить можно через **{int(left.total_seconds() // 60) + 1} мин**.", ephemeral=True)
+        qs = pick_questions(db, g.id, config.EXAM_QUESTIONS)
+        if not qs:
+            return await inter.response.send_message("Вопросов экзамена пока нет.", ephemeral=True)
+        attempt = db.one("SELECT COUNT(*) n FROM exam_attempts WHERE guild_id=? AND user_id=? AND training=0",
+                         g.id, u.id)["n"] + 1
+        s = ExamSession(u.id, None, qs, attempt)
+        self.sessions[u.id] = s
+        await inter.response.send_message(embed=self.question_embed(s, g), view=QuestionView(self, s), ephemeral=True)
 
     @exam.command(name="тренировка", description="Пройти пробный тест по правилам (ни на что не влияет)")
     async def exam_train(self, inter: discord.Interaction):

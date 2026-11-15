@@ -61,7 +61,7 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "warns
          "chronicle": config.LEAD, "invite": USERS, "forget": USERS,
          "leave": USERS, "listen": USERS, "listen_stop": USERS, "move": USERS, "disconnect": USERS, "say": USERS, "music_play": USERS, "music_skip": USERS,
          "music_stop": USERS, "music_volume": USERS, "gather": config.ORGANIZERS, "announce": config.ORGANIZERS,
-         "alarm": config.LEAD, "mute": MOD, "unmute": MOD, "warn": MOD, "purge": MOD, "rank": config.LEAD,
+         "alarm": config.LEAD, "accept": config.HR, "mute": MOD, "unmute": MOD, "warn": MOD, "purge": MOD, "rank": config.LEAD,
          **{t: config.TREASURY for t in TREASURY_ACTS}, "dues_set": LEADS, "salary_rate_set": LEADS,
          "fine_add": config.TREASURY + ["hr_head"], "fine_list": config.TREASURY + ["hr_head"]}
 LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив",
@@ -76,7 +76,7 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "music_play": "🎵 Включить", "music_skip": "⏭ Пропустить трек", "music_stop": "⏹ Выключить музыку",
          "music_volume": "🔊 Громкость", "gather": "📣 Сбор", "announce": "📢 Объявление", "alarm": "🚨 Тревога",
          "mute": "🔇 Мут", "unmute": "🔊 Снять мут", "warn": "⚖️ Выговор", "purge": "🧹 Очистить чат",
-         "rank": "🔁 Ранг", "treasury_in": "➕ Приход в казну", "treasury_out": "➖ Расход из казны",
+         "rank": "🔁 Ранг", "accept": "🛂 Принять в семью", "treasury_in": "➕ Приход в казну", "treasury_out": "➖ Расход из казны",
          "treasury_due": "✅ Взнос", "treasury_balance": "💰 Баланс казны", "treasury_debtors": "📋 Должники",
          "dues_set": "⚙️ Настройка взноса", "salary_rates": "💸 Ставки зарплат",
          "salary_rate_set": "💸 Ставка зарплаты", "salary_ranks": "💸 Зарплата по ставкам",
@@ -165,6 +165,8 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
 - mute: {{"users":[...],"minutes":1..1440,"reason":"..."}}; unmute: {{"users":[...]}}; purge: {{"count":1..100}}
 - warn: {{"user":id,"reason":"...","fine":"30к" или null — если просят ещё и штраф}}; unwarn: {{"user":id}}; warns: {{"user":id}} — показать выговоры
 - rank: {{"user":id,"rank":"newbie"|"member"|"senior"}}; post: {{"user":id,"post":{"|".join(config.STAFF_POSTS)},"add":true|false}}
+- accept: {{"user":id,"names":["как назвал"],"nick":"ник в игре или null","static":"Static ID или null"}} — принять
+  человека в семью ВРУЧНУЮ, без экзамена («прими Петю в семью», «возьми Васю без экзамена»)
 - expel: {{"user":id,"reason":"..."}}; kick / ban: {{"user":id,"reason":"..."}}; nick: {{"user":id,"nick":"..."}}
 - bl_add: {{"user":id или "nick":"...","static":"...","reason":"...","days":0}}; bl_check: {{"user":id или "nick":"...","static":"..."}}
 - raid: {{"on":true|false}}; slowmode: {{"seconds":0..600}}; poll: {{"question":"...","options":[...],"hours":1..168}}
@@ -990,6 +992,12 @@ class Assistant(commands.Cog):
                         if a.get("fine") and tr:  # выговор + штраф одной фразой
                             out.append(await tr.speech(g, me, {"type": "fine_add", "amount": a.get("fine"),
                                                                "reason": a.get("reason") or "выговор"}, m))
+                elif t == "accept":
+                    m, apps = next(iter(self.find_members(message.guild, a)), None), bot.get_cog("Applications")
+                    if not m or not apps:
+                        out.append("❌ Не нашёл, кого принять.")
+                    else:
+                        out.append((await apps.manual_accept(g, me, m, a.get("nick"), a.get("static")))[1])
                 elif t == "rank":
                     m, key = next(iter(self.find_members(message.guild, a)), None), a.get("rank")
                     if not m or key not in config.BASE_RANKS:

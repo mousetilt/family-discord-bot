@@ -200,6 +200,9 @@ class Treasury(commands.Cog):
     async def journal(self, guild, text, color=config.GOLD):
         key = "treasury_log" if self.bot.ch(guild, "treasury_log") else "hrlog"
         await self.bot.log(guild, text, key, color)
+        hub = self.bot.get_cog("Hub")
+        if hub:  # баланс и должники на закреплённой панели казны
+            await hub.refresh_channel(guild, "treasury_log")
 
     def debtors(self, guild):
         """[(участник, сдал)] — кто не сдал взнос за текущий период полностью. Без взноса — пусто."""
