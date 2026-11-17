@@ -35,7 +35,7 @@ ASK = {"law", "profile", "top", "inactive", "warns", "bl_check", "market", "dige
 TREASURY_ACTS = {"treasury_in", "treasury_out", "treasury_due", "treasury_balance", "treasury_debtors", "dues_set",
                  "salary_rates", "salary_rate_set", "salary_ranks", "salary_role", "salary_pay",
                  "fine_add", "fine_list", "fine_paid"}
-SAFE = {"move", "disconnect", "say", "music_play", "music_skip", "music_stop", "music_volume", "listen",
+SAFE = {"move", "disconnect", "say", "ask_voice", "music_play", "music_skip", "music_stop", "music_volume", "listen",
         "listen_stop", "leave", "music_pause", "music_resume", "voice_mute", "voice_unmute", "remind", "invite",
         "forget"} | ASK
 LEADS = ["leader", "deputy"]
@@ -63,6 +63,7 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "warns
          "music_resume": USERS, "voice_mute": USERS, "voice_unmute": USERS, "remind": USERS,
          "post": config.POST_GIVERS, "unwarn": MOD, "expel": LEADS, "bl_add": MOD, "kick": config.LEAD, "ban": LEADS,
          "raid": config.LEAD, "slowmode": MOD, "nick": MOD, "poll": config.ORGANIZERS, "dm": config.LEAD,
+         "ask_voice": config.LEAD,
          "chronicle": config.LEAD, "invite": USERS, "forget": USERS,
          "leave": USERS, "listen": USERS, "listen_stop": USERS, "move": USERS, "disconnect": USERS, "say": USERS, "music_play": USERS, "music_skip": USERS,
          "music_stop": USERS, "music_volume": USERS, "gather": config.ORGANIZERS, "announce": config.ORGANIZERS,
@@ -78,6 +79,7 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "post": "🎖 Должность", "unwarn": "⚪ Снять выговоры", "expel": "🚪 Исключить из семьи",
          "bl_add": "⛔ Внести в ЧС", "kick": "👢 Кикнуть с сервера", "ban": "🔨 Забанить", "raid": "🛡 Режим рейда",
          "slowmode": "🐢 Медленный режим", "nick": "✏️ Сменить ник", "poll": "📊 Опрос", "dm": "✉️ Написать в ЛС",
+         "ask_voice": "🎤 Спросить в войсе",
          "chronicle": "📖 Запись в летопись", "invite": "📨 Позвать в войс", "forget": "🧹 Забыть досье",
          "leave": "🚪 Выйти из войса", "listen": "🎙 Слушать команды в войсе", "listen_stop": "🔇 Перестать слушать", "move": "🔀 Перенести", "disconnect": "🔌 Отключить от войса", "say": "🗣 Сказать голосом",
          "music_play": "🎵 Включить", "music_skip": "⏭ Пропустить трек", "music_stop": "⏹ Выключить музыку",
@@ -173,7 +175,12 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
 - say: {{"text":"что произнести голосом"}} — САМ зайду в войс (где стою или в войс автора) и скажу вслух.
   «зайди к X и спроси/скажи», «спроси у X как дела», «передай X…», «поздоровайся в войсе» — это say с ГОТОВОЙ
   фразой от себя, напр. {{"type":"say","text":"Дарья, ну как ты, рассказывай!"}}. Если ещё и слушать команды —
-  добавь отдельным действием listen. gather: {{"what":"...","when":"...","where":"..."}} — сбор
+  добавь отдельным действием listen.
+- ask_voice: {{"users":[id],"names":["как назвал"],"question":"вопрос вслух, готовой фразой от тебя",
+  "report_to":id или null,"report_to_name":"кому прислать ответ" или null}} — САМ найду человека в ЕГО войсе,
+  спрошу вслух, послушаю ответ и пришлю расшифровку в ЛС (по умолчанию — автору). Это когда ответ надо ПРИНЕСТИ:
+  «зайди к Эмилю и спроси, сколько поднял, ответ напиши мне», «узнай у Даши в войсе…, скинь Юлиану». Просто
+  спросить/сказать без возврата ответа — это say. gather: {{"what":"...","when":"...","where":"..."}} — сбор
 - announce: {{"title":"...","text":"...","voice":true|false,"at":"когда, если просят позже: «в 20:00», «завтра 18:00», «через 2 часа»; иначе null"}};
 - draft: {{"kind":"announce"|"event"|"pr"|"recruit"|"congrats","topic":"о чём"}} — написать черновик текста (не публикуя); alarm: {{"text":"..."}} — тревога во всех войсах
 - mute: {{"users":[...],"minutes":1..1440,"reason":"..."}}; unmute: {{"users":[...]}}; purge: {{"count":1..100}}
@@ -641,6 +648,12 @@ class Assistant(commands.Cog):
             return f"{LABEL[t]}: {a.get('seconds', 0)} сек. в этом канале"
         if t == "poll":
             return f"{LABEL[t]}: «{a.get('question', '')}» — {', '.join(map(str, a.get('options') or ['Да', 'Нет']))}"
+        if t == "ask_voice":
+            if not who and a.get("target_name"):
+                who = ", ".join(m.display_name for m in self.find_members(g, {"names": [a["target_name"]]}))
+            rep = self.report_target(g, a)
+            return (f"{LABEL[t]}: {who or '?'} — «{str(a.get('question', ''))[:200]}» · "
+                    f"ответ в ЛС → {rep.display_name if rep else 'автору'}")
         if t == "dm":
             n = len(self.bot.family_members(g)) if a.get("source") == "family" else 0
             return f"{LABEL[t]} {who or (f'всей семье ({min(n, 40)} чел.)' if n else '?')}: «{str(a.get('text', ''))[:200]}»"
@@ -692,6 +705,46 @@ class Assistant(commands.Cog):
     # ---------- выполнение ----------
     def one(self, g, a):
         return next(iter(self.find_members(g, a)), None)
+
+    def report_target(self, g, a):
+        """ask_voice: кому прислать ответ (report_to / report_to_name); None — автору."""
+        nm = a.get("report_to_name")
+        q = {"user": a.get("report_to"), "names": [nm] if nm and not isinstance(nm, list) else nm}
+        if not q["user"] and not q["names"]:
+            return None
+        try:
+            return next((m for m in self.find_members(g, q) if not m.bot), None)
+        except Exception:
+            return None
+
+    async def ask_voice(self, message, g, target, question, report_to):
+        """Фоном: сходить к target в войс, спросить, принести ответ в ЛС report_to."""
+        bot, jarvis = self.bot, self.bot.get_cog("Jarvis")
+        ch = target.voice.channel if target.voice else None
+        if jarvis and ch:
+            text, why = await jarvis.ask_voice(g, ch, target, question)
+        else:
+            text, why = None, "голосовой модуль не загружен или человек ушёл из войса"
+        try:
+            if text:
+                body = f"**{target.display_name}** ответил: «{text[:1500]}»\n\n-# Спрашивал: «{question[:300]}»"
+            else:
+                body = (f"**{target.display_name}** не ответил или я не расслышал ({why or 'тишина'}).\n"
+                        f"-# Спрашивал: «{question[:300]}». Музыка, бубнёж и шум мимо распознавания — "
+                        "спроси ещё раз, пусть ответит внятно.")
+            sent = await safe_dm(report_to, embed=bot.embed("🎤 Ответ из войса", body, config.COLOR, g))
+        except Exception:
+            log.exception("Спросить в войсе: не отправил ответ")
+            sent = False
+        note = (f"🎤 {target.display_name} ответил — отправил в ЛС {report_to.display_name}." if text
+                else f"❌ Не поймал ответ {target.display_name}: {why or 'тишина'}.")
+        if not sent:
+            note += f" ⚠️ ЛС {report_to.display_name} закрыта — не доставил."
+        try:
+            if message.channel and not getattr(message, "voice", False):
+                await message.channel.send(note[:1900], allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            pass
 
     async def info(self, message, a, extra):
         """Справки: возвращает готовый текст ответа."""
@@ -1021,6 +1074,27 @@ class Assistant(commands.Cog):
                     else:
                         await music.announce(g, [say_ch.id], text=str(a.get("text", ""))[:400])
                         out.append("🗣 Сказал.")
+                elif t == "ask_voice":
+                    q = {"users": a.get("users"), "user": a.get("user"),
+                         "names": a.get("names") or ([a["target_name"]] if a.get("target_name") else None)}
+                    target = next((m for m in self.find_members(g, q) if not m.bot), None)
+                    question = str(a.get("question") or a.get("text") or "").strip()[:400]
+                    jarvis = bot.get_cog("Jarvis")
+                    if not target:
+                        out.append("❌ Не нашёл, к кому идти — назови ник точнее или тегни.")
+                    elif not question:
+                        out.append("❌ Не понял, что спросить.")
+                    elif not (target.voice and target.voice.channel):
+                        out.append(f"❌ {target.display_name} не в войсе — некуда идти.")
+                    elif not (jarvis and music):
+                        out.append("❌ Голосовой модуль не загружен.")
+                    elif why := jarvis.ask_busy(g, target.voice.channel):
+                        out.append(f"❌ Не пойду: {why}.")
+                    else:
+                        report_to = self.report_target(g, a) or me
+                        asyncio.create_task(self.ask_voice(message, g, target, question, report_to))
+                        out.append(f"🎤 Иду к {target.display_name} в {target.voice.channel.mention}, спрошу — "
+                                   f"ответ пришлю в ЛС {'тебе' if report_to.id == me.id else report_to.display_name}.")
                 elif t == "music_play" and music:
                     out.append("🎵 " + await music.enqueue(g, me, str(a.get("query", ""))[:200], message.channel))
                 elif t in ("music_skip", "music_stop", "music_volume") and music:

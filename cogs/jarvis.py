@@ -142,8 +142,10 @@ def parse_rtp(data, secret_key):
 
 
 class Listener:
-    def __init__(self, cog, guild, channel_id, owner):
+    def __init__(self, cog, guild, channel_id, owner, temp=False):
         self.cog, self.bot = cog, cog.bot
+        self.temp = temp     # временный слушатель «спросил — жду ответ»: команд не выполняет, ловит одну фразу
+        self.capture = None  # (user_id, Future) — ждём ответ этого человека (ask_voice)
         self.guild, self.channel_id, self.owner = guild, channel_id, owner
         self.users = {}      # ssrc -> user_id
         self.dec = {}        # user_id -> dave.Decryptor
@@ -199,6 +201,10 @@ class Listener:
         return m.vc(self.guild) if m else None
 
     def allowed(self, uid):
+        if self.capture and uid == self.capture[0]:
+            return True  # ждём ответ именно от него — слушаем, даже если он не из семьи
+        if self.temp:
+            return False  # временный слушатель: остальных не декодируем и лимит распознавания не тратим
         ok, at = self.perm.get(uid, (False, -1e9))
         if time.monotonic() - at > 30:
             m = self.guild.get_member(uid)
@@ -208,26 +214,31 @@ class Listener:
 
     def hook(self, vc):
         ws = getattr(vc, "ws", None)
-        if ws is None or ws is disnake.utils.MISSING or getattr(ws, "_jarvis", False):
+        if ws is None or ws is disnake.utils.MISSING:
+            return
+        if getattr(ws, "_jarvis", False):
+            ws._jarvis_li = self  # хук уже стоит — просто направляем сигналы текущему слушателю
             return
         orig = ws._hook
 
         async def h(w, msg, _orig=orig):
             try:
+                li = getattr(w, "_jarvis_li", None) or self
                 op = msg.get("op")
-                self.stats["ops"][op] = self.stats["ops"].get(op, 0) + 1
+                li.stats["ops"][op] = li.stats["ops"].get(op, 0) + 1
                 if op == 5:  # SPEAKING: кто за каким ssrc (точнее догадки — перезаписываем)
                     d = msg.get("d") or {}
                     uid, ssrc = int(d["user_id"]), int(d["ssrc"])
-                    for k in [k for k, v in self.users.items() if v == uid and k != ssrc]:
-                        self.users.pop(k, None)
-                    self.users[ssrc] = uid
+                    for k in [k for k, v in li.users.items() if v == uid and k != ssrc]:
+                        li.users.pop(k, None)
+                    li.users[ssrc] = uid
             except Exception:
                 pass
             await _orig(w, msg)
 
         ws._hook = h
         ws._jarvis = True
+        ws._jarvis_li = self
 
     async def reader(self):
         loop = asyncio.get_running_loop()
@@ -237,6 +248,10 @@ class Listener:
                 vc = self.vc()
                 if not vc or not vc.is_connected() or not getattr(vc, "secret_key", None):
                     lost = lost or time.monotonic()
+                    if self.temp and time.monotonic() - lost > 5:
+                        self.resolve(None)  # временный: связи нет — просто сдаёмся, Джарвиса не трогаем
+                        self.running = False
+                        return
                     if time.monotonic() - lost > 20:
                         # «слушаю», а в войсе меня нет (выкинули, оборвалась связь) — честно выключаемся,
                         # чтобы /джарвис потом включил всё с чистого листа
@@ -404,10 +419,16 @@ class Listener:
                     else:
                         self.busy.add(uid)
                         asyncio.create_task(self.phrase(uid, pcm))
-            if t - self.last_cmd > self.idle_stop:
+            if not self.temp and t - self.last_cmd > self.idle_stop:
                 asyncio.create_task(self.cog.stop(self.guild, "30 минут без команд"))
                 return True
             return False
+
+    def resolve(self, text):
+        """Отдать пойманный ответ тому, кто ждёт (ask_capture), и перестать ждать."""
+        cap, self.capture = self.capture, None
+        if cap and not cap[1].done():
+            cap[1].set_result(text)
 
     async def phrase(self, uid, pcm):
         try:
@@ -415,6 +436,12 @@ class Listener:
             text = await self.cog.transcribe(self.guild, pcm)
             self.stats["heard"] = (text or "∅")[:80]
             if not text:
+                return
+            if self.capture and uid == self.capture[0]:
+                self.last_cmd = time.monotonic()
+                self.resolve(text)  # это ответ на наш вопрос — командой не считаем
+                return
+            if self.temp:
                 return
             m = WAKE.match(text)
             asst = self.cog.bot.get_cog("Assistant")
@@ -493,12 +520,94 @@ class Jarvis(commands.Cog):
         self.listeners = {}
         self._whisper_by_key = {}  # ключ Groq -> метки последних распознаваний (минутный лимит)
         self.whisper_fail_since, self.whisper_fail_reason = None, ""  # для сторожа (cogs/maintenance.py)
+        self.asking = set()  # guild_id — сейчас ходим спрашивать человека в войсе (ask_voice)
         from cogs.assistant import USERS
         self.users_roles = USERS
 
     def cog_unload(self):
         for li in self.listeners.values():
             li.stop()
+
+    # ---------- «сходи-спроси-принеси ответ» ----------
+    def ask_busy(self, guild, channel):
+        """Почему сейчас нельзя сходить спросить (или None). Джарвис слушает в другом канале — не уводим его."""
+        if not READY:
+            return "на хостинге нет модулей для приёма звука"
+        if not self.whisper_key(guild):
+            return "нет ключа Groq для распознавания речи (`/ии ключ`)"
+        if guild.id in self.asking:
+            return "я уже пошёл спрашивать другого — дай закончить"
+        li = self.listeners.get(guild.id)
+        if li and li.channel_id != channel.id:
+            return f"я слушаю команды в <#{li.channel_id}>, оттуда не уйду"
+        music = self.bot.get_cog("Music")
+        if not music or not music.dn or not music.dn.is_ready():
+            return "голосовой модуль ещё запускается"
+        vc = music.vc(guild)
+        if vc and vc.is_connected() and vc.channel and vc.channel.id != channel.id and vc.is_playing() \
+                and music.player(guild).current:
+            return f"в <#{vc.channel.id}> играет музыка"
+        return None
+
+    async def ask_capture(self, guild, channel, user_id, timeout=20):
+        """Одноразово поймать первую распознанную фразу user_id в channel. → текст или None (молчал/не разобрал).
+        Бот уже должен стоять в канале. Джарвис слушает тут же — берём его слушателя, иначе свой временный."""
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        li = self.listeners.get(guild.id)
+        own = None
+        if li and li.channel_id == channel.id:
+            if li.capture:
+                return None
+            li.capture = (user_id, fut)
+        else:
+            own = li = Listener(self, guild, channel.id, user_id, temp=True)
+            li.capture = (user_id, fut)
+        try:
+            return await asyncio.wait_for(asyncio.shield(fut), timeout=max(5, min(60, timeout)))
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            if li.capture and li.capture[1] is fut:
+                li.capture = None
+            if own:
+                own.stop()
+
+    async def ask_voice(self, guild, channel, member, question, timeout=20):
+        """Зайти в channel, спросить вслух, дождаться ответа member. → (текст|None, причина сбоя|None)."""
+        why = self.ask_busy(guild, channel)
+        if why:
+            return None, why
+        music = self.bot.get_cog("Music")
+        self.asking.add(guild.id)
+        held = guild.id not in music.hold
+        try:
+            if held:
+                music.hold[guild.id] = channel.id  # после вопроса не выходим — надо послушать ответ
+            ok = await music.announce(guild, [channel.id], text=question)
+            vc = music.vc(guild)
+            if not ok or not vc or not vc.is_connected() or not vc.channel or vc.channel.id != channel.id:
+                return None, "не смог зайти в войс или озвучить вопрос"
+            if not disnake.opus.is_loaded():
+                try:
+                    disnake.opus._load_default()
+                except Exception:
+                    pass
+            text = await self.ask_capture(guild, channel, member.id, timeout)
+            return (text or None), (None if text else "не услышал ответа")
+        except Exception as e:
+            log.warning("Спросить в войсе: %s", e)
+            return None, "что-то сломалось по дороге"
+        finally:
+            self.asking.discard(guild.id)
+            if held and guild.id not in self.listeners and music.hold.get(guild.id) == channel.id:
+                music.hold.pop(guild.id, None)
+                vc = music.vc(guild)
+                if vc and not music.player(guild).current:
+                    try:
+                        await vc.disconnect(force=True)
+                    except Exception:
+                        pass
 
     # ---------- распознавание ----------
     def whisper_key(self, guild):
@@ -579,6 +688,8 @@ class Jarvis(commands.Cog):
             return "❌ Голосовой модуль ещё запускается — попробуй через 10 секунд."
         if not member.voice or not member.voice.channel:
             return "❌ Сначала зайди в голосовой канал."
+        if guild.id in self.asking:
+            return "❌ Я сейчас пошёл спрашивать человека в войсе — позови через полминуты."
         if not self.whisper_key(guild):
             return "❌ Для голосовых команд нужен бесплатный ключ Groq — руководство может вставить его: `/ии ключ`."
         try:
