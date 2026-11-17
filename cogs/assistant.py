@@ -699,7 +699,9 @@ class Assistant(commands.Cog):
         return [m for m in me.voice.channel.members if not m.bot] if me.voice and me.voice.channel else []
 
     def protected(self, actor, target):
-        """Старших наказывает только Глава/зам."""
+        """Нельзя: себя, ботов и тех, кто не ниже по иерархии семьи; старших наказывает только Глава/зам."""
+        if target.id == actor.id or target.bot or not self.bot.outranks(actor, target):
+            return True
         return self.bot.has(target, config.MOD_EXEMPT) and not self.bot.has(actor, ["leader", "deputy"])
 
     # ---------- выполнение ----------
@@ -988,12 +990,7 @@ class Assistant(commands.Cog):
                     if not sec:
                         out.append("❌ Защита не загружена.")
                     else:
-                        sec.raid_until = time.monotonic() + 3600 if on else 0
-                        if on and g.verification_level < discord.VerificationLevel.high:
-                            bot.db.gset(g, "raid:prev_level", g.verification_level.value)
-                        prev = discord.VerificationLevel(int(bot.db.gget(g, "raid:prev_level") or 2))
-                        await g.edit(verification_level=discord.VerificationLevel.high if on else prev,
-                                     reason=f"Режим рейда: {me}")
+                        await sec.set_raid(g, on, 3600, reason=f"Режим рейда: {me}")
                         await bot.log(g, f"🛡 Режим рейда {'включён' if on else 'выключен'} — {me.mention}",
                                       color=0xE53935)
                         out.append(f"🛡 Режим рейда {'включён на час' if on else 'выключен'}.")
@@ -1145,9 +1142,12 @@ class Assistant(commands.Cog):
                     out.append("🚨 Тревога поднята.")
                 elif t in ("mute", "unmute"):
                     mins = max(1, min(1440, int(a.get("minutes") or 10)))
-                    for m in self.find_members(message.guild, a):
+                    found = self.find_members(message.guild, a)
+                    if not found:
+                        out.append("❌ Не нашёл, кого " + ("замутить." if t == "mute" else "размутить."))
+                    for m in found:
                         if self.protected(me, m):
-                            out.append(f"⛔ {m.display_name} — старший состав, не трогаю.")
+                            out.append(f"⛔ {m.display_name} — не ниже тебя по иерархии, не трогаю.")
                             continue
                         await m.timeout(dt.timedelta(minutes=mins) if t == "mute" else None,
                                         reason=f"{a.get('reason') or 'Помощник'} ({me.display_name})")
@@ -1158,7 +1158,7 @@ class Assistant(commands.Cog):
                     if not m:
                         out.append("❌ Не нашёл, кому выговор.")
                     elif self.protected(me, m):
-                        out.append(f"⛔ {m.display_name} — старший состав, не трогаю.")
+                        out.append(f"⛔ {m.display_name} — не ниже тебя по иерархии, не трогаю.")
                     else:
                         n = await bot.give_warn(g, m, me, str(a.get("reason") or "без причины")[:300])
                         out.append(f"⚖️ Выговор {m.display_name} ({n}/3).")
@@ -1179,6 +1179,10 @@ class Assistant(commands.Cog):
                     m, key = next(iter(self.find_members(message.guild, a)), None), a.get("rank")
                     if not m or key not in config.BASE_RANKS:
                         out.append("❌ Не понял, кому и какой ранг.")
+                    elif m.id == me.id or m.bot or not bot.outranks(me, m):
+                        out.append(f"⛔ {m.display_name}: ранг меняют только тем, кто ниже тебя по иерархии (себе — нельзя).")
+                    elif not bot.in_family(m) and not bot.has(me, ["leader", "deputy"]):
+                        out.append(f"⛔ {m.display_name} не в семье — принимают через заявку или «прими в семью».")
                     else:
                         await bot.set_rank(m, key, me, reason="Через помощника")
                         out.append(f"🔁 {m.display_name} → {config.BASE_RANKS[key]}")

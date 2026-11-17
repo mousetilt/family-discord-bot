@@ -26,11 +26,68 @@ NUKE_LIMIT, NUKE_WINDOW = 4, 60        # 4 удаления каналов/ро�
 class Security(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.msgs = defaultdict(deque)
-        self.last_text = {}
-        self.joins = deque()
-        self.raid_until = 0
-        self.actions = defaultdict(deque)
+        # всё — по серверу: бот обслуживает несколько семей, рейд/флуд на одном сервере не касается других
+        self.msgs = defaultdict(deque)       # (guild_id, user_id) -> времена сообщений
+        self.last_text = {}                  # (guild_id, user_id) -> (текст, сколько подряд)
+        self.joins = defaultdict(deque)      # guild_id -> времена входов
+        self.raid_until = {}                 # guild_id -> monotonic, до какого момента режим рейда
+        self.actions = defaultdict(deque)    # (guild_id, user_id) -> времена «разрушительных» действий
+        self._raid_tasks = {}                # guild_id -> задача «выключить рейд по таймеру»
+
+    # ---------- режим рейда ----------
+    def raid_active(self, guild):
+        return time.monotonic() < self.raid_until.get(guild.id, 0)
+
+    async def set_raid(self, guild, on, seconds=3600, reason="Режим рейда"):
+        """Включить (на seconds) или выключить режим рейда на ЭТОМ сервере. Проверка входа поднимается до высокой,
+        а по окончании сама возвращается к прежней (раньше оставалась высокой навсегда)."""
+        old = self._raid_tasks.pop(guild.id, None)
+        if old and old is not asyncio.current_task():
+            old.cancel()
+        if on:
+            self.raid_until[guild.id] = time.monotonic() + seconds
+            if guild.verification_level < discord.VerificationLevel.high:
+                self.bot.db.gset(guild, "raid:prev_level", guild.verification_level.value)
+            level = discord.VerificationLevel.high
+            self.bot.db.gset(guild, "raid:until", int(time.time() + seconds))  # переживёт перезапуск бота
+            self._raid_tasks[guild.id] = asyncio.create_task(self._raid_timer(guild, seconds))
+        else:
+            self.raid_until.pop(guild.id, None)
+            self.bot.db.gdel(guild, "raid:until")
+            try:
+                level = discord.VerificationLevel(int(self.bot.db.gget(guild, "raid:prev_level") or 2))
+            except ValueError:
+                level = discord.VerificationLevel.medium
+        try:
+            if guild.verification_level != level:
+                await guild.edit(verification_level=level, reason=reason)
+        except discord.HTTPException:
+            pass
+
+    async def _raid_timer(self, guild, seconds):
+        await asyncio.sleep(seconds)
+        while (left := self.raid_until.get(guild.id, 0) - time.monotonic()) > 0:
+            await asyncio.sleep(left + 0.05)  # таймер может проснуться чуть раньше срока — доспим остаток
+        if not self.raid_active(guild):
+            await self.set_raid(guild, False, reason="Режим рейда закончился")
+            await self.bot.log(guild, "🟢 Режим рейда закончился — проверка входа возвращена к прежней.",
+                               color=config.GREEN)
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Бот перезапустился посреди рейда — довести таймер до конца (или сразу вернуть проверку входа)."""
+        for g in self.bot.home_guilds:
+            try:
+                until = int(self.bot.db.gget(g, "raid:until") or 0)
+            except ValueError:
+                until = 0
+            if not until or g.id in self._raid_tasks:
+                continue
+            left = until - time.time()
+            if left > 0:
+                await self.set_raid(g, True, left, reason="Режим рейда (после перезапуска)")
+            else:
+                await self.set_raid(g, False, reason="Режим рейда закончился")
 
     # ---------- общее ----------
     def trusted(self, member):
@@ -67,14 +124,15 @@ class Security(commands.Cog):
                 or not self.bot.feature(message.guild, "moderation:antispam"):
             return
         t = time.monotonic()
-        q = self.msgs[m.id]
+        key = (message.guild.id, m.id)
+        q = self.msgs[key]
         q.append(t)
         while q and t - q[0] > SPAM_WINDOW:
             q.popleft()
         text = (message.content or "").strip().lower()
-        prev, count = self.last_text.get(m.id, ("", 0))
+        prev, count = self.last_text.get(key, ("", 0))
         count = count + 1 if text and text == prev else 1
-        self.last_text[m.id] = (text, count)
+        self.last_text[key] = (text, count)
         mentions = len(message.mentions) + len(message.role_mentions)
         reason = None
         if mentions >= MASS_MENTIONS:
@@ -86,7 +144,7 @@ class Security(commands.Cog):
         if not reason:
             return
         q.clear()
-        self.last_text[m.id] = ("", 0)
+        self.last_text[key] = ("", 0)
         try:
             await message.channel.purge(limit=15, check=lambda x: x.author.id == m.id,
                                         after=discord.utils.utcnow() - dt.timedelta(seconds=30))
@@ -119,25 +177,20 @@ class Security(commands.Cog):
                                  "Ботов может добавлять только владелец сервера.")
             return
         t = time.monotonic()
-        self.joins.append(t)
-        while self.joins and t - self.joins[0] > RAID_WINDOW:
-            self.joins.popleft()
-        if len(self.joins) >= RAID_JOINS and t > self.raid_until:
-            self.raid_until = t + 600
-            if g.verification_level < discord.VerificationLevel.high:
-                self.bot.db.gset(g, "raid:prev_level", g.verification_level.value)
-            try:
-                await g.edit(verification_level=discord.VerificationLevel.high, reason="Анти-рейд")
-            except discord.HTTPException:
-                pass
-            await self.alarm(g, "РЕЙД!", f"За {RAID_WINDOW} сек зашло {len(self.joins)} человек. Режим рейда на 10 минут: "
+        joins = self.joins[g.id]
+        joins.append(t)
+        while joins and t - joins[0] > RAID_WINDOW:
+            joins.popleft()
+        if len(joins) >= RAID_JOINS and not self.raid_active(g):
+            await self.set_raid(g, True, 600, reason="Анти-рейд")
+            await self.alarm(g, "РЕЙД!", f"За {RAID_WINDOW} сек зашло {len(joins)} человек. Режим рейда на 10 минут: "
                                          f"новичков мутим, аккаунты младше {RAID_MIN_AGE_DAYS} дн. выкидываем, проверка "
                                          "входа — высокая. Выключить: `/защита рейд выключить`.")
             music = self.bot.get_cog("Music")
             if music:
                 asyncio.create_task(music.alarm(g, "Внимание! Тревога! На сервер семьи идёт рейд. "
                                                    "Руководству срочно проверить Discord."))
-        if t < self.raid_until:
+        if self.raid_active(g):
             age = (now() - member.created_at).days
             if age < RAID_MIN_AGE_DAYS:
                 try:
@@ -163,7 +216,7 @@ class Security(commands.Cog):
         if not member or member.id in (guild.owner_id, self.bot.user.id):
             return
         t = time.monotonic()
-        q = self.actions[member.id]
+        q = self.actions[(guild.id, member.id)]
         q.append(t)
         while q and t - q[0] > NUKE_WINDOW:
             q.popleft()
@@ -203,7 +256,7 @@ class Security(commands.Cog):
 
     @group.command(name="статус", description="Состояние защиты")
     async def status(self, inter: discord.Interaction):
-        raid = time.monotonic() < self.raid_until
+        raid = self.raid_active(inter.guild)
         e = self.bot.embed("🛡 Защита сервера",
                            f"**Режим рейда:** {'🔴 ВКЛЮЧЁН' if raid else '🟢 выключен'}\n"
                            f"**Проверка входа:** {inter.guild.verification_level.name}\n\n"
@@ -219,16 +272,9 @@ class Security(commands.Cog):
     @group.command(name="рейд", description="Вручную включить или выключить режим рейда")
     @app_commands.rename(on="включить")
     async def raid(self, inter: discord.Interaction, on: bool):
-        self.raid_until = time.monotonic() + 3600 if on else 0
-        if on and inter.guild.verification_level < discord.VerificationLevel.high:
-            self.bot.db.gset(inter.guild, "raid:prev_level", inter.guild.verification_level.value)
-        prev = discord.VerificationLevel(int(self.bot.db.gget(inter.guild, "raid:prev_level") or 2))
-        try:
-            await inter.guild.edit(verification_level=discord.VerificationLevel.high if on else prev,
-                                   reason="Режим рейда")
-        except discord.HTTPException:
-            pass
-        await inter.response.send_message("🔴 Режим рейда включён на час." if on else "🟢 Режим рейда выключен.",
+        await inter.response.defer(ephemeral=True)
+        await self.set_raid(inter.guild, on, 3600, reason=f"Режим рейда: {inter.user}")
+        await inter.followup.send("🔴 Режим рейда включён на час." if on else "🟢 Режим рейда выключен.",
                                           ephemeral=True)
 
 

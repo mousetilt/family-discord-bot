@@ -123,7 +123,9 @@ class Staff(commands.Cog):
     @app_commands.choices(rank=[app_commands.Choice(name=v, value=k) for k, v in config.BASE_RANKS.items()])
     @staff_only(config.LEAD + ["hr_head"])
     async def rank(self, inter: discord.Interaction, member: discord.Member, rank: app_commands.Choice[str]):
-        if member.id != inter.user.id and not self.bot.outranks(inter.user, member):
+        if member.id == inter.user.id or member.bot:
+            return await inter.response.send_message("⛔ Себе ранг не меняют — попроси руководство.", ephemeral=True)
+        if not self.bot.outranks(inter.user, member):
             return await inter.response.send_message("⛔ Нельзя менять ранг тому, кто не ниже тебя по иерархии.",
                                                      ephemeral=True)
         await inter.response.defer(ephemeral=True)

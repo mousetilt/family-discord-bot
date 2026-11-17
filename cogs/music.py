@@ -761,7 +761,9 @@ class Music(commands.Cog):
                         self.voice_down[voice], self.voice_fails[voice] = time.monotonic() + 60, 0
                     log.info("Голос %s не ответил (%s) — пробую следующий", voice, type(e).__name__)
             from gtts import gTTS
-            await asyncio.to_thread(lambda: gTTS(text, lang="ru").save(str(path)))
+            # без таймаута зависший запрос к Google держал замок объявлений — замолкал весь голос бота
+            await asyncio.wait_for(asyncio.to_thread(lambda: gTTS(text, lang="ru", timeout=10).save(str(path))),
+                                   timeout=15)
             return path
         except Exception:
             path.unlink(missing_ok=True)  # недописанный файл не должен остаться в кэше
