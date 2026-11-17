@@ -279,7 +279,39 @@ class Music(commands.Cog):
             if err:
                 log.warning("Ошибка плеера: %s", err)
             asyncio.run_coroutine_threadsafe(self.play_next(guild), self.bot.loop)
-        vc.play(src, after=after)
+
+        # пока искали трек (yt-dlp — секунды), связь с войсом могла оборваться: даём ей переподключиться
+        for _ in range(10):
+            vc = self.vc(guild)
+            if vc and vc.is_connected():
+                break
+            await asyncio.sleep(0.5)
+        try:
+            if not vc or not vc.is_connected():
+                raise disnake.ClientException("Not connected to voice.")
+            if vc.is_playing() or vc.is_paused():
+                # пока искали, заиграло другое (объявление/радио) — трек в начало очереди, его after включит наш
+                src.cleanup()
+                p.queue.appendleft(track)
+                p.current = None
+                return
+            vc.play(src, after=after)
+        except disnake.ClientException as e:
+            log.warning("Плеер: голос недоступен (%s) — трек %s вернул в очередь", e, track.title)
+            try:
+                src.cleanup()  # гасим уже запущенный ffmpeg
+            except Exception:
+                pass
+            p.queue.appendleft(track)
+            p.current = None
+            if p.text:
+                try:
+                    await p.text.send("⚠️ Связь с голосовым каналом оборвалась — трек оставил в очереди. "
+                                      "Зайди в войс и нажми `/играть` ещё раз.", delete_after=60)
+                except discord.HTTPException:
+                    pass
+            await self.update_panel(guild)
+            return
         await self.update_panel(guild)
 
     def schedule_leave(self, guild, delay, alone=False):
