@@ -150,6 +150,13 @@ class DB:
         self.path = path
         self.c = sqlite3.connect(path)
         self.c.row_factory = sqlite3.Row
+        if path != ":memory:":
+            # WAL: запись не блокирует чтение и не делает fsync на каждый коммит — бот не тормозит на частых записях
+            try:
+                self.c.execute("PRAGMA journal_mode=WAL")
+                self.c.execute("PRAGMA synchronous=NORMAL")
+            except sqlite3.Error as e:
+                log.warning("WAL не включился: %s", e)
         self._migrate_legacy(home_gid)
         self.c.executescript(SCHEMA)
         for table, cols in MIGRATIONS.items():

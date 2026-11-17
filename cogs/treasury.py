@@ -56,7 +56,9 @@ def parse_amount(s):
             val = float(num.replace(",", "."))
         except ValueError:
             return None
-    else:  # без суффикса точки/запятые — разделители разрядов
+    else:  # без суффикса точки/запятые — разделители разрядов («1.500.000»)
+        if any(len(g) != 3 for g in re.split(r"[.,]", num)[1:]):
+            return None  # «1.5» без «к/кк» — непонятно, 1,5 вирта или 15: лучше переспросить, чем провести не то
         val = float(num.replace(",", "").replace(".", ""))
     n = int(round(val * mult))
     return n if 0 < n <= MAX_AMOUNT else None
@@ -473,6 +475,11 @@ class Treasury(commands.Cog):
             return
         day = t.strftime("%Y-%m-%d")
         for g in self.bot.home_guilds:
+            if self.bot.feature(g, "treasury:dues") and self.bot.feature(g, "treasury:remind"):
+                try:
+                    await self.remind_dues(g)
+                except Exception:
+                    log.exception("Напоминание о взносах «%s»", g.name)
             if not self.bot.feature(g, "treasury:fines") or not self.bot.feature(g, "treasury:remind"):
                 continue
             if self.bot.db.gget(g, "fines:reminded") == day:
@@ -490,6 +497,28 @@ class Treasury(commands.Cog):
                                  f"**{fmt(sum(int(r['amount']) for r in rs))}** ("
                                  + "; ".join(f"№{r['id']} {r['reason'][:60]}" for r in rs[:5])
                                  + "). Сдай казначею или руководству.")
+
+    async def remind_dues(self, g):
+        """За 2 дня до конца периода взносов — один раз ЛС тем, кто ещё не сдал (или сдал не всё)."""
+        need, period = self.dues(g)
+        if not need:
+            return
+        start = dt.datetime.fromtimestamp(period_start(period), msk_now().tzinfo)
+        if period == "month":
+            end = (start.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+        else:
+            end = start + dt.timedelta(days=7)
+        if (end - msk_now()).total_seconds() > 2 * 86400:
+            return
+        key = f"dues:reminded:{start:%Y-%m-%d}"
+        if self.bot.db.gget(g, key):
+            return
+        self.bot.db.gset(g, key, 1)
+        fam = self.bot.family(g)["name"]
+        for m, got in self.debtors(g):
+            await safe_dm(m, f"⏰ Напоминаю про членский взнос в семье {fam}: **{fmt(need)}** за {PERIODS[period]}"
+                             + (f" (сдано {fmt(got)})" if got else "")
+                             + f". Период закрывается <t:{int(end.timestamp())}:R>. Сдай казначею или руководству.")
 
     @remind_loop.before_loop
     async def _before(self):
@@ -518,7 +547,11 @@ class Treasury(commands.Cog):
             key = a.get("role")
             return f"💸 Ставка «{config.ROLE_NAMES.get(key, '❓роль')}»: {s if amount else 'убрать'}"
         if t == "salary_ranks":
-            return self.pay_preview(guild, self.payroll(guild), "по ставкам")
+            text = self.pay_preview(guild, self.payroll(guild), "по ставкам")
+            last = self.bot.db.gget(guild, "salary:last")
+            if last and int(now().timestamp()) - int(last) < 6 * 86400:
+                text += f" ⚠️ по ставкам уже платили <t:{last}:R> — не задвоить бы"
+            return text
         if t == "salary_role":
             key = a.get("role")
             if key not in RATE_ROLES or not amount:

@@ -24,7 +24,7 @@ def parse_price(s):
 
 
 def fmt_price(n):
-    return f"{int(n):,}".replace(",", " ") + " ₽" if n is not None else "договорная"
+    return f"{int(n):,}".replace(",", " ") + " вирт" if n is not None else "договорная"  # как в казне
 
 
 def words(q):

@@ -182,14 +182,22 @@ async def build_server(bot, guild, progress):
         db.gset(guild, f"role:{key}", role.id)
     await progress(f"✅ Роли ({len(R)})")
 
-    await progress(await order_roles(guild, [R[k].id for k, *_ in config.ROLES]))
-
-    try:
-        p = guild.default_role.permissions
-        p.update(mention_everyone=False)
-        await guild.default_role.edit(permissions=p, reason="Только руководство может пинговать @everyone")
-    except discord.HTTPException:
-        pass
+    # Бережно к готовому серверу: порядок ролей, @everyone, AFK и системные уведомления меняем только на домашнем.
+    # На подключённом сервере своя иерархия — её не переворачиваем; привязанные роли (/семья роли) не двигаем нигде.
+    home = bot.is_home(guild)
+    ours = [R[k].id for k, *_ in config.ROLES if not db.gget(guild, f"rolemap:{k}")]
+    if home:
+        await progress(await order_roles(guild, ours))
+        try:
+            p = guild.default_role.permissions
+            p.update(mention_everyone=False)
+            await guild.default_role.edit(permissions=p, reason="Только руководство может пинговать @everyone")
+        except discord.HTTPException:
+            pass
+    else:
+        low = [R[k].name for k, *_ in config.ROLES if R[k] >= guild.me.top_role]
+        await progress("⚠️ Роль бота ниже ролей: " + ", ".join(low[:3]) + " — перетащи её выше, иначе бот не сможет их "
+                       "выдавать" if low else "✅ Порядок ролей сервера не трогаю — роль бота выше ролей семьи")
 
     for cat in config.STRUCTURE:
         ow = build_overwrites(guild, R, cat["view"], cat["send"], kind="both")
@@ -237,6 +245,8 @@ async def build_server(bot, guild, progress):
     await hide_voices_from_friends(bot, guild)  # привязанные каналы семьи сборка не трогает — им запрет отдельно
     await progress("✅ Права доступа выставлены по ролям")
 
+    if not home:
+        return
     afk = bot.ch(guild, "afk")
     try:
         flags = guild.system_channel_flags
@@ -697,9 +707,9 @@ class ServerSetup(commands.Cog):
                 avatar = await member.display_avatar.replace(size=256, static_format="png").read()
             except discord.HTTPException:
                 avatar = None
-            card = images.welcome_card(avatar, "Добро пожаловать", member.display_name,
-                                       f"Гость №{member.guild.member_count} · семья "
-                                       f"{self.bot.family(member.guild)['name']}")
+            card = await asyncio.to_thread(images.welcome_card, avatar, "Добро пожаловать", member.display_name,
+                                           f"Гость №{member.guild.member_count} · семья "
+                                           f"{self.bot.family(member.guild)['name']}")
             await c.send(content=f"👋 {member.mention}, рады видеть! Хочешь к нам — жми кнопку в "
                                  f"{apply.mention if apply else '#подать-заявку'}. Вопросы — пиши сюда.",
                          file=discord.File(card, filename="welcome.png"))

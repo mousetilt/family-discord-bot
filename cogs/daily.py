@@ -35,6 +35,13 @@ def make_backup(path, only_gid=None, home_gid=None):
         dst = sqlite3.connect(tmp)
         try:
             src.backup(dst)
+            # анонимные обращения: в копии автора нет (её получает владелец сервера — обычно Глава,
+            # а панель обещает, что руководство не узнает, кто написал). В живой базе он остаётся — для ответа в ЛС.
+            try:
+                dst.execute("UPDATE appeals SET user_id=NULL WHERE anon=1")
+                dst.commit()
+            except sqlite3.Error:
+                pass
             if only_gid:
                 strip_foreign(dst, only_gid)
             elif home_gid:  # полная копия — но без ИИ-ключей других семей (они их вводили не для нас)
@@ -58,7 +65,7 @@ def strip_foreign(conn, gid):
                                          "AND name NOT LIKE 'sqlite_%'")]
     for t in tables:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({t})")}
-        if t.startswith("alliance_") or t in ("settings", "ai_usage"):
+        if t.startswith("alliance_") or t in ("settings", "ai_usage", "bot_errors"):
             conn.execute(f"DELETE FROM {t}")
         elif "guild_id" in cols:
             conn.execute(f"DELETE FROM {t} WHERE guild_id<>?", (gid,))

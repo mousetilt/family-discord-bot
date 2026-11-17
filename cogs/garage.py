@@ -241,6 +241,8 @@ class Garage(commands.Cog):
     async def c_hist(self, inter: discord.Interaction, car: str):
         if not await self.gate(inter):
             return
+        if not self.bot.has(inter.user, config.FAMILY_PLUS):
+            return await inter.response.send_message("Это для семьи.", ephemeral=True)
         v = await self._car(inter, car)
         if not v:
             return

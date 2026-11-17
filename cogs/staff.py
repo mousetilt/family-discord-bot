@@ -40,7 +40,7 @@ class AnnounceModal(discord.ui.Modal, title="Объявление"):
 class Staff(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self._roster_task = None
+        self._roster_tasks = {}  # guild_id -> отложенное обновление состава
         self.vacation_loop.start()
 
     def cog_unload(self):
@@ -87,13 +87,14 @@ class Staff(commands.Cog):
             pass
 
     def schedule_roster(self, guild):
-        if self._roster_task and not self._roster_task.done():
+        t = self._roster_tasks.get(guild.id)  # у каждой семьи свой таймер — иначе состав второй не обновлялся
+        if t and not t.done():
             return
 
         async def later():
             await asyncio.sleep(20)
             await self.update_roster(guild)
-        self._roster_task = asyncio.create_task(later())
+        self._roster_tasks[guild.id] = asyncio.create_task(later())
 
     @commands.Cog.listener()
     async def on_member_update(self, before, after):

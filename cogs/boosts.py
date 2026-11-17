@@ -252,6 +252,13 @@ class Boosts(commands.Cog):
             return await inter.response.send_message("Цвет нужен в формате #FF66CC.", ephemeral=True)
         title = f"💎 {(name or m.display_name).strip()[:30]}"
         g = inter.guild
+        # роль бустера стоит выше рангов (чтобы был виден цвет) — значит, не должна выдавать себя за должность
+        low = title.lower().replace("ё", "е")
+        taken = [n.split(" ", 1)[-1].lower() for n in config.ROLE_NAMES.values()]
+        if any(w in low for w in ("глава", "зам", "совет", "руковод", "админ", "модер", "казнач", "кадр")) or \
+                any(t and t in low for t in taken):
+            return await inter.response.send_message("🙅 Название похоже на должность семьи — выбери другое.",
+                                                     ephemeral=True)
         rid = self.bot.db.gget(g, f"boostrole:{m.id}")
         r = g.get_role(int(rid)) if rid else None
         try:

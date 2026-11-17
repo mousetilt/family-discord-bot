@@ -171,7 +171,7 @@ class Alliance(commands.Cog):
             m = g.get_member(uid) if g else None
             if not m:
                 continue
-            if self.bot.is_home(g):
+            if self.bot.is_family(g):  # сервер семьи с нашим ботом — роли семьи из её настроек
                 ok = self.bot.in_family(m)
             else:
                 ok = any(r.id in (row["family_role_id"], row["lead_role_id"]) for r in m.roles)
@@ -190,7 +190,7 @@ class Alliance(commands.Cog):
             m = g.get_member(uid) if g else None
             if not m:
                 continue
-            if self.bot.is_home(g):
+            if self.bot.is_family(g):
                 if self.bot.has(m, config.LEAD):
                     return row
             elif m.id == g.owner_id or any(r.id == row["lead_role_id"] for r in m.roles):
@@ -222,7 +222,7 @@ class Alliance(commands.Cog):
         if not isinstance(member, discord.Member):
             return False
         g = member.guild
-        if self.bot.is_home(g):
+        if self.bot.is_family(g):
             return self.bot.has(member, config.LEAD)
         if self.is_hub(g):
             return self.leader_family(member.id) is not None
@@ -237,7 +237,7 @@ class Alliance(commands.Cog):
         if self.is_hub(g):
             fams = self.member_families(member.id)
             return ", ".join(f["family"] for f in fams) or "гость штаба"
-        if self.bot.is_home(g):
+        if self.bot.is_family(g):
             for row in self.active():
                 if row["ally_role_id"] and any(r.id == row["ally_role_id"] for r in member.roles):
                     return row["family"]
@@ -252,7 +252,7 @@ class Alliance(commands.Cog):
         g = self.bot.get_guild(row["guild_id"])
         if not g:
             return 0
-        if self.bot.is_home(g):
+        if self.bot.is_family(g):
             return len(self.bot.family_members(g))
         r = g.get_role(row["family_role_id"]) if row["family_role_id"] else None
         return len([m for m in r.members if not m.bot]) if r else 0
@@ -264,7 +264,7 @@ class Alliance(commands.Cog):
             return None
         bot = self.bot
         PO = discord.PermissionOverwrite
-        if bot.is_home(g):
+        if bot.is_family(g):
             fam_roles = [bot.role(g, k) for k in config.FAMILY_RANKS]
             fam_roles += [g.get_role(r["ally_role_id"]) for r in self.active() if r["ally_role_id"]]
             lead_roles = [bot.role(g, k) for k in config.LEAD]
@@ -493,7 +493,10 @@ class Alliance(commands.Cog):
                 if not g or self.bot.is_home(g):
                     continue
                 fm = g.get_member(member.id)
-                is_member = bool(fm and row["family_role_id"] and any(r.id == row["family_role_id"] for r in fm.roles))
+                if self.bot.is_family(g):  # семья с нашим ботом — по её рангам
+                    is_member = bool(fm and self.bot.in_family(fm))
+                else:
+                    is_member = bool(fm and row["family_role_id"] and any(r.id == row["family_role_id"] for r in fm.roles))
             try:
                 if is_member and role not in member.roles:
                     await member.add_roles(role, reason=f"{A}: состоит в семье {row['family']}")
@@ -528,8 +531,8 @@ class Alliance(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
-        if not self.bot.is_home(member.guild):
-            await self.check_bl(member)  # у нас ЧС альянса проверяет модуль ЧС семьи
+        if not self.bot.is_family(member.guild):
+            await self.check_bl(member)  # на серверах семей ЧС альянса проверяет модуль ЧС семьи
         await self.resync(member.id)
 
     @commands.Cog.listener()

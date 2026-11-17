@@ -268,7 +268,7 @@ class Diplomacy(commands.Cog):
                       f"**Стороны:** семья {config.FAMILY} и **{family}**\n**Срок:** "
                       f"{discord.utils.format_dt(parse_dt(until), 'D') if until else 'бессрочно'}\n\n**Условия:**\n{terms}",
                       config.GOLD, inter.guild)
-        e.set_footer(text=f"Заключил: {inter.user.display_name} · {config.FOOTER}")
+        e.set_footer(text=f"Заключил: {inter.user.display_name} · {bot.brand(inter.guild, config.FOOTER)}")
         c = bot.ch(inter.guild, "treaties")
         if c:
             m = await c.send(embed=e)

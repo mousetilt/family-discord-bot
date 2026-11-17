@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Музыка: команды на discord.py, а голос — через disnake (его шифрование DAVE на dave-py работает со звуком)."""
 import asyncio
+import hashlib
 import logging
 import random
 import re
@@ -238,7 +239,7 @@ class Music(commands.Cog):
         self.bot = bot
         self.players = {}
         self.locks = {}
-        self.hold = {}  # guild_id -> channel_id: «Джарвис» слушает — из войса не выходим
+        self.hold = {}  # guild_id -> channel_id: голосовой Швейцар слушает — из войса не выходим
         self.voice_fails, self.voice_down = {}, {}
         self.greeted = {}
         self.dn = None
@@ -642,7 +643,7 @@ class Music(commands.Cog):
             p.reset()
             p.loop = "off"
             vc.stop()
-            if inter.guild.id not in self.hold:  # «Джарвис» слушает — музыку выключаем, но из войса не выходим
+            if inter.guild.id not in self.hold:  # голосовой Швейцар слушает — музыку выключаем, но из войса не выходим
                 await vc.disconnect()
             msg = "⏹ Остановлено"
         elif action == "loop":
@@ -721,7 +722,7 @@ class Music(commands.Cog):
         """Озвучка текста бесплатно: нейроголоса Microsoft Edge; Google — только если не ответил ни один."""
         tmp = Path(tempfile.gettempdir())
         chain = self.voice_chain()
-        path = tmp / f"tts_{abs(hash((chain[0], text))) % 10 ** 10}.mp3"
+        path = tmp / f"tts_{hashlib.md5(f'{chain[0]}|{text}'.encode()).hexdigest()[:16]}.mp3"  # md5 — одинаков после рестарта
         if path.exists() and path.stat().st_size > 0:
             return path
         self.tts_made = getattr(self, "tts_made", 0) + 1

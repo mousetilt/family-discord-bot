@@ -57,9 +57,10 @@ def fmt_dur(sec):
 class Streams(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.live = {}        # user_id -> id записи в streams
-        self.end_tasks = {}   # user_id -> asyncio.Task (отложенное завершение)
-        self.golive = {}      # user_id -> (message, monotonic)
+        # всё по (guild_id, user_id): стример может быть в нескольких семьях — у каждой свой анонс
+        self.live = {}        # (guild, user) -> id записи в streams
+        self.end_tasks = {}   # (guild, user) -> asyncio.Task (отложенное завершение)
+        self.golive = {}      # (guild, user) -> (message, monotonic)
 
     def cog_unload(self):
         for t in self.end_tasks.values():
@@ -70,7 +71,8 @@ class Streams(commands.Cog):
         return isinstance(member, discord.Member) and not member.bot and self.bot.has(member, config.FAMILY_PLUS)
 
     def is_main(self, guild):
-        return guild and (not config.GUILD_ID or guild.id == config.GUILD_ID)
+        """Эфиры — у любой семьи (раньше только у GUILD_ID: состояние было общим на всех)."""
+        return guild is not None and self.bot.is_family(guild)
 
     def embed(self, member, row, ended=False):
         plat, color = platform_of(row["url"], row["platform"])
@@ -134,7 +136,7 @@ class Streams(commands.Cog):
         bot = self.bot
         bot.db.q("UPDATE streams SET ended_at=? WHERE id=? AND ended_at IS NULL", now_iso(), sid)
         row = bot.db.one("SELECT * FROM streams WHERE id=?", sid)
-        self.live.pop(member.id, None)
+        self.live.pop((member.guild.id, member.id), None)
         await self.set_live_role(member, False)
         if row and row["message_id"]:
             ch = member.guild.get_channel(row["channel_id"])
@@ -153,7 +155,7 @@ class Streams(commands.Cog):
         if not self.family(member) or not self.is_main(member.guild):
             return
         st = self.streaming(member)
-        uid = member.id
+        uid = (member.guild.id, member.id)
         if st:
             t = self.end_tasks.pop(uid, None)
             if t:
@@ -161,7 +163,7 @@ class Streams(commands.Cog):
             if uid in self.live:
                 return
             last = self.bot.db.one("SELECT * FROM streams WHERE guild_id=? AND user_id=? AND manual=0 ORDER BY id DESC",
-                                   member.guild.id, uid)
+                                   member.guild.id, member.id)
             if last and last["url"] == st.url and (
                     last["ended_at"] is None or (now() - parse_dt(last["ended_at"])).total_seconds() < RESUME_WINDOW):
                 # тот же эфир (перезапуск или рестарт бота) — без повторного анонса
@@ -188,11 +190,12 @@ class Streams(commands.Cog):
         except asyncio.CancelledError:
             pass
         finally:
-            self.end_tasks.pop(member.id, None)
+            self.end_tasks.pop((member.guild.id, member.id), None)
 
     @commands.Cog.listener()
     async def on_presence_update(self, before, after):
-        if self.streaming(before) is None and self.streaming(after) is None and after.id not in self.live:
+        if self.streaming(before) is None and self.streaming(after) is None and \
+                (after.guild.id, after.id) not in self.live:
             return
         await self.handle(after)
 
@@ -204,7 +207,7 @@ class Streams(commands.Cog):
                 m = g.get_member(row["user_id"])
                 if m:
                     if self.streaming(m):
-                        self.live[m.id] = row["id"]
+                        self.live[(g.id, m.id)] = row["id"]
                     else:
                         await self.finish(m, row["id"])
                     break
@@ -215,11 +218,11 @@ class Streams(commands.Cog):
                 continue
             r = self.bot.role(g, "live")
             for m in list(r.members) if r else []:
-                if m.id not in self.live and not self.streaming(m):
+                if (g.id, m.id) not in self.live and not self.streaming(m):
                     await self.set_live_role(m, False)
             if self.bot.presences_on:
                 for m in g.members:
-                    if self.streaming(m) and m.id not in self.live:
+                    if self.streaming(m) and (g.id, m.id) not in self.live:
                         await self.handle(m)
 
     # ---------- демонстрация экрана в войсе ----------
@@ -229,21 +232,22 @@ class Streams(commands.Cog):
             return
         started = after.self_stream and after.channel and (not before.self_stream or before.channel != after.channel)
         stopped = before.self_stream and (not after.self_stream or after.channel != before.channel)
-        if stopped and member.id in self.golive:
-            msg, _ = self.golive[member.id]
+        gk = (member.guild.id, member.id)
+        if stopped and gk in self.golive:
+            msg, _ = self.golive[gk]
             if msg:
                 try:
                     await msg.delete()
                 except discord.HTTPException:
                     pass
-                self.golive[member.id] = (None, self.golive[member.id][1])
+                self.golive[gk] = (None, self.golive[gk][1])
         if not started:
             return
         vc = after.channel
         base = self.bot.role(member.guild, "member")
         if base and not vc.permissions_for(base).view_channel:
             return  # закрытые каналы (совет, «дела семьи») не светим
-        last = self.golive.get(member.id, (None, 0))[1]
+        last = self.golive.get(gk, (None, 0))[1]
         if time.monotonic() - last < GOLIVE_COOLDOWN:
             return
         ch = self.bot.ch(member.guild, "chat")
@@ -254,7 +258,7 @@ class Streams(commands.Cog):
                                 allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException:
             return
-        self.golive[member.id] = (msg, time.monotonic())
+        self.golive[gk] = (msg, time.monotonic())
 
     # ---------- команды ----------
     @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
@@ -284,7 +288,9 @@ class Streams(commands.Cog):
     async def stats(self, inter: discord.Interaction):
         g, db = inter.guild, self.bot.db
         now_live = []
-        for uid, sid in self.live.items():
+        for (gid, uid), sid in self.live.items():
+            if gid != g.id:
+                continue
             m, row = g.get_member(uid), db.one("SELECT * FROM streams WHERE id=?", sid)
             if m and row:
                 dur = (now() - parse_dt(row["started_at"])).total_seconds()

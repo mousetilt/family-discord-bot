@@ -392,7 +392,9 @@ class Maintenance(commands.Cog):
         else:
             lines.append("🤖 ИИ: выключен (нет ключа)")
         # голос
-        vcs = list(self.bot.voice_clients)
+        music = self.bot.get_cog("Music")  # голос работает через отдельный клиент disnake, а не discord.py
+        dn = getattr(music, "dn", None)
+        vcs = list(dn.voice_clients) if dn is not None and dn.is_ready() else []
         if vcs:
             lines.append("🔊 В голосовых: " + ", ".join(f"«{v.channel.name}»" for v in vcs if v.channel))
         else:

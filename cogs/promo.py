@@ -122,12 +122,13 @@ class Promo(commands.Cog):
             "открыты к союзу"
         data = {"members": f"{n} {plural(n, 'человек', 'человека', 'человек')}", "since": since_txt,
                 "leader": leader.display_name[:28] if leader else "—", "allies": ally_short,
-                "invite": invite.replace("https://", ""), "recruiting": recruiting}
+                "invite": invite.replace("https://", ""), "recruiting": recruiting,
+                "family": bot.family(g)["name"], "server": bot.family(g)["server"], "title": bot.family(g)["title"]}
         png = await asyncio.to_thread(images.family_card, data)
         bb = bot.brand(g, self.forum_post(g, n, leader, since_txt, allies, invite, recruiting))
         await inter.followup.send(
             content=f"🏛 **{bot.family(g)['title']}** — {'набор открыт, ' if recruiting else ''}вступить: {invite}",
-            file=discord.File(png, filename="vizitka_ulyanovy.png"), view=ForumView(bb))
+            file=discord.File(png, filename="vizitka.png"), view=ForumView(bb))
 
 
 async def setup(bot):

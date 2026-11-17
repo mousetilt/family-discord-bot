@@ -66,7 +66,7 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "warns
          "ask_voice": config.LEAD,
          "chronicle": config.LEAD, "invite": USERS, "forget": USERS,
          "leave": USERS, "listen": USERS, "listen_stop": USERS, "move": USERS, "disconnect": USERS, "say": USERS, "music_play": USERS, "music_skip": USERS,
-         "music_stop": USERS, "music_volume": USERS, "gather": config.ORGANIZERS, "announce": config.ORGANIZERS,
+         "music_stop": USERS, "music_volume": USERS, "gather": config.ORGANIZERS, "announce": config.LEAD + ["events"],  # как /запланировать
          "alarm": config.LEAD, "car_list": USERS, **{t: GARAGE_BY for t in ("car_add", "car_give", "car_status", "car_remove")},
          "web_search": USERS, "missed": USERS, "draft": config.LEAD + ["events", "hr_head", "recruiter", "diplomat"],
          "accept": config.HR, "recruit_stats": config.HR + ["treasurer"], "mute": MOD, "unmute": MOD, "warn": MOD, "purge": MOD, "rank": config.LEAD,
@@ -233,6 +233,14 @@ class Confirm(discord.ui.View):
     def __init__(self, cog, author_id, plan, message):
         super().__init__(timeout=180)
         self.cog, self.author_id, self.plan, self.message = cog, author_id, plan, message
+        self.sent = None  # сообщение с кнопками — по таймауту кнопки убираем (иначе «Interaction failed»)
+
+    async def on_timeout(self):
+        if self.sent is not None:
+            try:
+                await self.sent.edit(content="⌛ Не подтвердили за 3 минуты — отменено.", view=None)
+            except discord.HTTPException:
+                pass
 
     async def interaction_check(self, inter):
         if inter.user.id != self.author_id:
@@ -613,7 +621,8 @@ class Assistant(commands.Cog):
             ctx.pending = plan
             await send(embed=e)
             return "Дело серьёзное. Точно делаем? Скажи: Швейцар, да. Или нет."
-        await send(embed=e, view=Confirm(self, ctx.author.id, plan, ctx))
+        view = Confirm(self, ctx.author.id, plan, ctx)
+        view.sent = await send(embed=e, view=view)
         return "Подтверди кнопкой в чате"
 
     def describe(self, g, a):
@@ -899,6 +908,12 @@ class Assistant(commands.Cog):
                 elif t == "remind":
                     mins = max(1, min(1440, int(a.get("minutes") or 10)))
                     text = str(a.get("text") or "ты просил напомнить")[:300]
+                    auto = bot.get_cog("Automation")
+                    if auto:  # в базу — переживёт /обновить и перезапуск
+                        auto.remind_later(g, "remind", time.time() + mins * 60,
+                                          getattr(message.channel, "id", None), me.id, text)
+                        out.append(f"⏰ Напомню через {mins} мин.")
+                        continue
 
                     async def later(ch=message.channel, who=me, text=text, mins=mins):
                         await asyncio.sleep(mins * 60)
@@ -1111,7 +1126,7 @@ class Assistant(commands.Cog):
                         p.reset()  # и обрывает подбор следующего трека (автоплей), если он шёл
                         p.loop = "off"
                         vc.stop()
-                        if g.id not in music.hold:  # «Джарвис» слушает — остаёмся в войсе
+                        if g.id not in music.hold:  # голосовой Швейцар слушает — остаёмся в войсе
                             await vc.disconnect()
                         out.append("⏹ Выключил музыку.")
                     await music.update_panel(g)

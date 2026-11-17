@@ -86,10 +86,10 @@ class Persona(commands.Cog):
         self.bot = bot
         # таблица persona — в core/db.py (досье своё на каждом сервере)
         self.greeted = {}       # user_id -> monotonic
-        self.last_greet = -1e9
+        self.last_greet = {}    # guild_id -> monotonic: паузы у каждой семьи свои
         self.alone = {}         # user_id -> (channel_id, с какого момента один)
         self.visited = {}       # user_id -> monotonic
-        self.last_visit = -1e9
+        self.last_visit = {}    # guild_id -> monotonic
         self.why = {}           # user_id -> почему не зашли (пишем в журнал один раз на причину)
         self.lonely.start()
 
@@ -172,14 +172,14 @@ class Persona(commands.Cog):
         t = time.monotonic()
         if member.bot or not self.bot.has(member, config.FAMILY_PLUS) or not self.bot.feature(guild, "persona:greet"):
             return
-        if t - self.last_greet < GREET_GAP or t - self.greeted.get(member.id, -1e9) < GREET_EVERY:
+        if t - self.last_greet.get(guild.id, -1e9) < GREET_GAP or t - self.greeted.get(member.id, -1e9) < GREET_EVERY:
             return
         if random.random() > GREET_CHANCE:
             return
         jv = self.bot.get_cog("Jarvis")
         if not jv or guild.id not in jv.listeners:
             return
-        self.last_greet, self.greeted[member.id] = t, t
+        self.last_greet[guild.id], self.greeted[member.id] = t, t
         text = await self.line(f"В твой голосовой канал только что зашёл {member.display_name}. Встреть его вслух одной "
                                "фразой: по имени, в своём стиле, можно припомнить что-то из заметок или спросить, как дела.",
                                member, f"О, {member.display_name} пожаловал. Ну заходи, раз пришёл.")
@@ -221,7 +221,7 @@ class Persona(commands.Cog):
                           "у него выключен звук (наушники)" if m.voice.self_deaf or m.voice.deaf else
                           "он не в семье и не друг семьи" if not self.bot.has(m, config.FAMILY_PLUS) else
                           "к нему уже заходил меньше 6 часов назад" if t - self.visited.get(m.id, -1e9) < VISIT_EVERY else
-                          "недавно заходил к другому (пауза 45 минут)" if t - self.last_visit < VISIT_GAP else None)
+                          "недавно заходил к другому (пауза 45 минут)" if t - self.last_visit.get(g.id, -1e9) < VISIT_GAP else None)
                 if reason:
                     if self.why.get(m.id) != reason:  # в журнал — один раз на причину, чтобы было видно, почему не зашёл
                         self.why[m.id] = reason
@@ -229,7 +229,7 @@ class Persona(commands.Cog):
                                     (t - self.alone[m.id][1]) // 60, reason)
                     continue
                 self.why.pop(m.id, None)
-                self.last_visit, self.visited[m.id] = t, t
+                self.last_visit[g.id], self.visited[m.id] = t, t
                 log.warning("Проведать: захожу к %s в «%s»", m.display_name, ch.name)
                 asyncio.create_task(self.visit(g, m, ch))
         for uid in [u for u in self.alone if u not in seen]:
@@ -261,7 +261,7 @@ class Persona(commands.Cog):
         if str(res).startswith("❌") or not li:
             log.warning("Проведать: к %s зайти не вышло — %s", member.display_name, res)
             self.visited.pop(member.id, None)   # не засчитываем неудачную попытку
-            self.last_visit = -1e9
+            self.last_visit.pop(guild.id, None)
             return
         li.chatty_until = time.monotonic() + VISIT_WAIT   # отвечать можно без «Швейцар»
         li.idle_stop = VISIT_IDLE

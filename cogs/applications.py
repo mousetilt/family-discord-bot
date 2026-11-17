@@ -269,7 +269,7 @@ class Applications(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self.sessions = {}
+        self.sessions = {}  # (guild_id, user_id) -> ExamSession: заявки в разные семьи не мешают друг другу
 
     async def post_panels(self, guild, repost):
         bot = self.bot
@@ -298,7 +298,7 @@ class Applications(commands.Cog):
         if bl:
             await bot.log(inter.guild, f"⛔ {u.mention} из чёрного списка (№{bl['id']}) пытался подать заявку", "hrlog")
             return await inter.response.send_message("К сожалению, мы не можем принять твою заявку.", ephemeral=True)
-        s = self.sessions.get(u.id)
+        s = self.sessions.get((inter.guild.id, u.id))
         if s and not s.expired and not s.training:
             return await inter.response.send_message("⏳ У тебя уже идёт тест — продолжи в открытом окне.",
                                                      ephemeral=True)
@@ -347,7 +347,7 @@ class Applications(commands.Cog):
                 embed=bot.embed("✅ Анкета сохранена", "Последний шаг — ответь на 2 вопроса о себе.", config.GREEN),
                 view=SituationalStartView(self, app_id), ephemeral=True)
         s = ExamSession(u.id, app_id, questions, attempt)
-        self.sessions[u.id] = s
+        self.sessions[(inter.guild.id if inter.guild else 0, u.id)] = s
         e = bot.embed("✅ Анкета сохранена · Шаг 2 из 3 — тест",
                       f"Сейчас будет **{len(questions)} вопросов** по правилам семьи и проекта «Россия Онлайн».\n"
                       f"Нужно ответить правильно минимум на **{s.need()}**. На всё — **{config.EXAM_TIME_MIN} минут**.\n\n"
@@ -369,8 +369,9 @@ class Applications(commands.Cog):
         if inter.user.id != s.user_id:
             return await inter.response.send_message("Это не твой тест.", ephemeral=True)
         if s.expired:
-            if self.sessions.get(s.user_id) is s:
-                self.sessions.pop(s.user_id, None)
+            key = (inter.guild.id if inter.guild else 0, s.user_id)
+            if self.sessions.get(key) is s:
+                self.sessions.pop(key, None)
             if s.app_id:
                 self.bot.db.q("UPDATE applications SET status='abandoned' WHERE id=?", s.app_id)
             return await inter.response.edit_message(
@@ -385,8 +386,9 @@ class Applications(commands.Cog):
 
     async def finish(self, inter: discord.Interaction, s: ExamSession):
         bot, db = self.bot, self.bot.db
-        if self.sessions.get(s.user_id) is s:
-            self.sessions.pop(s.user_id, None)
+        key = (inter.guild.id if inter.guild else 0, s.user_id)
+        if self.sessions.get(key) is s:
+            self.sessions.pop(key, None)
         total = len(s.questions)
         wrong = [q for q, a in zip(s.questions, s.answers) if q["correct"] != a]
         score = total - len(wrong)
@@ -519,9 +521,10 @@ class Applications(commands.Cog):
         elif action == "accept":
             if not member:
                 return await inter.response.send_message("Игрок уже покинул сервер.", ephemeral=True)
-            await inter.response.defer()
+            # статус — ДО первого await: второй рекрутёр, нажавший одновременно, увидит «закрыта»
             db.q("UPDATE applications SET status='accepted', reviewer_id=?, decided_at=? WHERE id=?",
                  inter.user.id, now_iso(), app_id)
+            await inter.response.defer()
             self.stat(inter.guild, app_id, inter.user.id, "accepted")
             await self.accept(inter.guild, inter.user, a, member)
             a = db.one("SELECT * FROM applications WHERE id=?", app_id)
@@ -558,8 +561,9 @@ class Applications(commands.Cog):
                 avatar = await member.display_avatar.replace(size=256, static_format="png").read()
             except discord.HTTPException:
                 avatar = None
-            card = images.welcome_card(avatar, "Новый член семьи", a["nick"] or member.display_name,
-                                       f"Добро пожаловать в семью {bot.family(g)['gen']}!")
+            card = await asyncio.to_thread(images.welcome_card, avatar, "Новый член семьи",
+                                           a["nick"] or member.display_name,
+                                           f"Добро пожаловать в семью {bot.family(g)['gen']}!")
             await chat.send(content=f"🎉 Встречайте нового члена семьи — {member.mention}! Принял: {by.mention}",
                             file=discord.File(card, filename="new_member.png"))
         manual = " **вручную, минуя экзамен**" if a["manual"] else ""
@@ -719,7 +723,7 @@ class Applications(commands.Cog):
         attempt = db.one("SELECT COUNT(*) n FROM exam_attempts WHERE guild_id=? AND user_id=? AND training=0",
                          g.id, u.id)["n"] + 1
         s = ExamSession(u.id, None, qs, attempt)
-        self.sessions[u.id] = s
+        self.sessions[(inter.guild.id if inter.guild else 0, u.id)] = s
         await inter.response.send_message(embed=self.question_embed(s, g), view=QuestionView(self, s), ephemeral=True)
 
     @exam.command(name="тренировка", description="Пройти пробный тест по правилам (ни на что не влияет)")

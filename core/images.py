@@ -192,7 +192,7 @@ def passport_card(avatar_bytes, d):
         y += 72
     f_m = mono(22)
     name = (d.get("mrz_name") or "FAMILY").upper()
-    l1 = f"P<{translit(config.FAMILY).upper()}<<{name}".replace(" ", "<").replace("_", "<")
+    l1 = f"P<{translit(d.get('family') or config.FAMILY).upper()}<<{name}".replace(" ", "<").replace("_", "<")
     l2 = f"{str(d.get('static', '0')).rjust(9, '0')}<{d.get('number', '0')}<RUS<ONLINE<{d.get('rank_code', 'X')}"
     for i, ln in enumerate((l1, l2)):
         ln = (ln + "<" * 44)[:44]
@@ -226,9 +226,13 @@ def family_card(d):
     bg.alpha_composite(em, (-30, 0))
 
     x, maxw = 690, 540
-    draw_text(bg, (x, 70), "УЛЬЯНОВСКАЯ", font("Montserrat-Bold.ttf", 26), spacing=9, fill=CREAM)
-    draw_text(bg, (x - 4, 104), "Династия", fit_font("Династия", "CormorantSC-Bold.ttf", maxw, 104, 60), gold=True)
-    draw_text(bg, (x, 222), f"РОССИЯ ОНЛАЙН · {config.GAME_SERVER.upper()}", font("Montserrat-Bold.ttf", 20),
+    # титул семьи из профиля (/семья профиль): «Ульяновская Династия» → «УЛЬЯНОВСКАЯ» + «Династия»
+    head, _, tail = str(d.get("title") or "Ульяновская Династия").strip().partition(" ")
+    if tail:  # титул из одного слова — только крупная строка
+        draw_text(bg, (x, 70), head.upper(), font("Montserrat-Bold.ttf", 26), spacing=9, fill=CREAM)
+    tail = tail or head
+    draw_text(bg, (x - 4, 104), tail, fit_font(tail, "CormorantSC-Bold.ttf", maxw, 104, 60), gold=True)
+    draw_text(bg, (x, 222), f"РОССИЯ ОНЛАЙН · {(d.get('server') or config.GAME_SERVER).upper()}", font("Montserrat-Bold.ttf", 20),
               spacing=4, fill=WHITE)
     draw_text(bg, (x, 254), "Честь · Верность · Семья", font("CormorantSC-Bold.ttf", 28), fill=(196, 58, 76))
 

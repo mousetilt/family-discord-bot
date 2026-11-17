@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS scheduled(
     ping_all INTEGER DEFAULT 0, voice INTEGER DEFAULT 0, run_at INTEGER NOT NULL, status TEXT DEFAULT 'wait',
     created INTEGER);
 CREATE INDEX IF NOT EXISTS ix_scheduled ON scheduled(status, run_at);
+CREATE TABLE IF NOT EXISTS reminders(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, kind TEXT NOT NULL, channel_id INTEGER,
+    user_id INTEGER, text TEXT, run_at INTEGER NOT NULL, status TEXT DEFAULT 'wait');
+CREATE INDEX IF NOT EXISTS ix_reminders ON reminders(status, run_at);
 CREATE TABLE IF NOT EXISTS relay_posts(
     guild_id INTEGER NOT NULL, message_id INTEGER NOT NULL, title TEXT, text TEXT, status TEXT, ts INTEGER,
     PRIMARY KEY(guild_id, message_id));
@@ -383,10 +387,51 @@ class Automation(commands.Cog):
                             int(bool(ping_all)), int(bool(voice)), ts, int(time.time()))
         return f"⏰ Объявление №{cur.lastrowid} «{str(title_)[:60]}» выйдет <t:{ts}:f> (<t:{ts}:R>). Список: `/запланированные`."
 
+    # ---------- напоминания и голосовые призывы (переживают перезапуск) ----------
+    def remind_later(self, guild, kind, run_at, channel_id=None, user_id=None, text=""):
+        """kind: remind — напомнить человеку (канал + голосом, если он в войсе); gather — позвать всех на сбор голосом."""
+        self.bot.db.q("INSERT INTO reminders(guild_id, kind, channel_id, user_id, text, run_at) VALUES(?,?,?,?,?,?)",
+                      guild.id, kind, channel_id, user_id, str(text)[:400], int(run_at))
+
+    async def fire_reminder(self, r):
+        g = self.bot.get_guild(r["guild_id"])
+        if not g or not self.bot.is_family(g):
+            return
+        music = self.bot.get_cog("Music")
+        if r["kind"] == "gather":
+            if music:
+                await music.announce(g, [c.id for c in music.voice_targets(g)], siren=False, text=r["text"])
+            return
+        who = g.get_member(r["user_id"] or 0)
+        ch = self.bot.get_channel(r["channel_id"] or 0)
+        if ch is None and r["channel_id"]:
+            try:
+                ch = await self.bot.fetch_channel(r["channel_id"])
+            except discord.HTTPException:
+                ch = None
+        text = f"⏰ {who.mention if who else ''}, напоминаю: {r['text']}"
+        try:
+            if ch:
+                await ch.send(text, allowed_mentions=discord.AllowedMentions(users=[who] if who else []))
+            elif who:
+                await who.send(text)
+        except discord.HTTPException:
+            pass
+        if music and who and who.voice and who.voice.channel:
+            await music.announce(g, [who.voice.channel.id], f"Напоминаю: {r['text']}")
+
     @tasks.loop(seconds=30)
     @guarded
     async def sched_loop(self):
         db = self.bot.db
+        for r in db.all("SELECT * FROM reminders WHERE status='wait' AND run_at<=?", int(time.time())):
+            db.q("UPDATE reminders SET status='done' WHERE id=?", r["id"])
+            if time.time() - r["run_at"] > 3 * 3600:
+                continue  # бот был выключен дольше — напоминать уже поздно
+            try:
+                await self.fire_reminder(r)
+            except Exception:
+                log.exception("Напоминание №%s", r["id"])
         for r in db.all("SELECT * FROM scheduled WHERE status='wait' AND run_at<=?", int(time.time())):
             db.q("UPDATE scheduled SET status='done' WHERE id=?", r["id"])
             g = self.bot.get_guild(r["guild_id"])

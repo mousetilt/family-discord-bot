@@ -48,7 +48,7 @@ class AI:
         own = {"groq": config.GROQ_MODEL, "gemini": config.GEMINI_MODEL, "ollama": config.OLLAMA_MODEL,
                "anthropic": config.AI_MODEL}.get(self.provider)
         self.models = ([own] if own else []) + [m for m in DEFAULTS.get(self.provider, []) if m != own]
-        self._anthropic = None
+        self._claude = None  # клиент Anthropic (имя не совпадает с методом _anthropic)
         self.cool = {}    # (провайдер, модель) -> до какого момента не трогаем: лимит исчерпан
         self.dead = set() # (провайдер, модель), которых у провайдера больше нет
         self._no_search = set()  # модели Gemini без поиска Google (для grounded)
@@ -191,7 +191,11 @@ class AI:
                     raise _RateLimited(text[:400])
                 if r.status in (401, 403) or (r.status == 400 and "api key" in text.lower()):
                     raise AIUnavailable("Ключ ИИ не подходит — проверь его (/ии ключ)")
-                if r.status == 404 or (r.status == 400 and "model" in text.lower()):
+                low = text.lower()
+                # «модели нет» — только явно: 404 или 400 «не найдена / снята». Раньше любое 400 со словом «model»
+                # (например, «This model's maximum context length…») выключало основную модель до перезапуска.
+                if r.status == 404 or (r.status == 400 and any(w in low for w in (
+                        "not found", "does not exist", "decommissioned", "not supported for generatecontent"))):
                     raise _ModelMissing(text[:200])
                 if r.status >= 400:
                     raise AIUnavailable(f"ИИ ответил ошибкой {r.status}: {text[:200]}")
@@ -269,13 +273,13 @@ class AI:
         return (data.get("message") or {}).get("content", "")
 
     async def _anthropic(self, model, system, prompt, max_tokens):
-        if self._anthropic is None:
+        if self._claude is None:
             try:
                 from anthropic import AsyncAnthropic
             except ImportError:
                 raise AIUnavailable("Для Claude установи пакет: pip install anthropic")
-            self._anthropic = AsyncAnthropic(api_key=config.ANTHROPIC_KEY)
-        r = await self._anthropic.messages.create(model=model, max_tokens=max_tokens, system=system,
+            self._claude = AsyncAnthropic(api_key=config.ANTHROPIC_KEY)
+        r = await self._claude.messages.create(model=model, max_tokens=max_tokens, system=system,
                                                   messages=[{"role": "user", "content": prompt}])
         return "".join(getattr(b, "text", "") for b in r.content)
 

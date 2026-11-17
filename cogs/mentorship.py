@@ -103,11 +103,15 @@ class Mentorship(commands.Cog):
         gatherings = 0
         for ev in db.all("SELECT data FROM events WHERE guild_id=? AND created_at>=?", gid, row["started_at"]):
             try:
-                if row["newbie_id"] in json.loads(ev["data"]).get("yes", []):
+                d = json.loads(ev["data"])
+                # реальная явка (бот проверил войс), а не «нажал Иду»; явку ещё не проверяли — считаем отметку
+                came = d.get("came") if d.get("checked") is True else d.get("yes", [])
+                if row["newbie_id"] in (came or []):
                     gatherings += 1
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 pass
-        warns = db.one("SELECT COUNT(*) n FROM warns WHERE guild_id=? AND user_id=? AND created_at>=? AND active=1",
+        # все выговоры за срок — и уже снятые автоматически (иначе выговор в начале срока «сгорал» к его концу)
+        warns = db.one("SELECT COUNT(*) n FROM warns WHERE guild_id=? AND user_id=? AND created_at>=?",
                        gid, row["newbie_id"], row["started_at"])["n"]
         return voice, gatherings, warns
 
@@ -144,7 +148,9 @@ class Mentorship(commands.Cog):
         for i in range(len(config.MENTOR_CHECKLIST)):
             v.add_item(MentorCheck(row["id"], i, i < len(checklist) and bool(checklist[i])))
         v.add_item(MentorStat(row["id"]))
-        if checklist and all(checklist) and len(checklist) >= len(config.MENTOR_CHECKLIST):
+        guild = self.bot.get_guild(row["guild_id"])
+        if checklist and all(checklist) and len(checklist) >= len(config.MENTOR_CHECKLIST) \
+                and guild and self.exam_ok(guild, row["newbie_id"]):
             v.add_item(MentorDecision(row["id"], "promote"))
         return v
 
@@ -309,9 +315,13 @@ class Mentorship(commands.Cog):
         if not self.can_manage(inter.user, row):
             return await inter.response.send_message("Решение принимает наставник или руководство.", ephemeral=True)
         newbie = inter.guild.get_member(row["newbie_id"])
+        if action == "promote" and not self.exam_ok(inter.guild, row["newbie_id"]):
+            return await inter.response.send_message("📕 Новичок ещё не сдал экзамен — сначала `/экзамен сдать`. "
+                                                     "Или продлите срок.", ephemeral=True)
         if action == "extend":
-            due = parse_dt(row["due_at"]) + dt.timedelta(days=3)
-            db.q("UPDATE mentorships SET due_at=?, asked=0 WHERE id=?", due.isoformat(), mid)
+            # от «сейчас», если срок уже прошёл (бот был выключен); напоминания по продлению — заново
+            due = max(parse_dt(row["due_at"]), now()) + dt.timedelta(days=3)
+            db.q("UPDATE mentorships SET due_at=?, asked=0, reminded=0 WHERE id=?", due.isoformat(), mid)
             await inter.response.edit_message(view=None)
             return await inter.followup.send(f"⏳ Испытательный срок продлён до {discord.utils.format_dt(due, 'D')} "
                                              f"({inter.user.mention}).")

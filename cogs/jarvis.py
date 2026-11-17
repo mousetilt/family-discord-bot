@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-"""«Джарвис»: бот заходит в войс и слушает голосовые команды руководства.
+"""Голосовой Швейцар (/швейцар): бот заходит в войс и слушает голосовые команды.
+Слышит всю семью и друзей, но по очереди: первым — тот, кто позвал, потом руководство, потом остальные
+(у остальных — только последняя фраза и не больше WHISPER_RPM − OWNER_RESERVE распознаваний в минуту).
 Говоришь «Швейцар, перенеси всех в балкон» → речь распознаёт бесплатный Whisper (Groq) → помощник выполняет →
 бот отвечает голосом и пишет в чат войса.
 
@@ -8,7 +10,7 @@
 • снимаем транспортное шифрование (aead_xchacha20_poly1305_rtpsize, ключ из SESSION_DESCRIPTION);
 • снимаем сквозное шифрование DAVE ключами из MLS-сессии disnake (dave.Decryptor на каждого собеседника);
 • декодируем Opus → PCM, режем на фразы по паузам, отправляем в Whisper.
-Слушаем и распознаём ТОЛЬКО тех, у кого есть право пользоваться помощником; остальных даже не декодируем."""
+Чужих (не семья и не друзья семьи) даже не декодируем."""
 import array
 import asyncio
 import ctypes
@@ -53,6 +55,8 @@ MIN_SEC, MAX_SEC = 0.6, 15
 IDLE_STOP = 30 * 60    # нет команд 30 минут — уходим
 DAILY_LIMIT = int(getattr(config, "WHISPER_DAILY", 0) or 1800)  # бесплатный Groq даёт 2000 распознаваний в сутки
 WHISPER_RPM = int(getattr(config, "WHISPER_RPM", 0) or 18)  # у Groq лимит 20/мин — держим с запасом, чтобы не ловить 429
+OWNER_RESERVE = 5      # из минутного лимита столько распознаваний держим для того, кто позвал (остальные их не тратят)
+STALE_SEC = 20         # фраза остальных, пролежавшая в очереди дольше, уже неактуальна
 WHISPER_MODEL = "whisper-large-v3-turbo"
 BYTES_PER_SEC = 48000 * 2 * 2  # 48 кГц, стерео, 16 бит
 
@@ -157,8 +161,10 @@ class Listener:
         self.opus = {}       # user_id -> opus Decoder
         self.buf = {}        # user_id -> bytearray
         self.last = {}       # user_id -> monotonic
-        self.busy = set()
-        self.queued = {}     # user_id -> фраза, сказанная, пока разбирали предыдущую (не теряем её)
+        # Очередь фраз на распознавание: по одной за раз. Первым — тот, кто позвал (и чей ответ ждём),
+        # потом руководство, потом остальные. У остальных хранится только последняя фраза, протухшие выкидываются.
+        self.todo = []       # [(приоритет, monotonic, user_id, pcm)]
+        self.wake = asyncio.Event()
         self.key = None      # ключ голосового соединения: сменился — значит, бот переподключился
         self.chatty_until = 0        # до этого момента хозяину можно отвечать без «Швейцар» (бот сам зашёл поболтать)
         self.idle_stop = IDLE_STOP   # сколько молчания терпим, прежде чем уйти
@@ -166,19 +172,21 @@ class Listener:
         self.stats = {"packets": 0, "rtp_ok": 0, "unknown": 0, "decoded": 0, "dave_fail": 0, "phrases": 0,
                       "heard": "", "ops": {}}
         self.last_cmd = time.monotonic()
-        self.inter = None       # /джарвис — для скрытых ответов (Discord даёт 15 минут)
+        self.inter = None       # /швейцар — для скрытых ответов (Discord даёт 15 минут)
         self.inter_at = 0
         self.pending = None     # (plan, ctx, monotonic) — ждём «Швейцар, да/нет»
         self.running = True
-        self.tasks = [asyncio.create_task(self.reader()), asyncio.create_task(self.flusher())]
+        self.tasks = [asyncio.create_task(self.reader()), asyncio.create_task(self.flusher()),
+                      asyncio.create_task(self.worker())]
 
     def reset(self, channel_id=None):
         """Бот сменил канал: у соединения новые ключи и номера голосов — всё опознаём заново."""
         if channel_id:
             self.channel_id = channel_id
         for d in (self.users, self.dec, self.ratchet_at, self.fail_until, self.ssrc_dec, self.try_after, self.tries,
-                  self.opus, self.buf, self.last, self.queued):
+                  self.opus, self.buf, self.last):
             d.clear()
+        self.todo.clear()
 
     def chatting(self, uid):
         """Бот сам зашёл поболтать с хозяином, и они в канале вдвоём — «Швейцар» говорить не нужно."""
@@ -249,13 +257,13 @@ class Listener:
                 if not vc or not vc.is_connected() or not getattr(vc, "secret_key", None):
                     lost = lost or time.monotonic()
                     if self.temp and time.monotonic() - lost > 5:
-                        self.resolve(None)  # временный: связи нет — просто сдаёмся, Джарвиса не трогаем
+                        self.resolve(None)  # временный: связи нет — просто сдаёмся, голосового Швейцара не трогаем
                         self.running = False
                         return
                     if time.monotonic() - lost > 20:
                         # «слушаю», а в войсе меня нет (выкинули, оборвалась связь) — честно выключаемся,
-                        # чтобы /джарвис потом включил всё с чистого листа
-                        log.warning("Джарвис: 20 с нет связи с войсом — выключаю прослушивание")
+                        # чтобы /швейцар потом включил всё с чистого листа
+                        log.warning("Голосовой Швейцар: 20 с нет связи с войсом — выключаю прослушивание")
                         asyncio.create_task(self.cog.stop(self.guild, "потерял связь с голосовым каналом"))
                         return
                     await asyncio.sleep(0.5)
@@ -276,7 +284,7 @@ class Listener:
                 await asyncio.sleep(0.3)
                 continue
             except Exception:
-                log.exception("Джарвис: сбой приёма звука")
+                log.exception("Голосовой Швейцар: сбой приёма звука")
                 await asyncio.sleep(1)
                 continue
             self.stats["packets"] += 1
@@ -370,7 +378,7 @@ class Listener:
         return None
 
     def guess(self, ssrc):
-        """Discord не прислал, чей это голос. Первый незнакомый голос после /джарвис — того, кто вызвал команду.
+        """Discord не прислал, чей это голос. Первый незнакомый голос после /швейцар — того, кто вызвал команду.
         Если вызвавший уже привязан, а в канале ровно один человек из руководства без голоса — этот голос его."""
         self.stats["unknown"] += 1
         known = set(self.users.values())
@@ -385,7 +393,7 @@ class Listener:
         return None
 
     async def private(self, member, **kw):
-        """Скрытый ответ под /джарвис (виден только вызвавшему). Через 15 минут Discord этого не даёт — молчим,
+        """Скрытый ответ под /швейцар (виден только вызвавшему). Через 15 минут Discord этого не даёт — молчим,
         отвечаем только голосом. В чат и в личку ничего не пишем."""
         if not self.inter or member.id != self.owner or time.monotonic() - self.inter_at > 14 * 60:
             return None
@@ -401,7 +409,7 @@ class Listener:
                 if self.flush_once():
                     return
             except Exception:
-                log.exception("Джарвис: сбой разбора фраз")
+                log.exception("Голосовой Швейцар: сбой разбора фраз")
 
     def flush_once(self):
         if True:
@@ -414,15 +422,40 @@ class Listener:
                     self.last.pop(uid, None)
                     if dur < MIN_SEC:
                         continue
-                    if uid in self.busy:
-                        self.queued[uid] = pcm  # разберём, как только освободимся (раньше фраза пропадала)
-                    else:
-                        self.busy.add(uid)
-                        asyncio.create_task(self.phrase(uid, pcm))
+                    self.enqueue(uid, pcm)
             if not self.temp and t - self.last_cmd > self.idle_stop:
                 asyncio.create_task(self.cog.stop(self.guild, "30 минут без команд"))
                 return True
             return False
+
+    def priority(self, uid):
+        """0 — тот, кто позвал (или чей ответ ждём), 1 — у кого права помощника, 2 — остальные."""
+        if uid == self.owner or (self.capture and uid == self.capture[0]):
+            return 0
+        m = self.guild.get_member(uid)
+        return 1 if m and self.bot.has(m, self.cog.users_roles) else 2
+
+    def enqueue(self, uid, pcm):
+        prio = self.priority(uid)
+        if prio:  # у остальных важна только последняя фраза — старую выкидываем
+            self.todo = [x for x in self.todo if x[2] != uid]
+        self.todo.append((prio, time.monotonic(), uid, pcm))
+        if len(self.todo) > 12:  # шумный канал: сверху очереди — самое важное и свежее
+            self.todo.sort(key=lambda x: (x[0], -x[1]))
+            del self.todo[12:]
+        self.wake.set()
+
+    async def worker(self):
+        """Распознаём по одной фразе: позвавший — вне очереди, остальные — по порядку."""
+        while self.running:
+            await self.wake.wait()
+            self.wake.clear()
+            while self.todo and self.running:
+                self.todo.sort(key=lambda x: (x[0], x[1]))
+                prio, t, uid, pcm = self.todo.pop(0)
+                if prio and time.monotonic() - t > STALE_SEC:
+                    continue  # пока разбирали важное, фраза остальных устарела — отвечать на неё поздно
+                await self.phrase(uid, pcm, low=prio > 0)
 
     def resolve(self, text):
         """Отдать пойманный ответ тому, кто ждёт (ask_capture), и перестать ждать."""
@@ -430,10 +463,10 @@ class Listener:
         if cap and not cap[1].done():
             cap[1].set_result(text)
 
-    async def phrase(self, uid, pcm):
+    async def phrase(self, uid, pcm, low=False):
         try:
             self.stats["phrases"] += 1
-            text = await self.cog.transcribe(self.guild, pcm)
+            text = await self.cog.transcribe(self.guild, pcm, low=low)
             self.stats["heard"] = (text or "∅")[:80]
             if not text:
                 return
@@ -504,14 +537,10 @@ class Listener:
             if ctx.pending:
                 self.pending = (ctx.pending, ctx, time.monotonic())
             await self.cog.say(self.guild, re.sub(r"[*_`>#🔀🗣🎵⏭⏹🔊📣📢🚨🔇⚖️🔁🧹⛔❌⚠️✅]", "", summary or random.choice(DONE))[:400])
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            log.warning("Джарвис: фраза — %s", e)
-        finally:
-            nxt = self.queued.pop(uid, None)
-            if nxt and self.running:
-                asyncio.create_task(self.phrase(uid, nxt))
-            else:
-                self.busy.discard(uid)
+            log.warning("Голосовой Швейцар: фраза — %s", e)
 
 
 class Jarvis(commands.Cog):
@@ -530,7 +559,7 @@ class Jarvis(commands.Cog):
 
     # ---------- «сходи-спроси-принеси ответ» ----------
     def ask_busy(self, guild, channel):
-        """Почему сейчас нельзя сходить спросить (или None). Джарвис слушает в другом канале — не уводим его."""
+        """Почему сейчас нельзя сходить спросить (или None). голосовой Швейцар слушает в другом канале — не уводим его."""
         if not READY:
             return "на хостинге нет модулей для приёма звука"
         if not self.whisper_key(guild):
@@ -551,7 +580,7 @@ class Jarvis(commands.Cog):
 
     async def ask_capture(self, guild, channel, user_id, timeout=20):
         """Одноразово поймать первую распознанную фразу user_id в channel. → текст или None (молчал/не разобрал).
-        Бот уже должен стоять в канале. Джарвис слушает тут же — берём его слушателя, иначе свой временный."""
+        Бот уже должен стоять в канале. голосовой Швейцар слушает тут же — берём его слушателя, иначе свой временный."""
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
         li = self.listeners.get(guild.id)
@@ -619,7 +648,8 @@ class Jarvis(commands.Cog):
         day = now().strftime("%Y-%m-%d")
         return f"whisper:{day}" if self.bot.is_home(guild) else f"whisper:{day}:{guild.id}"
 
-    async def transcribe(self, guild, pcm):
+    async def transcribe(self, guild, pcm, low=False):
+        """low=True — фраза не того, кто позвал: она не тратит запас лимита, оставленный позвавшему."""
         key = self.whisper_key(guild)
         if not key:
             return None
@@ -628,16 +658,15 @@ class Jarvis(commands.Cog):
             return None  # тишина или шум — не тратим лимит и не даём распознавателю «додумать» команду
         counter = self.whisper_counter(guild)
         used = int(self.bot.db.get(counter) or 0)
-        if used >= DAILY_LIMIT:
+        if used >= (DAILY_LIMIT * 9 // 10 if low else DAILY_LIMIT):
             return None
         # минутный лимит Groq (20/мин на ключ): если за последние 60 сек уже много — пропускаем
         mono = time.monotonic()
         calls = self._whisper_by_key.setdefault(key, [])
         calls[:] = [c for c in calls if mono - c < 60]
-        if len(calls) >= WHISPER_RPM:
+        if len(calls) >= (WHISPER_RPM - OWNER_RESERVE if low else WHISPER_RPM):
             return None
         calls.append(mono)
-        self.bot.db.set(counter, used + 1)
         form = aiohttp.FormData()
         form.add_field("file", wav, filename="cmd.wav", content_type="audio/wav")
         form.add_field("model", WHISPER_MODEL)
@@ -659,6 +688,8 @@ class Jarvis(commands.Cog):
                         return None
                     data = await r.json()
                     self.whisper_fail_since = None
+                    # в дневной счётчик — только реально распознанное (429 и сбои лимит не съедают)
+                    self.bot.db.set(counter, int(self.bot.db.get(counter) or 0) + 1)
                     segs = data.get("segments")
                     if isinstance(segs, list) and segs:
                         # выкидываем куски, где распознаватель сам не уверен, что это речь
@@ -716,7 +747,7 @@ class Jarvis(commands.Cog):
             elif not vc:
                 await asyncio.wait_for(dch.connect(), timeout=20)
         except Exception as e:
-            log.warning("Джарвис: не зашёл в войс — %r", e)
+            log.warning("Голосовой Швейцар: не зашёл в войс — %r", e)
             return f"❌ Не могу зайти в войс: {e or type(e).__name__}. Попробуй ещё раз через несколько секунд."
         vc = music.vc(guild)
         if not vc or not vc.is_connected():
@@ -732,7 +763,7 @@ class Jarvis(commands.Cog):
         return (f"🎙 Слушаю команды в {ch.mention}. Говори: «Швейцар, …». Первые 15 минут что услышал и что сделал "
                 "покажу здесь (видишь только ты), дальше — только голосом. В чат ничего не пишу.\n"
                 "Серьёзное (мут, выговор…) подтверждай голосом: «Швейцар, да» / «Швейцар, нет». "
-                "Выключить: «Швейцар, выйди» или `/джарвис`.")
+                "Выключить: «Швейцар, выйди» или `/швейцар`.")
 
     async def stop(self, guild, why=""):
         li = self.listeners.pop(guild.id, None)
@@ -788,7 +819,7 @@ class Jarvis(commands.Cog):
                     await vc.move_to(dch)
                     li.reset(channel.id)
             except Exception as e:
-                log.warning("Джарвис: не смог перейти за хозяином: %s", e)
+                log.warning("Голосовой Швейцар: не смог перейти за хозяином: %s", e)
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
@@ -823,7 +854,7 @@ class Jarvis(commands.Cog):
         if ch and not [m for m in ch.members if m.id == li.owner]:
             await self.stop(member.guild, "тот, кто меня звал, ушёл из канала")
 
-    @app_commands.command(name="джарвис", description="Швейцар заходит в твой войс и слушает голосовые команды (вкл/выкл)")
+    @app_commands.command(name="швейцар", description="Швейцар заходит в твой войс и слушает голосовые команды (вкл/выкл)")
     async def jarvis_cmd(self, inter: discord.Interaction):
         if not self.bot.has(inter.user, config.FAMILY_PLUS):
             return await inter.response.send_message("⛔ Швейцар разговаривает только с семьёй и друзьями семьи.",
@@ -841,7 +872,7 @@ class Jarvis(commands.Cog):
         await inter.followup.send(msg, ephemeral=True)
 
     @app_commands.default_permissions(manage_guild=True)  # служебное: видно только админам
-    @app_commands.command(name="джарвис-статус", description="Диагностика голосового режима (приём звука)")
+    @app_commands.command(name="швейцар-статус", description="Диагностика голосового режима (приём звука)")
     async def jarvis_status(self, inter: discord.Interaction):
         if not self.bot.has(inter.user, self.users_roles):  # в статусе видно последнюю услышанную фразу
             return await inter.response.send_message("⛔ Только для руководства и старшего состава.", ephemeral=True)

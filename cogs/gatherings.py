@@ -210,7 +210,11 @@ class Gatherings(commands.Cog):
             asyncio.create_task(music.announce(guild, [c.id for c in music.voice_targets(guild)],
                                                text=f"Внимание, семья! Объявлен сбор: {what}. Время: {when}.{place} "
                                                     "Отметьтесь в канале сборов."))
-            if remind:
+            auto = self.bot.get_cog("Automation")
+            if remind and auto:  # в базу — переживёт перезапуск бота
+                auto.remind_later(guild, "gather", now().timestamp() + remind * 60,
+                                  text=f"Сбор семьи начинается! {what}.{place} Все, кто отметился, — на выход!")
+            elif remind:
                 async def later():
                     await asyncio.sleep(remind * 60)
                     targets = [c.id for c in music.voice_targets(guild)]

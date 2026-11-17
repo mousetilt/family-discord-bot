@@ -3,6 +3,7 @@
 (пожаловаться, спросить юриста, в летопись)."""
 import datetime as dt
 import json
+import time
 
 import discord
 from discord import app_commands
@@ -81,6 +82,7 @@ class ContextMenus(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.menus = []
+        self.reported = {}  # (guild, user) -> когда последний раз жаловался
         spec = [
             ("🪪 Паспорт", self.m_passport, None, discord.Member),
             ("📋 Досье", self.m_dossier, perms(move_members=True), discord.Member),
@@ -155,7 +157,7 @@ class ContextMenus(commands.Cog):
             return await inter.response.send_message("Это бот.", ephemeral=True)
         allowed = [(k, label, emoji) for k, label, emoji, who in ACTIONS if self.bot.has(inter.user, who)]
         if member.id == inter.user.id:
-            allowed = [x for x in allowed if x[0] == "mentor:me"] and []
+            allowed = []  # себе — ничего: ни ранг, ни мут, ни наставника
         if not allowed:
             return await inter.response.send_message("⛔ Нет доступных действий.", ephemeral=True)
         opts = [discord.SelectOption(label=label, value=k, emoji=emoji) for k, label, emoji in allowed][:25]
@@ -267,6 +269,10 @@ class ContextMenus(commands.Cog):
     async def m_report(self, inter: discord.Interaction, message: discord.Message):
         if message.author.bot:
             return await inter.response.send_message("На бота жаловаться бесполезно 🙂", ephemeral=True)
+        key = (inter.guild.id, inter.user.id)
+        if time.monotonic() - self.reported.get(key, -1e9) < 60:  # не даём завалить очередь модерации
+            return await inter.response.send_message("⏳ Жалобу можно отправлять раз в минуту.", ephemeral=True)
+        self.reported[key] = time.monotonic()
         await inter.response.send_modal(ReportModal(message))
 
     async def m_lawyer(self, inter: discord.Interaction, message: discord.Message):

@@ -49,6 +49,9 @@ class FlagAction(discord.ui.DynamicItem[discord.ui.Button], template=r"flag:(?P<
         if not f or f["status"] != "open":
             return await inter.response.send_message("Уже обработано.", ephemeral=True)
         member = inter.guild.get_member(f["user_id"])
+        if self.a in ("warn", "mute") and member and (member.id == inter.user.id or not bot.outranks(inter.user, member)):
+            return await inter.response.send_message("⛔ Наказывать можно только тех, кто ниже тебя по иерархии семьи — "
+                                                     "реши с Главой или заместителем.", ephemeral=True)
         if self.a in ("del", "warn"):
             ch = inter.guild.get_channel(f["channel_id"])
             if ch:
@@ -75,7 +78,7 @@ class FlagAction(discord.ui.DynamicItem[discord.ui.Button], template=r"flag:(?P<
 class Moderation(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.buffer = []
+        self.buffer = {}  # guild_id -> [сообщения]: у каждой семьи своя очередь, свой ключ ИИ и свой лимит
         self.ai_loop.change_interval(seconds=max(60, config.AI_MOD_INTERVAL))
         self.ai_loop.start()
 
@@ -165,20 +168,26 @@ class Moderation(commands.Cog):
                 return
         if config.AI_MODERATION and len(message.content or "") >= 6 and self.bot.feature(message.guild, "moderation:ai") \
                 and self.bot.ai_for(message.guild).on:
-            self.buffer.append(message)
-            if len(self.buffer) > 200:
-                self.buffer = self.buffer[-200:]
+            buf = self.buffer.setdefault(message.guild.id, [])
+            buf.append(message)
+            if len(buf) > 200:
+                del buf[:-200]
 
     @tasks.loop(seconds=180)
     @guarded
     async def ai_loop(self):
-        if not self.buffer:
-            return
-        # пачка — с одного сервера: у каждой семьи свой ИИ-ключ и своя семья в подсказке
-        g = self.buffer[0].guild
-        batch = [m for m in self.buffer if m.guild.id == g.id][:40]
-        taken = {id(m) for m in batch}
-        self.buffer = [m for m in self.buffer if id(m) not in taken]
+        # каждой семье — своя пачка за проход (раньше одна семья за раз, остальные ждали и теряли сообщения)
+        for gid in list(self.buffer):
+            batch, self.buffer[gid] = self.buffer[gid][:40], self.buffer[gid][40:]
+            if not self.buffer[gid]:
+                self.buffer.pop(gid, None)
+            if batch:
+                try:
+                    await self.check_batch(batch[0].guild, batch)
+                except Exception:
+                    log.exception("ИИ-модерация «%s»", batch[0].guild.name)
+
+    async def check_batch(self, g, batch):
         ai = self.bot.ai_for(g)
         if not ai.on:
             return

@@ -479,7 +479,10 @@ class FamilyBot(commands.Bot):
                 return r
             if n and r["nick"] and norm_nick(r["nick"]) == n:
                 return r
-        return self.alliance_bl_find(discord_id, static, nick)
+        # общий ЧС альянса обязателен только для семей альянса — чужой семье он не указ
+        if self.db.one("SELECT 1 FROM alliance_families WHERE guild_id=? AND status='active'", guild_id_of(guild)):
+            return self.alliance_bl_find(discord_id, static, nick)
+        return None
 
     def alliance_bl_find(self, discord_id=None, static=None, nick=None):
         """Общий чёрный список альянса. Возвращает словарь с теми же полями, что и ЧС семьи."""

@@ -34,19 +34,19 @@ class Activity(commands.Cog):
         return channel is not None and (not afk or channel.id != afk.id)
 
     def flush(self, member):
-        start = self.bot.voice_sessions.pop(member.id, None)
+        start = self.bot.voice_sessions.pop((member.guild.id, member.id), None)
         if start:
             sec = int((now() - start).total_seconds())
             if sec > 0:
                 self.bot.db.touch(member.guild, member.id, voice=sec)
 
     def flush_all(self, guild):
-        for uid in list(self.bot.voice_sessions):
-            m = guild.get_member(uid)
+        for gid, uid in list(self.bot.voice_sessions):
+            m = guild.get_member(uid) if gid == guild.id else None  # только сессии ЭТОЙ семьи
             if m:
                 self.flush(m)
                 if m.voice and self.counted(guild, m.voice.channel):
-                    self.bot.voice_sessions[uid] = now()
+                    self.bot.voice_sessions[(gid, uid)] = now()
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -55,7 +55,7 @@ class Activity(commands.Cog):
                 if self.counted(g, vc):
                     for m in vc.members:
                         if not m.bot:
-                            self.bot.voice_sessions.setdefault(m.id, now())
+                            self.bot.voice_sessions.setdefault((g.id, m.id), now())
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
@@ -63,7 +63,7 @@ class Activity(commands.Cog):
             return
         self.flush(member)
         if self.counted(member.guild, after.channel):
-            self.bot.voice_sessions[member.id] = now()
+            self.bot.voice_sessions[(member.guild.id, member.id)] = now()
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -85,7 +85,7 @@ class Activity(commands.Cog):
         bot, db = self.bot, self.bot.db
         self.flush(member)
         if member.voice and self.counted(inter.guild, member.voice.channel):
-            bot.voice_sessions[member.id] = now()
+            bot.voice_sessions[(member.guild.id, member.id)] = now()
         gid = member.guild.id
         a = db.one("SELECT * FROM activity WHERE guild_id=? AND user_id=?", gid, member.id)
         w = db.one("SELECT COUNT(*) n FROM warns WHERE guild_id=? AND user_id=? AND active=1", gid, member.id)["n"]
@@ -109,6 +109,7 @@ class Activity(commands.Cog):
             "plaque": rank,
             "mrz_name": images.translit(app["nick"] if app else member.name),
             "rank_code": (rank[:3] or "GST").upper(),
+            "family": bot.family(inter.guild)["name"], "server": bot.family(inter.guild)["server"],
         }
         try:
             avatar = await member.display_avatar.replace(size=256, static_format="png").read()
@@ -210,10 +211,10 @@ class Activity(commands.Cog):
             return
         key = f"report:{t.date()}"
         for g in self.bot.home_guilds:
-            if self.bot.db.gget(g, key) or not self.bot.feature(g, "reports:weekly"):
+            if self.bot.db.gget(g, key):
                 continue
             c = self.bot.ch(g, "reports")
-            if c:
+            if c and self.bot.feature(g, "reports:weekly"):  # отчёт можно выключить, а неделю обнулять надо всегда
                 text = await self.build_report(g)
                 await c.send(embed=self.bot.embed("📊 Отчёт за неделю", text[:4000], config.GOLD, g))
             self.bot.db.gset(g, key, 1)
