@@ -120,15 +120,53 @@ def fmt_dur(sec):
     return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}" if sec >= 3600 else f"{sec // 60}:{sec % 60:02d}"
 
 
+def _related(track, exclude):
+    """Похожие треки для автоплея (в потоке): рекомендации SoundCloud к треку, иначе поиск по исполнителю.
+    Возвращает список (title, url, duration, thumb, artist) без уже звучавших."""
+    import yt_dlp
+    opts = dict(YTDL, noplaylist=False, extract_flat="in_playlist", playlistend=15)
+    queries = []
+    if "soundcloud.com/" in (track.url or ""):
+        queries.append(track.url.split("?")[0].rstrip("/") + "/recommended")
+    artist = (track.artist or "").strip()
+    if not artist and " - " in track.title:
+        artist = track.title.split(" - ")[0].strip()
+    if artist:
+        queries.append(f"scsearch15:{artist}")
+    queries.append(f"scsearch15:{track.title}")
+    found = []
+    with yt_dlp.YoutubeDL(opts) as y:
+        for q in queries:
+            try:
+                info = y.extract_info(q, download=False) or {}
+            except Exception as e:
+                log.info("Автоплей: %s — %s", q, str(e)[:120])
+                continue
+            for en in info.get("entries") or []:
+                url = en and (en.get("webpage_url") or en.get("url"))
+                if not url or not url.startswith("http") or url.split("?")[0] in exclude:
+                    continue
+                dur = en.get("duration")
+                if dur and (dur < 45 or dur > 900):  # без джинглов и часовых миксов
+                    continue
+                found.append((en.get("title") or "Без названия", url, dur, en.get("thumbnail"),
+                               en.get("artist") or en.get("uploader")))
+            if found:
+                break
+    return found
+
+
 class Track:
-    def __init__(self, title, url, requester, duration=None, radio=False, thumb=None):
+    def __init__(self, title, url, requester, duration=None, radio=False, thumb=None, artist=None, auto=False):
         self.title, self.url, self.requester = title, url, requester
         self.duration, self.radio, self.thumb = duration, radio, thumb
+        self.artist, self.auto = artist, auto  # auto — подобран автоплеем
 
 
 class Player:
     def __init__(self):
         self.queue = deque()
+        self.history = deque(maxlen=40)  # ссылки сыгранных — автоплей не повторяется
         self.current = None
         self.volume = 0.6
         self.loop = "off"
@@ -164,6 +202,10 @@ class MusicControls(discord.ui.View):
     @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, custom_id="music:shuffle")
     async def b_shuffle(self, inter, _):
         await self._go(inter, "shuffle")
+
+    @discord.ui.button(emoji="🎲", style=discord.ButtonStyle.secondary, custom_id="music:auto")
+    async def b_auto(self, inter, _):
+        await self._go(inter, "auto")
 
 
 class Music(commands.Cog):
@@ -238,6 +280,7 @@ class Music(commands.Cog):
             headers = info.get("http_headers")
             track.duration = track.duration or info.get("duration")
             track.thumb = track.thumb or info.get("thumbnail")
+            track.artist = track.artist or info.get("artist") or info.get("uploader")
         before = BEFORE
         if headers and headers.get("User-Agent"):
             before += f' -user_agent "{headers["User-Agent"]}"'
@@ -254,6 +297,8 @@ class Music(commands.Cog):
         else:
             if p.loop == "queue" and p.current and not p.current.radio and not failed:
                 p.queue.append(p.current)
+            if not p.queue and not failed and p.current and not p.current.radio and self.autoplay_on(guild):
+                await self.add_related(guild, p.current)
             if not p.queue:
                 p.current = None
                 await self.update_panel(guild)
@@ -261,6 +306,8 @@ class Music(commands.Cog):
                 return
             track = p.queue.popleft()
         p.current = track
+        if track.url and not track.radio:
+            p.history.append(track.url.split("?")[0])
         try:
             src = await self.source(track, p.volume)
         except Exception as e:
@@ -268,6 +315,8 @@ class Music(commands.Cog):
             if p.text:
                 await p.text.send(f"⚠️ Не удалось включить **{track.title}** — пропускаю.", delete_after=30)
             p.current = None
+            if track.auto and not p.queue and failed < 2:
+                await self.add_related(guild, track)  # автоплей не сдаётся с первой осечки
             if failed < 3:
                 return await self.play_next(guild, failed + 1)
             return
@@ -314,6 +363,23 @@ class Music(commands.Cog):
             return
         await self.update_panel(guild)
 
+    def autoplay_on(self, guild):
+        return self.bot.db.gget(guild, "music:autoplay") != "0"  # по умолчанию включён
+
+    async def add_related(self, guild, track):
+        """Автоплей: кладёт в очередь один похожий трек. False — ничего не нашлось."""
+        p = self.player(guild)
+        try:
+            found = await asyncio.wait_for(asyncio.to_thread(_related, track, set(p.history)), timeout=40)
+        except Exception as e:
+            log.info("Автоплей не нашёл похожего: %s", e)
+            return False
+        if not found:
+            return False
+        title, url, dur, thumb, artist = random.choice(found[:5])  # не всегда первый — меньше зацикливания
+        p.queue.append(Track(title, url, None, dur, thumb=thumb, artist=artist, auto=True))
+        return True
+
     def schedule_leave(self, guild, delay, alone=False):
         p = self.player(guild)
         if p.leave_task:
@@ -343,8 +409,12 @@ class Music(commands.Cog):
                            f"**[{t.title}]({t.url})**" if t.url.startswith("http") and not t.radio else f"**{t.title}**",
                            config.COLOR, guild)
         e.add_field(name="Длительность", value=fmt_dur(t.duration), inline=True)
-        e.add_field(name="Включил", value=t.requester.mention if t.requester else "—", inline=True)
+        e.add_field(name="Включил", value="🎲 автоплей" if t.auto else (t.requester.mention if t.requester else "—"),
+                    inline=True)
         e.add_field(name="Повтор · громкость", value=f"{LOOP_NAMES[p.loop]} · {int(p.volume * 100)}%", inline=True)
+        if not t.radio:
+            auto = "вкл — после очереди включу похожее" if self.autoplay_on(guild) else "выкл"
+            e.set_footer(text=f"{e.footer.text or ''} · 🎲 Автоплей: {auto}".lstrip(" ·"), icon_url=e.footer.icon_url)
         if p.queue:
             e.add_field(name=f"Дальше ({len(p.queue)})",
                         value="\n".join(f"`{i + 1}.` {x.title[:60]}" for i, x in enumerate(list(p.queue)[:5])), inline=False)
@@ -516,6 +586,10 @@ class Music(commands.Cog):
             random.shuffle(q)
             p.queue = deque(q)
             msg = "🔀 Очередь перемешана"
+        elif action == "auto":
+            on = not self.autoplay_on(inter.guild)
+            self.bot.db.gset(inter.guild, "music:autoplay", "1" if on else "0")
+            msg = "🎲 Автоплей включён — когда очередь кончится, поставлю похожее." if on else "🎲 Автоплей выключен."
         await inter.response.send_message(msg or "Ок", ephemeral=True)
         await self.update_panel(inter.guild)
 
