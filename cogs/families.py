@@ -8,6 +8,7 @@
 /семья отключить  — выключить (данные не удаляются, можно подключить обратно)."""
 import logging
 import re
+import time
 
 import discord
 from discord import app_commands
@@ -193,6 +194,25 @@ def render_map(bot, guild, page=0):
 
 
 # ─────────────── подключение ───────────────
+class FamilyDecision(discord.ui.DynamicItem[discord.ui.Button], template=r"fam:(?P<a>ok|no):(?P<g>\d+)"):
+    """Владелец бота разрешает или нет подключить семью на новом сервере."""
+
+    def __init__(self, a, gid):
+        super().__init__(discord.ui.Button(label="Разрешить" if a == "ok" else "Отказать",
+                                           emoji="✅" if a == "ok" else "✖️",
+                                           style=discord.ButtonStyle.success if a == "ok" else discord.ButtonStyle.danger,
+                                           custom_id=f"fam:{a}:{gid}"))
+        self.a, self.gid = a, gid
+
+    @classmethod
+    async def from_custom_id(cls, inter, item, match):
+        return cls(match["a"], int(match["g"]))
+
+    async def callback(self, inter: discord.Interaction):
+        await inter.client.get_cog("Families").decide(inter, self.a == "ok", self.gid)
+
+
+
 class ConnectButton(discord.ui.DynamicItem[discord.ui.Button], template=r"fam:connect"):
     def __init__(self):
         super().__init__(discord.ui.Button(label="Подключить семью", emoji="🏠", style=discord.ButtonStyle.success,
@@ -266,16 +286,12 @@ class Families(commands.Cog):
                 ephemeral=True)
         if inter.user.id != g.owner_id:
             return await inter.response.send_message("⛔ Подключить семью может только владелец сервера.", ephemeral=True)
-        await inter.response.defer(ephemeral=True, thinking=True)
-        bot.set_family(g, True)
-        try:
-            await bot.sync_commands(g)
-        except discord.HTTPException as e:
-            log.warning("Семья «%s»: команды не зарегистрировались: %s", g.name, e)
-        log.warning("Подключена семья на сервере «%s» (%s), владелец %s", g.name, g.id, inter.user)
         home = bot.get_guild(bot.home_id) if bot.home_id else None
-        if home and home.id != g.id:
-            await bot.log(home, f"🏠 Бота подключила новая семья: сервер **{g.name}** (`{g.id}`), владелец {inter.user}.")
+        if home and home.id != g.id and not bot.db.gget(g, "family:approved"):
+            # бот один на всех и живёт на хостинге владельца — новую семью сначала одобряет он
+            return await self.request_approval(inter, home)
+        await inter.response.defer(ephemeral=True, thinking=True)
+        await self.enable_family(g, inter.user)
         sug = suggestions(bot, g)
         hint = (f"\n\n💡 Вижу на сервере похожие роли ({len(sug)}) — привяжи их в `/настройка` → «Роли», чтобы не было "
                 f"дублей." if sug else "")
@@ -283,6 +299,95 @@ class Families(commands.Cog):
             "🎉 Семья подключена! Дальше — `/настройка`: мастер проведёт по шагам (профиль семьи, свои роли и каналы, "
             "модули, ключ ИИ, сборка сервера).\n"
             "Перетащи роль бота повыше в списке ролей сервера." + hint, ephemeral=True)
+
+    # ---------- одобрение новой семьи владельцем бота ----------
+    async def request_approval(self, inter, home):
+        g, bot = inter.guild, self.bot
+        last = bot.db.gget(g, "family:requested")
+        if last and last.isdigit() and time.time() - int(last) < 86400:
+            return await inter.response.send_message("⏳ Заявка уже у владельца бота — как только он ответит, я напишу "
+                                                     "тебе в ЛС и сюда.", ephemeral=True)
+        await inter.response.defer(ephemeral=True, thinking=True)
+        bot.db.gset(g, "family:requested", int(time.time()))
+        e = discord.Embed(title="🏠 Новая семья просит подключить бота",
+                          description=f"Сервер **{g.name}** (`{g.id}`) · участников: {g.member_count}\n"
+                                      f"Владелец: {inter.user} (`{inter.user.id}`)\n\n"
+                                      "Разрешить — у семьи заработает полный функционал (данные отдельные, ИИ — на "
+                                      "её ключах). Отказать — бот останется там только для альянса.",
+                          color=config.COLOR)
+        if g.icon:
+            e.set_thumbnail(url=g.icon.url)
+        sent = False
+        for target in (bot.ch(home, "botcmd"), home.owner):
+            if not target:
+                continue
+            v = discord.ui.View(timeout=None)
+            v.add_item(FamilyDecision("ok", g.id))
+            v.add_item(FamilyDecision("no", g.id))
+            try:
+                await target.send(embed=e, view=v)
+                sent = True
+            except discord.HTTPException:
+                pass
+        if not sent:  # некуда спросить — не держим семью в подвешенном состоянии
+            bot.db.gset(g, "family:approved", 1)
+            await self.enable_family(g, inter.user)
+            return await inter.followup.send("🎉 Семья подключена! Дальше — `/настройка`.", ephemeral=True)
+        await inter.followup.send("📨 Заявка отправлена владельцу бота. Как только он разрешит — я напишу тебе в ЛС, "
+                                  "и можно будет запускать `/настройка`.", ephemeral=True)
+
+    async def decide(self, inter, ok, gid):
+        bot = self.bot
+        home = bot.get_guild(bot.home_id) if bot.home_id else None
+        m = home.get_member(inter.user.id) if home else None
+        if not m or not (m.id == home.owner_id or bot.has(m, ["leader", "deputy"])):
+            return await inter.response.send_message("⛔ Решает владелец бота (Глава или заместитель домашнего сервера).",
+                                                     ephemeral=True)
+        g = bot.get_guild(gid)
+        if not g:
+            return await inter.response.edit_message(content="Бота уже убрали с этого сервера.", view=None)
+        if bot.is_family(g) and ok:
+            return await inter.response.edit_message(content=f"✅ Семья «{g.name}» уже подключена.", view=None)
+        await inter.response.edit_message(content=f"{'✅ Разрешено' if ok else '❌ Отказано'} — {inter.user.mention}",
+                                          view=None)
+        owner = g.owner or await self._fetch(g.owner_id)
+        if ok:
+            bot.db.gset(g, "family:approved", 1)
+            await self.enable_family(g, owner)
+            text = (f"🎉 Владелец бота разрешил подключить семью на сервере **{g.name}**! Дальше — `/настройка`: мастер "
+                    "проведёт по шагам.")
+        else:
+            bot.db.gdel(g, "family:requested")
+            text = f"😔 Владелец бота не разрешил подключить семью на сервере **{g.name}**."
+        if owner:
+            try:
+                await owner.send(text)
+            except discord.HTTPException:
+                pass
+        ch = g.system_channel
+        if ch and ch.permissions_for(g.me).send_messages:
+            try:
+                await ch.send(text)
+            except discord.HTTPException:
+                pass
+
+    async def _fetch(self, uid):
+        try:
+            return await self.bot.fetch_user(uid)
+        except discord.HTTPException:
+            return None
+
+    async def enable_family(self, g, who):
+        bot = self.bot
+        bot.set_family(g, True)
+        try:
+            await bot.sync_commands(g)
+        except discord.HTTPException as e:
+            log.warning("Семья «%s»: команды не зарегистрировались: %s", g.name, e)
+        log.warning("Подключена семья на сервере «%s» (%s), владелец %s", g.name, g.id, who)
+        home = bot.get_guild(bot.home_id) if bot.home_id else None
+        if home and home.id != g.id:
+            await bot.log(home, f"🏠 Бота подключила новая семья: сервер **{g.name}** (`{g.id}`), владелец {who}.")
 
     # ---------- команды ----------
     @group.command(name="подключить", description="Включить бота для семьи на этом сервере (владелец сервера)")
@@ -328,5 +433,5 @@ class Families(commands.Cog):
 
 
 async def setup(bot):
-    bot.add_dynamic_items(ConnectButton)
+    bot.add_dynamic_items(ConnectButton, FamilyDecision)
     await bot.add_cog(Families(bot))

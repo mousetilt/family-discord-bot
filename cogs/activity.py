@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Активность: время в войсах, сообщения, семейный паспорт (/профиль), топ, неактив, еженедельный отчёт."""
-import asyncio
+"""Активность: время в войсах, сообщения, карточка участника (/профиль), топ, неактив, еженедельный отчёт."""
 import datetime as dt
 import json
 import logging
@@ -10,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from core import config, images
+from core import config
 from core.botcore import fmt_hours, guarded, now, parse_dt, staff_only
 
 log = logging.getLogger("family-bot.activity")
@@ -75,60 +74,54 @@ class Activity(commands.Cog):
     async def on_member_remove(self, member):
         self.flush(member)
 
-    # ---------- паспорт ----------
-    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
-    @app_commands.command(name="профиль", description="Семейный паспорт участника")
-    @app_commands.rename(member="участник")
-    async def profile(self, inter: discord.Interaction, member: discord.Member = None):
-        member = member or inter.user
-        await inter.response.defer()
-        bot, db = self.bot, self.bot.db
+    # ---------- профиль ----------
+    def profile_embed(self, member):
+        """Карточка участника: ранг, в семье с, наставник, войс, сообщения, выговоры, сборы, эфиры, буст.
+        Её же показывает «👤 Карточка» в меню по правому клику (там руководство видит ещё и досье)."""
+        bot, db, g = self.bot, self.bot.db, member.guild
         self.flush(member)
-        if member.voice and self.counted(inter.guild, member.voice.channel):
-            bot.voice_sessions[(member.guild.id, member.id)] = now()
-        gid = member.guild.id
-        a = db.one("SELECT * FROM activity WHERE guild_id=? AND user_id=?", gid, member.id)
-        w = db.one("SELECT COUNT(*) n FROM warns WHERE guild_id=? AND user_id=? AND active=1", gid, member.id)["n"]
+        if member.voice and self.counted(g, member.voice.channel):
+            bot.voice_sessions[(g.id, member.id)] = now()
+        a = db.one("SELECT * FROM activity WHERE guild_id=? AND user_id=?", g.id, member.id)
+        w = db.one("SELECT COUNT(*) n FROM warns WHERE guild_id=? AND user_id=? AND active=1", g.id, member.id)["n"]
         app = db.one("SELECT * FROM applications WHERE guild_id=? AND user_id=? AND status='accepted' ORDER BY id DESC",
-                     gid, member.id)
-        ms = db.one("SELECT mentor_id FROM mentorships WHERE guild_id=? AND newbie_id=? ORDER BY id DESC", gid, member.id)
-        mentor = inter.guild.get_member(ms["mentor_id"]) if ms else None
+                     g.id, member.id)
+        ms = db.one("SELECT mentor_id FROM mentorships WHERE guild_id=? AND newbie_id=? ORDER BY id DESC", g.id, member.id)
+        mentor = g.get_member(ms["mentor_id"]) if ms and ms["mentor_id"] else None
         joined = parse_dt(app["decided_at"] or app["created_at"]) if app else member.joined_at
-        rank = plain(bot.rank_name(member)) or "Гость"
-        data = {
-            "nick": (app["nick"] if app else member.display_name)[:32],
-            "discord": member.name,
-            "static": app["static_id"] if app else "—",
-            "rank": rank,
-            "joined": joined.strftime("%d.%m.%Y") if joined else "—",
-            "mentor": plain(mentor.display_name)[:24] if mentor else "—",
-            "voice": fmt_hours(a["voice_seconds"]) if a else "0 мин",
-            "messages": str(a["messages"]) if a else "0",
-            "warns": f"{w}/3",
-            "number": f"{member.id % 10 ** 8:08d}",
-            "plaque": rank,
-            "mrz_name": images.translit(app["nick"] if app else member.name),
-            "rank_code": (rank[:3] or "GST").upper(),
-            "family": bot.family(inter.guild)["name"], "server": bot.family(inter.guild)["server"],
-        }
-        try:
-            avatar = await member.display_avatar.replace(size=256, static_format="png").read()
-        except discord.HTTPException:
-            avatar = None
-        card = await asyncio.to_thread(images.passport_card, avatar, data)
-        extra = ""
-        if a:
-            extra = f"За неделю: 🎙 {fmt_hours(a['week_voice'])} · 💬 {a['week_messages']}"
-        streams = db.one("SELECT COUNT(*) n FROM streams WHERE guild_id=? AND user_id=?", gid, member.id)["n"]
-        if streams:
-            extra = (extra + " · " if extra else "") + f"📺 Эфиров: {streams}"
+        e = bot.embed(f"🪪 {member.display_name}", None, config.COLOR, g)
+        e.set_thumbnail(url=member.display_avatar.url)
+        e.add_field(name="Ранг", value=bot.rank_name(member) or "Гость", inline=True)
+        e.add_field(name="Ник · Static", value=f"{app['nick'] or '—'} · `{app['static_id'] or '—'}`" if app else "—",
+                    inline=True)
+        e.add_field(name="В семье с", value=discord.utils.format_dt(joined, "D") if joined else "—", inline=True)
+        e.add_field(name="🎙 В войсе", value=(f"{fmt_hours(a['voice_seconds'])} · за неделю {fmt_hours(a['week_voice'])}"
+                                             if a else "0 мин"), inline=True)
+        e.add_field(name="💬 Сообщений", value=(f"{a['messages']} · за неделю {a['week_messages']}" if a else "0"),
+                    inline=True)
+        e.add_field(name="⚖️ Выговоры", value=f"{w}/{bot.num(g, 'warn_limit')}", inline=True)
+        extra = []
+        if mentor:
+            extra.append(f"🎓 Наставник: {mentor.mention}")
         gat = bot.get_cog("Gatherings")
         came, total = gat.attendance(member) if gat else (0, 0)
         if total:
-            extra = (extra + " · " if extra else "") + f"📣 Сборы: пришёл на {came} из {total}"
+            extra.append(f"📣 Сборы: пришёл на {came} из {total}")
+        streams = db.one("SELECT COUNT(*) n FROM streams WHERE guild_id=? AND user_id=?", g.id, member.id)["n"]
+        if streams:
+            extra.append(f"📺 Эфиров: {streams}")
         if getattr(member, "premium_since", None):
-            extra = f"💎 Бустер семьи с {member.premium_since.strftime('%d.%m.%Y')}" + (" · " + extra if extra else "")
-        await inter.followup.send(content=extra or None, file=discord.File(card, filename="passport.png"))
+            extra.append(f"💎 Бустер семьи с {member.premium_since.strftime('%d.%m.%Y')}")
+        if extra:
+            e.description = "\n".join(extra)
+        return e
+
+    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
+    @app_commands.command(name="профиль", description="Карточка участника: ранг, активность, выговоры, сборы")
+    @app_commands.rename(member="участник")
+    async def profile(self, inter: discord.Interaction, member: discord.Member = None):
+        member = member or inter.user
+        await inter.response.send_message(embed=self.profile_embed(member), ephemeral=member.id != inter.user.id)
 
     @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="топ", description="Самые активные участники")

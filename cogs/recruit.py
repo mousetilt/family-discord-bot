@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Статистика рекрутёров и оплата им из казны (Фаза 3).
-• Каждое решение по заявке пишется в hr_actions: кто (reviewer_id), исход (interview/accepted/denied), когда (ts).
+• Каждое решение по заявке пишется в hr_actions: кто (reviewer_id), исход (called/interview/accepted/denied), когда (ts).
   Один исход на пару «заявка + рекрутёр» (UNIQUE) — повторный вызов на собеседование не задваивает.
   Источники: кнопки карточки заявки, ручной приём, перенос кандидата ботом в комнату собеседования.
 • /рекрутёры статистика — за неделю / месяц / N дней: обзвонов, принято, отклонено (+ к выплате по ставкам).
@@ -18,8 +18,10 @@ from core import config
 from core.botcore import staff_only
 
 log = logging.getLogger("family-bot.recruit")
-OUTCOMES = {"interview": "🎤 обзвон", "accepted": "✅ принят", "denied": "❌ отклонён"}
-PAYABLE = {"interview": "за обзвон (собеседование)", "accepted": "за принятого в семью"}
+# called — нажал «Собеседование» (вызвал), interview — бот реально перенёс кандидата к нему в комнату собеседования.
+# Платим только за реальный обзвон: кнопку можно нажать и без разговора.
+OUTCOMES = {"called": "📞 вызвал", "interview": "🎤 обзвон", "accepted": "✅ принят", "denied": "❌ отклонён"}
+PAYABLE = {"interview": "за проведённое собеседование", "accepted": "за принятого в семью"}
 RATE_SETTERS = ["leader", "deputy"]
 PERIODS = [app_commands.Choice(name="неделя", value=7), app_commands.Choice(name="месяц", value=30),
            app_commands.Choice(name="3 месяца", value=90), app_commands.Choice(name="всё время", value=0)]
@@ -50,9 +52,9 @@ class RecruitPayView(discord.ui.View):
         if not tr:
             return await inter.response.edit_message(content="Казна не загружена.", view=None)
         await inter.response.edit_message(content="💸 Выплачиваю…", view=None)
-        text = await tr.payout(inter.guild, inter.user, self.pairs, "рекрутёрам по статистике")
-        if text.startswith("💸"):
-            inter.client.db.gset(inter.guild, "recruit:paid_ts", self.until)
+        # отметка «оплачено до» ставится самой выплатой — и сразу, и после второго подтверждения (если платит себе)
+        text = await tr.payout(inter.guild, inter.user, self.pairs, "рекрутёрам по статистике",
+                               after={"recruit:paid_ts": self.until})
         await inter.edit_original_response(content=text)
 
     @discord.ui.button(label="Отмена", style=discord.ButtonStyle.secondary)
@@ -113,16 +115,16 @@ class Recruit(commands.Cog):
         rates = self.rates(guild)
         pay = self.owed(st, rates)
         rows = sorted(st.items(), key=lambda kv: (kv[1].get("accepted", 0), kv[1].get("interview", 0)), reverse=True)
-        lines = [f"📊 **Рекрутёры {period}** — 🎤 обзвонов · ✅ принято · ❌ отклонено"]
+        lines = [f"📊 **Рекрутёры {period}** — 📞 вызвал · 🎤 провёл собеседование · ✅ принято · ❌ отклонено"]
         medals = ["🥇", "🥈", "🥉"]
         for i, (uid, s) in enumerate(rows[:20]):
             m = guild.get_member(uid)
             name = m.mention if m else f"<@{uid}>"
             money = f" · 💸 {self._fmt(pay[uid])}" if any(rates.values()) and pay.get(uid) else ""
-            lines.append(f"{medals[i] if i < 3 else f'`{i + 1}.`'} {name} — 🎤 {s.get('interview', 0)} · "
+            lines.append(f"{medals[i] if i < 3 else f'`{i + 1}.`'} {name} — 📞 {s.get('called', 0)} · 🎤 {s.get('interview', 0)} · "
                          f"✅ {s.get('accepted', 0)} · ❌ {s.get('denied', 0)}{money}")
         tot = {k: sum(s.get(k, 0) for s in st.values()) for k in OUTCOMES}
-        lines.append(f"\nВсего: 🎤 {tot['interview']} · ✅ {tot['accepted']} · ❌ {tot['denied']}")
+        lines.append(f"\nВсего: 📞 {tot['called']} · 🎤 {tot['interview']} · ✅ {tot['accepted']} · ❌ {tot['denied']}")
         if any(rates.values()):
             lines.append("Ставки: " + ", ".join(f"{PAYABLE[k]} — {self._fmt(v)}" for k, v in rates.items() if v))
             paid = self.bot.db.gget(guild, "recruit:paid_ts")

@@ -66,20 +66,27 @@ def pick_questions(db, gid, n):
 
 
 class ExamSession:
-    def __init__(self, user_id, app_id, questions, attempt, training=False):
+    def __init__(self, user_id, app_id, questions, attempt, training=False, conf=None):
+        """conf — числа экзамена семьи (Applications.conf): вопросов, нужно верных, минут, пересдача."""
         self.user_id, self.app_id, self.questions = user_id, app_id, questions
         self.attempt, self.training = attempt, training
+        self.conf = conf or {"n": config.EXAM_QUESTIONS, "pass": config.EXAM_PASS, "time": config.EXAM_TIME_MIN,
+                             "retry": config.EXAM_RETRY_MIN}
         self.idx, self.answers, self.started = 0, [], now()
 
     @property
+    def time_min(self):
+        return self.conf["time"]
+
+    @property
     def expired(self):
-        return (now() - self.started).total_seconds() > config.EXAM_TIME_MIN * 60
+        return (now() - self.started).total_seconds() > self.time_min * 60
 
     def need(self):
-        total = len(self.questions)
-        if total >= config.EXAM_QUESTIONS:
-            return min(config.EXAM_PASS, total)
-        return math.ceil(config.EXAM_PASS * total / max(config.EXAM_QUESTIONS, 1))
+        total, n, p = len(self.questions), self.conf["n"], min(self.conf["pass"], self.conf["n"])
+        if total >= n:
+            return min(p, total)
+        return math.ceil(p * total / max(n, 1))
 
 
 # ─────────────────────────────── карточка заявки ───────────────────────────────
@@ -162,7 +169,7 @@ class ApplicationModal(discord.ui.Modal, title="Шаг 1 из 3 · Анкета"
 
 class StartExamView(discord.ui.View):
     def __init__(self, cog, s):
-        super().__init__(timeout=config.EXAM_TIME_MIN * 60)
+        super().__init__(timeout=s.time_min * 60)
         self.cog, self.s = cog, s
 
     @discord.ui.button(label="Начать тест", emoji="▶️", style=discord.ButtonStyle.success)
@@ -174,7 +181,7 @@ class StartExamView(discord.ui.View):
 
 class QuestionView(discord.ui.View):
     def __init__(self, cog, s):
-        super().__init__(timeout=config.EXAM_TIME_MIN * 60)
+        super().__init__(timeout=s.time_min * 60)
         self.cog, self.s = cog, s
         self.idx = s.idx
         for i, _ in enumerate(s.questions[s.idx]["options"]):
@@ -197,14 +204,14 @@ class SituationalStartView(discord.ui.View):
 
     @discord.ui.button(label="Ответить на вопросы", emoji="✍️", style=discord.ButtonStyle.primary)
     async def go(self, inter: discord.Interaction, _):
-        await inter.response.send_modal(SituationalModal(self.cog, self.app_id))
+        await inter.response.send_modal(SituationalModal(self.cog, self.app_id, inter.client.situational(inter.guild)))
 
 
 class SituationalModal(discord.ui.Modal):
-    def __init__(self, cog, app_id):
+    def __init__(self, cog, app_id, pool=None):
         super().__init__(title="Шаг 3 из 3 · Вопросы о тебе", timeout=1200)
         self.cog, self.app_id = cog, app_id
-        self.qs = random.sample(config.SITUATIONAL, 2)
+        self.qs = random.sample(pool or config.SITUATIONAL, 2)  # вопросы семьи — /настройки → «Тексты»
         self.inputs = []
         for label, ph in self.qs:
             ti = discord.ui.TextInput(label=label[:45], placeholder=ph[:100], style=discord.TextStyle.paragraph,
@@ -269,17 +276,24 @@ class Applications(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self.sessions = {}  # (guild_id, user_id) -> ExamSession: заявки в разные семьи не мешают друг другу
+        self.sessions = {}
+
+    def conf(self, guild):
+        """Числа экзамена семьи (/настройки → «🔢 Числа»)."""
+        n = self.bot.num
+        return {"n": n(guild, "exam_questions"), "pass": n(guild, "exam_pass"), "time": n(guild, "exam_time"),
+                "retry": n(guild, "exam_retry")}  # (guild_id, user_id) -> ExamSession: заявки в разные семьи не мешают друг другу
 
     async def post_panels(self, guild, repost):
         bot = self.bot
 
         async def make():
+            c = self.conf(guild)
             e = bot.embed("📨 Заявка в семью",
                           f"Хочешь стать частью семьи **{config.FAMILY}**?\n\n"
                           f"**Шаг 1.** Анкета: ник, Static ID, возраст, опыт\n"
-                          f"**Шаг 2.** Тест по правилам семьи и проекта: {config.EXAM_QUESTIONS} вопросов, "
-                          f"нужно {config.EXAM_PASS} верных, {config.EXAM_TIME_MIN} минут\n"
+                          f"**Шаг 2.** Тест по правилам семьи и проекта: {c['n']} вопросов, "
+                          f"нужно {min(c['pass'], c['n'])} верных, {c['time']} минут\n"
                           f"**Шаг 3.** Два вопроса о тебе\n\n"
                           "Потренироваться можно командой `/экзамен тренировка`.\n"
                           "Ответ придёт в ЛС, так что **не закрывай личку от участников сервера**.",
@@ -310,7 +324,7 @@ class Applications(commands.Cog):
         last_fail = db.one("SELECT created_at FROM exam_attempts WHERE guild_id=? AND user_id=? AND passed=0 AND "
                            "training=0 ORDER BY id DESC LIMIT 1", gid, u.id)
         if last_fail:
-            left = parse_dt(last_fail["created_at"]) + dt.timedelta(minutes=config.EXAM_RETRY_MIN) - now()
+            left = parse_dt(last_fail["created_at"]) + dt.timedelta(minutes=self.conf(gid)["retry"]) - now()
             if left.total_seconds() > 0:
                 return await inter.response.send_message(
                     f"📕 Повторно пройти тест можно через **{int(left.total_seconds() // 60) + 1} мин**. "
@@ -341,16 +355,17 @@ class Applications(commands.Cog):
         attempt = db.one("SELECT COUNT(*) n FROM exam_attempts WHERE guild_id=? AND user_id=? AND training=0",
                          gid, u.id)["n"] + 1
         # экзамен можно выключить в /настройки → Кадры: тогда анкета сразу идёт к вопросам о себе
-        questions = pick_questions(db, gid, config.EXAM_QUESTIONS) if bot.feature(inter.guild, "hr:exam") else []
+        conf = self.conf(gid)
+        questions = pick_questions(db, gid, conf["n"]) if bot.feature(inter.guild, "hr:exam") else []
         if not questions:
             return await inter.response.send_message(
                 embed=bot.embed("✅ Анкета сохранена", "Последний шаг — ответь на 2 вопроса о себе.", config.GREEN),
                 view=SituationalStartView(self, app_id), ephemeral=True)
-        s = ExamSession(u.id, app_id, questions, attempt)
+        s = ExamSession(u.id, app_id, questions, attempt, conf=conf)
         self.sessions[(inter.guild.id if inter.guild else 0, u.id)] = s
         e = bot.embed("✅ Анкета сохранена · Шаг 2 из 3 — тест",
                       f"Сейчас будет **{len(questions)} вопросов** по правилам семьи и проекта «Россия Онлайн».\n"
-                      f"Нужно ответить правильно минимум на **{s.need()}**. На всё — **{config.EXAM_TIME_MIN} минут**.\n\n"
+                      f"Нужно ответить правильно минимум на **{s.need()}**. На всё — **{s.time_min} минут**.\n\n"
                       "Не закрывай это окно. Готов?", config.COLOR, inter.guild)
         await inter.response.send_message(embed=e, view=StartExamView(self, s), ephemeral=True)
 
@@ -358,7 +373,7 @@ class Applications(commands.Cog):
         q = s.questions[s.idx]
         total = len(s.questions)
         bar = "▰" * s.idx + "▱" * (total - s.idx)
-        left = max(0, int(config.EXAM_TIME_MIN * 60 - (now() - s.started).total_seconds()) // 60)
+        left = max(0, int(s.time_min * 60 - (now() - s.started).total_seconds()) // 60)
         desc = f"`{bar}`\n\n**{q['q']}**\n\n" + "\n".join(f"{LETTERS[i]}  {o}" for i, o in enumerate(q["options"]))
         e = self.bot.embed(f"🧠 {'Тренировка' if s.training else 'Тест'} · вопрос {s.idx + 1} из {total}", desc,
                            config.COLOR, guild)
@@ -411,7 +426,7 @@ class Applications(commands.Cog):
                           f"Результат: **{score}/{total}**, нужно {need}.\n\n"
                           + ("Теперь после испытательного срока тебя можно переводить в 👥 Члены семьи."
                              if passed else f"**Где ошибся:**\n{wrong_text}\n\nПопробуй снова через "
-                                            f"{config.EXAM_RETRY_MIN} мин: `/экзамен сдать`"),
+                                            f"{s.conf['retry']} мин: `/экзамен сдать`"),
                           config.GREEN if passed else config.RED, inter.guild)
             return await inter.response.edit_message(embed=e, view=None)
         db.q("UPDATE applications SET exam_score=?, exam_total=?, exam_attempt=?, exam_wrong=? WHERE id=?",
@@ -431,7 +446,7 @@ class Applications(commands.Cog):
                     pass
             e = bot.embed("📕 Тест не сдан",
                           f"Результат: **{score}/{total}**, нужно минимум **{need}**.\n\n**Где ошибся:**\n{wrong_text}\n\n"
-                          f"Перечитай #📜・правила. Повторить можно через **{config.EXAM_RETRY_MIN} мин**.",
+                          f"Перечитай #📜・правила. Повторить можно через **{s.conf['retry']} мин**.",
                           config.RED, inter.guild)
             return await inter.response.edit_message(embed=e, view=None)
         e = bot.embed("✅ Тест сдан!",
@@ -467,7 +482,7 @@ class Applications(commands.Cog):
                   f"{config.GAME_SERVER}). Оцени кандидата: анкету, тест по правилам и ответы на ситуационные "
                   "вопросы. Будь объективен и краток. Мат и сленг в ответах — не повод для отказа, а грубость, "
                   "желание обманывать, готовность нарушать правила или сливать информацию — повод.\n"
-                  f"Правила семьи:\n{config.RULES_TEXT}\n\n"
+                  f"Правила семьи:\n{bot.rules_text(guild)}\n\n"
                   'Формат: {"answers":[{"score":0-10,"comment":"кратко"}], '
                   '"verdict":"принять"|"собеседование"|"отказать", "summary":"2-3 предложения", "red_flags":["..."]}')
         prompt = json.dumps({
@@ -517,7 +532,7 @@ class Applications(commands.Cog):
             db.q("UPDATE applications SET status='taken', reviewer_id=? WHERE id=?", inter.user.id, app_id)
         elif action == "interview":
             db.q("UPDATE applications SET status='interview', reviewer_id=? WHERE id=?", inter.user.id, app_id)
-            self.stat(inter.guild, app_id, inter.user.id, "interview")
+            self.stat(inter.guild, app_id, inter.user.id, "called")  # обзвон засчитает перенос в комнату собеседования
         elif action == "accept":
             if not member:
                 return await inter.response.send_message("Игрок уже покинул сервер.", ephemeral=True)
@@ -713,25 +728,27 @@ class Applications(commands.Cog):
         last_fail = db.one("SELECT created_at FROM exam_attempts WHERE guild_id=? AND user_id=? AND passed=0 AND "
                            "training=0 ORDER BY id DESC LIMIT 1", g.id, u.id)
         if last_fail:
-            left = parse_dt(last_fail["created_at"]) + dt.timedelta(minutes=config.EXAM_RETRY_MIN) - now()
+            left = parse_dt(last_fail["created_at"]) + dt.timedelta(minutes=self.conf(g)["retry"]) - now()
             if left.total_seconds() > 0:
                 return await inter.response.send_message(
                     f"📕 Повторить можно через **{int(left.total_seconds() // 60) + 1} мин**.", ephemeral=True)
-        qs = pick_questions(db, g.id, config.EXAM_QUESTIONS)
+        conf = self.conf(g)
+        qs = pick_questions(db, g.id, conf["n"])
         if not qs:
             return await inter.response.send_message("Вопросов экзамена пока нет.", ephemeral=True)
         attempt = db.one("SELECT COUNT(*) n FROM exam_attempts WHERE guild_id=? AND user_id=? AND training=0",
                          g.id, u.id)["n"] + 1
-        s = ExamSession(u.id, None, qs, attempt)
+        s = ExamSession(u.id, None, qs, attempt, conf=conf)
         self.sessions[(inter.guild.id if inter.guild else 0, u.id)] = s
         await inter.response.send_message(embed=self.question_embed(s, g), view=QuestionView(self, s), ephemeral=True)
 
     @exam.command(name="тренировка", description="Пройти пробный тест по правилам (ни на что не влияет)")
     async def exam_train(self, inter: discord.Interaction):
-        qs = pick_questions(self.bot.db, inter.guild.id, config.EXAM_QUESTIONS)
+        conf = self.conf(inter.guild)
+        qs = pick_questions(self.bot.db, inter.guild.id, conf["n"])
         if not qs:
             return await inter.response.send_message("Вопросов пока нет.", ephemeral=True)
-        s = ExamSession(inter.user.id, None, qs, 0, training=True)
+        s = ExamSession(inter.user.id, None, qs, 0, training=True, conf=conf)
         await inter.response.send_message(embed=self.question_embed(s, inter.guild), view=QuestionView(self, s),
                                           ephemeral=True)
 

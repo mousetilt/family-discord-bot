@@ -10,7 +10,7 @@ import discord
 from bs4 import BeautifulSoup
 
 from . import config
-from .family import brand
+from .family import brand, text as family_text
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/130.0 Safari/537.36")
@@ -69,8 +69,10 @@ class KnowledgeBase:
 
     # ---------- документы ----------
     def family_doc(self, gid):
-        text = re.sub(r"\*\*|`", "", config.RULES_TEXT + "\n\n" + config.WELCOME_TEXT)
-        text = brand(self.db, gid, text)
+        # свои правила и «о семье» из /настройки → «Тексты», иначе стандартные (под семью)
+        rules = family_text(self.db, gid, "rules") or brand(self.db, gid, config.RULES_TEXT)
+        welcome = family_text(self.db, gid, "welcome") or brand(self.db, gid, config.WELCOME_TEXT)
+        text = re.sub(r"\*\*|`", "", rules + "\n\n" + welcome)
         return {"id": 0, "title": brand(self.db, gid, f"Правила семьи {config.FAMILY}"), "url": None, "category": "family",
                 "content": text}
 

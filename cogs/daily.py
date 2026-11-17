@@ -2,8 +2,8 @@
 """Ежедневные дела бота.
 • Резервная копия базы — раз в сутки владельцу сервера в ЛС (в базе есть авторы анонимных обращений, поэтому
   в каналы сервера её не кладём).
-• Сводка Главе в ЛС раз в config.DIGEST_DAYS суток: заявки, обращения, испытательные сроки, неактив, выговоры.
-• Выговоры снимаются сами через config.WARN_DAYS дней без новых выговоров."""
+• Сводка Главе в ЛС раз в N суток (/настройки → «Числа»: digest_days): заявки, обращения, испытательные сроки, неактив, выговоры.
+• Выговоры снимаются сами через N дней без новых выговоров (warn_days)."""
 import asyncio
 import datetime as dt
 import io
@@ -163,25 +163,27 @@ class Daily(commands.Cog):
 
     # ---------- авто-снятие выговоров ----------
     async def expire_warns(self, guild):
-        if config.WARN_DAYS <= 0:
+        days = self.bot.num(guild, "warn_days")
+        if days <= 0:
             return
         db = self.bot.db
-        border = (now() - dt.timedelta(days=config.WARN_DAYS)).isoformat()
+        border = (now() - dt.timedelta(days=days)).isoformat()
         rows = db.all("SELECT user_id, COUNT(*) n, MAX(created_at) last FROM warns WHERE guild_id=? AND active=1 "
                       "GROUP BY user_id HAVING MAX(created_at)<?", guild.id, border)
         for r in rows:
             db.q("UPDATE warns SET active=0 WHERE guild_id=? AND user_id=? AND active=1", guild.id, r["user_id"])
             await self.bot.log(guild, f"⚪ С <@{r['user_id']}> автоматически сняты выговоры ({r['n']}): "
-                                      f"{config.WARN_DAYS} дн. без новых нарушений.", "warns")
+                                      f"{days} дн. без новых нарушений.", "warns")
             m = guild.get_member(r["user_id"])
             if m:
-                await safe_dm(m, f"⚪ Твои выговоры в семье {config.FAMILY} сняты: {config.WARN_DAYS} дн. без новых "
+                await safe_dm(m, f"⚪ Твои выговоры в семье {config.FAMILY} сняты: {days} дн. без новых "
                                  "нарушений. Так держать!")
 
     # ---------- сводка Главе ----------
     def build_digest(self, guild):
         bot, db, t = self.bot, self.bot.db, now()
-        since = (t - dt.timedelta(days=max(config.DIGEST_DAYS, 1))).isoformat()
+        every = self.bot.num(guild, "digest_days")
+        since = (t - dt.timedelta(days=max(every, 1))).isoformat()
         e = bot.embed(f"🗞 Сводка по семье {config.FAMILY}", None, config.GOLD, guild)
         fam = bot.family_members(guild)
         gid = guild.id
@@ -239,15 +241,16 @@ class Daily(commands.Cog):
                                          + (f"\n{money}" if money else ""), inline=False)
         if len(e.fields) == 1 and not flags:
             e.description += "\n\n✅ Всё разобрано: открытых заявок, обращений и просроченных сроков нет."
-        e.set_footer(text=f"Сводка приходит раз в {config.DIGEST_DAYS} сут. · {bot.brand(guild, config.FOOTER)}")
+        e.set_footer(text=f"Сводка приходит раз в {every or '—'} сут. · {bot.brand(guild, config.FOOTER)}")
         return e
 
     async def digest(self, guild):
-        if config.DIGEST_DAYS <= 0 or not self.bot.feature(guild, "reports:digest"):
+        every = self.bot.num(guild, "digest_days")
+        if every <= 0 or not self.bot.feature(guild, "reports:digest"):
             return
         t = now()
         last = self.bot.db.gget(guild, "digest:last")
-        if t.hour < DIGEST_HOUR or (last and (t - parse_dt(last)).total_seconds() < config.DIGEST_DAYS * 86400 - 3600):
+        if t.hour < DIGEST_HOUR or (last and (t - parse_dt(last)).total_seconds() < every * 86400 - 3600):
             return
         self.bot.db.gset(guild, "digest:last", now_iso())
         role = self.bot.role(guild, "leader")

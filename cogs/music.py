@@ -711,17 +711,19 @@ class Music(commands.Cog):
                 self.schedule_leave(member.guild, 60, alone=True)
 
     # ═════════════ ГОЛОСОВЫЕ ОБЪЯВЛЕНИЯ, ТРЕВОГА, СОБЕСЕДОВАНИЕ ═════════════
-    def voice_chain(self):
-        """Выбранный голос, за ним — запасные мужские (чтобы голос не «прыгал» на женский или на робота)."""
-        first = self.bot.db.get("tts:voice") or DEFAULT_VOICE
+    def voice_chain(self, guild=None):
+        """Голос семьи (/голос — у каждой свой), за ним — запасные мужские (чтобы голос не «прыгал» на женский или
+        на робота). У семьи свой не выбран — голос, выбранный раньше для всех (tts:voice), иначе стандартный."""
+        first = (self.bot.db.gget(guild, "tts:voice") if guild is not None else None) \
+            or self.bot.db.get("tts:voice") or DEFAULT_VOICE
         if first not in VOICES:
             first = DEFAULT_VOICE
         return [first] + [v for v in BACKUP_VOICES if v != first]
 
-    async def tts(self, text):
+    async def tts(self, text, guild=None):
         """Озвучка текста бесплатно: нейроголоса Microsoft Edge; Google — только если не ответил ни один."""
         tmp = Path(tempfile.gettempdir())
-        chain = self.voice_chain()
+        chain = self.voice_chain(guild)
         path = tmp / f"tts_{hashlib.md5(f'{chain[0]}|{text}'.encode()).hexdigest()[:16]}.mp3"  # md5 — одинаков после рестарта
         if path.exists() and path.stat().st_size > 0:
             return path
@@ -777,7 +779,7 @@ class Music(commands.Cog):
     async def voice_cmd(self, inter: discord.Interaction, voice: app_commands.Choice[str]):
         if not self.bot.has(inter.user, config.LEAD):
             return await inter.response.send_message("⛔ Голос бота выбирает руководство.", ephemeral=True)
-        self.bot.db.set("tts:voice", voice.value)
+        self.bot.db.gset(inter.guild, "tts:voice", voice.value)  # голос — у каждой семьи свой
         self.voice_fails.clear()
         self.voice_down.clear()
         here = inter.user.voice.channel if inter.user.voice else None
@@ -818,7 +820,7 @@ class Music(commands.Cog):
                     # в канале с музыкой говорим поверх: музыка на паузу → фраза → музыка дальше
                     if text and not siren and vc.channel.id in channel_ids and Overlay and isinstance(vc.source, Overlay):
                         try:
-                            done = vc.source.say(await self.tts(text), asyncio.get_running_loop())
+                            done = vc.source.say(await self.tts(text, guild), asyncio.get_running_loop())
                             await asyncio.wait_for(done.wait(), timeout=60)
                         except Exception as e:
                             log.warning("Фраза поверх музыки: %s", e)
@@ -835,7 +837,7 @@ class Music(commands.Cog):
                 files.append(config.ASSETS / "siren.wav")
             if text:
                 try:
-                    files.append(await self.tts(text))
+                    files.append(await self.tts(text, guild))
                 except Exception as e:
                     log.warning("Озвучка не удалась: %s", e)
             if not files:

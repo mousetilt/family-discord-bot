@@ -8,8 +8,8 @@
 • Каждая операция — в канал казны (ch:treasury_log, иначе кадровый журнал).
 Модуль «treasury» в /настройки, по умолчанию включён."""
 import datetime as dt
+import json
 import logging
-import re
 
 import discord
 from discord import app_commands
@@ -17,6 +17,7 @@ from discord.ext import commands, tasks
 
 from core import config
 from core.botcore import guarded, now, safe_dm
+from core.parse import fmt_amount as fmt, parse_amount  # noqa: F401 — их берут и другие коги
 
 log = logging.getLogger("family-bot.treasury")
 TREASURY = config.TREASURY
@@ -24,48 +25,32 @@ DUES_SETTERS = ["leader", "deputy"]  # взнос и ставки зарплат
 FINERS = TREASURY + ["hr_head"]  # штраф выписывают ещё и кадры (вместе с выговором); оплату отмечает казна
 RATE_ROLES = list(config.ROSTER_ORDER)  # роли, на которые можно поставить ставку зарплаты
 ROLE_CHOICES = [app_commands.Choice(name=config.ROLE_NAMES[k], value=k) for k in RATE_ROLES][:25]
-MAX_AMOUNT = 10 ** 12
 PERIODS = {"week": "неделю", "month": "месяц"}
-_MULT = [("ккк", 10 ** 9), ("kkk", 10 ** 9), ("млрд", 10 ** 9), ("кк", 10 ** 6), ("kk", 10 ** 6), ("млн", 10 ** 6),
-         ("лям", 10 ** 6), ("м", 10 ** 6), ("m", 10 ** 6), ("к", 10 ** 3), ("k", 10 ** 3), ("тыс", 10 ** 3)]
+
+PENDING_SCHEMA = """
+CREATE TABLE IF NOT EXISTS treasury_pending(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, actor_id INTEGER NOT NULL, kind TEXT NOT NULL,
+    payload TEXT, summary TEXT, ts INTEGER NOT NULL, status TEXT DEFAULT 'wait');
+"""
+PENDING_TTL = 48 * 3600  # операция «себе» ждёт второго подтверждения не дольше двух суток
 
 
-def parse_amount(s):
-    """«50к» → 50000, «1.2кк» / «1,2 ляма» → 1200000, «2м» → 2000000, «1 200 000» → 1200000. Мусор / ≤0 → None."""
-    if isinstance(s, bool):
-        return None
-    if isinstance(s, (int, float)):
-        n = int(s)
-        return n if 0 < n <= MAX_AMOUNT else None
-    t = str(s or "").lower().replace("ё", "е")
-    t = re.sub(r"(вирт\w*|руб\w*|\$|₽)", "", t)
-    t = t.replace(" ", "").replace(" ", "").replace("_", "")
-    m = re.fullmatch(r"(\d+(?:[.,]\d+)*)([a-zа-я]*)", t)
-    if not m:
-        return None
-    num, suf = m.groups()
-    mult = 1
-    if suf:
-        for name, k in _MULT:
-            if suf.startswith(name):
-                mult = k
-                break
-        else:
-            return None
-        try:
-            val = float(num.replace(",", "."))
-        except ValueError:
-            return None
-    else:  # без суффикса точки/запятые — разделители разрядов («1.500.000»)
-        if any(len(g) != 3 for g in re.split(r"[.,]", num)[1:]):
-            return None  # «1.5» без «к/кк» — непонятно, 1,5 вирта или 15: лучше переспросить, чем провести не то
-        val = float(num.replace(",", "").replace(".", ""))
-    n = int(round(val * mult))
-    return n if 0 < n <= MAX_AMOUNT else None
+class SecondConfirm(discord.ui.DynamicItem[discord.ui.Button], template=r"trp:(?P<a>ok|no):(?P<id>\d+)"):
+    """Операция казны «себе» (выплата себе, свой штраф): подтверждает ДРУГОЙ человек из казны."""
 
+    def __init__(self, a, pid):
+        super().__init__(discord.ui.Button(label="Подтвердить" if a == "ok" else "Отклонить",
+                                           emoji="✅" if a == "ok" else "✖️",
+                                           style=discord.ButtonStyle.success if a == "ok" else discord.ButtonStyle.danger,
+                                           custom_id=f"trp:{a}:{pid}"))
+        self.a, self.pid = a, pid
 
-def fmt(n):
-    return f"{int(n):,}".replace(",", " ") + " вирт"
+    @classmethod
+    async def from_custom_id(cls, inter, item, match):
+        return cls(match["a"], int(match["id"]))
+
+    async def callback(self, inter: discord.Interaction):
+        await inter.client.get_cog("Treasury").decide_pending(inter, self.pid, self.a == "ok")
 
 
 def msk_now():
@@ -147,6 +132,8 @@ class Treasury(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        bot.db.c.executescript(PENDING_SCHEMA)
+        bot.db.c.commit()
         self.remind_loop.start()
 
     def cog_unload(self):
@@ -385,17 +372,87 @@ class Treasury(commands.Cog):
             text += f"\n⚠️ В казне только {fmt(bal)} — казна уйдёт в минус."
         return text
 
-    async def payout(self, guild, actor, pairs, reason, ranks=False):
-        """Выплаты из казны: каждому — расход с пометкой «зарплата», уведомление в ЛС, одна запись в журнал."""
+    # ---------- второе подтверждение операций «себе» ----------
+    async def second_confirm(self, guild, actor, kind, payload, summary):
+        """Операция, где проводящий — сам получатель. Не проводим: в канал казны с кнопками для другого человека."""
+        cur = self.bot.db.q("INSERT INTO treasury_pending(guild_id, actor_id, kind, payload, summary, ts) "
+                            "VALUES(?,?,?,?,?,?)", guild.id, actor.id, kind, json.dumps(payload), summary[:900],
+                            int(now().timestamp()))
+        pid = cur.lastrowid
+        key = "treasury_log" if self.bot.ch(guild, "treasury_log") else "hrlog"
+        c = self.bot.ch(guild, key)
+        if not c:
+            self.bot.db.q("UPDATE treasury_pending SET status='fail' WHERE id=?", pid)
+            return "❌ Операцию «себе» должен подтвердить другой человек из казны, а канала казны нет — /настройка."
+        v = discord.ui.View(timeout=None)
+        v.add_item(SecondConfirm("ok", pid))
+        v.add_item(SecondConfirm("no", pid))
+        who = " ".join(r.mention for r in (self.bot.role(guild, k) for k in ("leader", "deputy", "treasurer")) if r)
+        e = self.bot.embed(f"🔐 Нужно второе подтверждение №{pid}",
+                           f"{actor.mention} проводит операцию **себе**:\n{summary}\n\n"
+                           "Подтвердить может любой другой человек с доступом к казне. Ждёт 2 суток.",
+                           0xFB8C00, guild)
+        try:
+            await c.send(content=who or None, embed=e, view=v, allowed_mentions=discord.AllowedMentions(roles=True))
+        except discord.HTTPException:
+            return "❌ Не смог отправить операцию на подтверждение — проверь права бота в канале казны."
+        return f"🔐 Это операция себе — ушла на подтверждение другому человеку из казны (№{pid}, канал {c.mention})."
+
+    async def decide_pending(self, inter, pid, ok):
+        g, db = inter.guild, self.bot.db
+        r = db.one("SELECT * FROM treasury_pending WHERE guild_id=? AND id=?", g.id, pid) if g else None
+        if not r or r["status"] != "wait":
+            return await inter.response.send_message("Уже решено.", ephemeral=True)
+        if int(now().timestamp()) - r["ts"] > PENDING_TTL:
+            db.q("UPDATE treasury_pending SET status='expired' WHERE id=?", pid)
+            return await inter.response.edit_message(content="⌛ Не подтвердили за 2 суток — отменено.", view=None)
+        if not self.allowed(inter.user):
+            return await inter.response.send_message("⛔ Подтверждает человек с доступом к казне.", ephemeral=True)
+        if ok and inter.user.id == r["actor_id"]:
+            return await inter.response.send_message("⛔ Себе подтвердить нельзя — нужен другой человек из казны. "
+                                                     "Отклонить свою операцию можно.", ephemeral=True)
+        if not ok:
+            db.q("UPDATE treasury_pending SET status='no' WHERE id=?", pid)
+            return await inter.response.edit_message(content=f"✖️ Отклонено ({inter.user.mention}). Казна не тронута.",
+                                                     view=None)
+        db.q("UPDATE treasury_pending SET status='ok' WHERE id=?", pid)
+        await inter.response.edit_message(content=f"✅ Подтвердил {inter.user.mention} — провожу…", view=None)
+        actor = g.get_member(r["actor_id"]) or inter.user
+        p = json.loads(r["payload"] or "{}")
+        try:
+            if r["kind"] == "payout":
+                pairs = [(g.get_member(uid), a) for uid, a in p.get("pairs", [])]
+                text = await self.payout(g, actor, pairs, f"{p.get('reason', 'выплата')} (подтвердил {inter.user.display_name})",
+                                         p.get("ranks", False), confirmed=True, after=p.get("after"))
+            elif r["kind"] == "fine_paid":
+                m = g.get_member(p.get("uid", 0))
+                text = await self.fine_paid(g, inter.user, m, p.get("fid"), confirmed=True) if m else "Человек ушёл."
+            else:
+                text = await self.fine_cancel(g, inter.user, p.get("fid"), confirmed=True)
+        except Exception as e:
+            log.exception("Казна: подтверждённая операция №%s", pid)
+            text = f"❌ Не получилось: {str(e)[:150]}"
+        await inter.followup.send(text[:1900])
+
+    async def payout(self, guild, actor, pairs, reason, ranks=False, confirmed=False, after=None):
+        """Выплаты из казны: каждому — расход с пометкой «зарплата», уведомление в ЛС, одна запись в журнал.
+        Если среди получателей сам проводящий — сначала второе подтверждение (confirmed=True — уже подтверждено)."""
         reason = clean(reason, 120) or "зарплата"
         pairs = [(m, int(a)) for m, a in pairs if m and a and a > 0]
         if not pairs:
             return "❌ Некому платить: никого не нашёл или ставки не заданы."
+        if not confirmed and any(m.id == actor.id for m, _ in pairs):
+            return await self.second_confirm(guild, actor, "payout",
+                                             {"pairs": [[m.id, a] for m, a in pairs], "reason": reason, "ranks": ranks,
+                                              "after": after or {}},
+                                             self.pay_preview(guild, pairs, reason))
         for m, a in pairs:
             await self.tx(guild, "out", a, actor, m.id, f"зарплата: {reason}", quiet=True)
         total = sum(a for _, a in pairs)
         if ranks:
             self.bot.db.gset(guild, "salary:last", int(now().timestamp()))
+        for k, v in (after or {}).items():  # отметки «оплачено до» и т.п. — только когда деньги реально ушли
+            self.bot.db.gset(guild, k, v)
         fam = self.bot.family(guild)["name"]
         for m, a in pairs:
             await safe_dm(m, f"💸 Тебе выплата из казны семьи {fam}: **{fmt(a)}** — {reason}.")
@@ -427,7 +484,11 @@ class Treasury(commands.Cog):
         log.info("Казна «%s»: штраф %s %s (%s)", guild.name, member, amount, actor)
         return f"🧾 Штраф №{fid} {member.display_name}: **{fmt(amount)}** — {reason}. Неоплачено у него: {fmt(total)}."
 
-    async def fine_paid(self, guild, actor, member, fid=None):
+    async def fine_paid(self, guild, actor, member, fid=None, confirmed=False):
+        if not confirmed and member.id == actor.id:  # свой штраф «оплачен» — только чужими руками
+            return await self.second_confirm(guild, actor, "fine_paid", {"uid": member.id, "fid": fid},
+                                             f"отметить свои штрафы оплаченными{f' (№{fid})' if fid else ''}: "
+                                             f"{fmt(sum(int(r['amount']) for r in self.unpaid(guild, member.id)))}")
         rows = self.unpaid(guild, member.id)
         if fid:
             rows = [r for r in rows if r["id"] == int(fid)]
@@ -443,10 +504,13 @@ class Treasury(commands.Cog):
                                   f"Отметил: {actor.mention} · баланс: **{fmt(self.balance(guild.id))}**", config.GREEN)
         return f"✅ {member.display_name} оплатил {nums} — **{fmt(total)}** ушло в казну."
 
-    async def fine_cancel(self, guild, actor, fid):
+    async def fine_cancel(self, guild, actor, fid, confirmed=False):
         r = self.bot.db.one("SELECT * FROM fines WHERE guild_id=? AND id=? AND paid=0", guild.id, int(fid))
         if not r:
             return f"❌ Неоплаченного штрафа №{fid} нет."
+        if not confirmed and r["user_id"] == actor.id:  # свой штраф отменить — только чужими руками
+            return await self.second_confirm(guild, actor, "fine_cancel", {"fid": int(fid)},
+                                             f"отменить свой штраф №{fid} на {fmt(r['amount'])} — {r['reason']}")
         self.bot.db.q("UPDATE fines SET paid=-1, paid_ts=? WHERE id=?", int(now().timestamp()), r["id"])
         await self.journal(guild, f"↩️ Штраф №{r['id']} (<@{r['user_id']}>, {fmt(r['amount'])}) отменён — "
                                   f"{actor.mention}")
@@ -833,4 +897,5 @@ class Treasury(commands.Cog):
 
 
 async def setup(bot):
+    bot.add_dynamic_items(SecondConfirm)
     await bot.add_cog(Treasury(bot))

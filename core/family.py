@@ -68,6 +68,65 @@ MODULES = {
         "watchdog": "Сторож: ЛС Главе, если ИИ/голос/связь лежат дольше 10 минут",
     }),
 }
+# Числа семьи (/настройки → «🔢 Числа»): ключ set:<имя> в guild_settings → (подпись, по умолчанию, мин, макс).
+# Раньше это были переменные окружения хоста — одни на все семьи, и семья не могла их поменять без кода.
+NUMBERS = {
+    "warn_limit": ("Выговоров до разбора исключения", 3, 1, 10),
+    "warn_days": ("Выговор сгорает через, дней (0 — никогда)", config.WARN_DAYS, 0, 365),
+    "digest_days": ("Сводка Главе раз в, дней (0 — выкл)", config.DIGEST_DAYS, 0, 30),
+    "market_days": ("Объявление на рынке живёт, дней", config.MARKET_DAYS, 1, 60),
+    "probation_days": ("Испытательный срок, дней", config.MENTOR_DAYS, 1, 60),
+    "exam_questions": ("Вопросов в экзамене", config.EXAM_QUESTIONS, 3, 30),
+    "exam_pass": ("Нужно верных ответов", config.EXAM_PASS, 1, 30),
+    "exam_time": ("Время на экзамен, минут", config.EXAM_TIME_MIN, 3, 60),
+    "exam_retry": ("Пересдача через, минут", config.EXAM_RETRY_MIN, 0, 10080),
+}
+NUMBER_GROUPS = {"discipline": ("⚖️ Дисциплина и сроки", ["warn_limit", "warn_days", "probation_days", "digest_days",
+                                                          "market_days"]),
+                 "exam": ("🧠 Экзамен", ["exam_questions", "exam_pass", "exam_time", "exam_retry"])}
+# Тексты семьи (/настройки → «📜 Тексты»): ключ text:<имя>. Пусто — текст по умолчанию из config (под семью).
+TEXTS = {
+    "rules": ("📜 Правила семьи", "Текст правил: канал правил и база ИИ-юриста"),
+    "welcome": ("🏛 О семье", "Текст канала «о семье»: кто мы и как вступить"),
+    "checklist": ("🎓 Чек-лист наставника", "Пункты испытательного срока — по одному в строке (до 20)"),
+    "situational": ("💬 Вопросы анкеты", "Вопросы о себе — по одному в строке: «Вопрос | подсказка» (из них берутся 2)"),
+}
+
+
+def number(db, gid, key):
+    """Число семьи из /настройки (или значение по умолчанию), с ограничением диапазона."""
+    _, default, lo, hi = NUMBERS[key]
+    raw = db.gget(gid, f"set:{key}") if gid else None
+    if raw is None and key == "probation_days" and gid:
+        raw = db.gget(gid, "probation:days")  # старый ключ (/наставник срок)
+    try:
+        return max(lo, min(hi, int(raw))) if raw not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
+def text(db, gid, key):
+    """Текст семьи (или None — тогда берётся текст по умолчанию)."""
+    v = db.gget(gid, f"text:{key}") if gid else None
+    return v if v and v.strip() else None
+
+
+def checklist(db, gid):
+    t = text(db, gid, "checklist")
+    items = [ln.strip(" •-–\t") for ln in t.splitlines() if ln.strip(" •-–\t")] if t else []
+    return items[:20] or list(config.MENTOR_CHECKLIST)
+
+
+def situational(db, gid):
+    t = text(db, gid, "situational")
+    out = []
+    for ln in (t.splitlines() if t else []):
+        q, _, hint = ln.strip(" •-–\t").partition("|")
+        if q.strip():
+            out.append((q.strip()[:45], (hint.strip() or "Ответь честно и развёрнуто")[:100]))
+    return out if len(out) >= 2 else list(config.SITUATIONAL)
+
+
 DEFAULT_OFF = {"hr:auto", "hr:nick", "auto:relay"}  # "модуль" или "модуль:действие", которые по умолчанию выключены
 
 # старые ключи feat:* (до дерева) → новое место; старые значения читаются, если новое не задано

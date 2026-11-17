@@ -13,7 +13,7 @@ from discord.ext import commands
 
 from core import config
 from core.ai import AI, NAMES
-from core.family import MODULES, action_on, module_on, set_action, set_module
+from core.family import MODULES, NUMBER_GROUPS, NUMBERS, TEXTS, action_on, module_on, set_action, set_module
 
 log = logging.getLogger("family-bot.control")
 PROVIDERS = {"groq": "Groq — console.groq.com → API Keys", "gemini": "Gemini — aistudio.google.com → Get API key"}
@@ -123,6 +123,122 @@ class ActionSelect(discord.ui.Select):
                                           view=ModulesView(self.bot, inter.guild, self.mod, self.view.back))
 
 
+# ─────────────── числа и тексты семьи (/настройки → «🔢 Числа», «📜 Тексты») ───────────────
+async def refresh_after_settings(bot, guild):
+    """Поменяли тексты или числа — обновить то, что их показывает: правила, «о семье», панель заявок, базу юриста."""
+    bot.kb.invalidate()
+    ss, apps = bot.get_cog("ServerSetup"), bot.get_cog("Applications")
+    try:
+        if ss:
+            await ss.refresh_texts(guild)
+        if apps:
+            await apps.post_panels(guild, True)
+    except Exception:
+        log.exception("Обновление панелей после настроек «%s»", guild.name)
+
+
+class NumbersModal(discord.ui.Modal):
+    def __init__(self, bot, guild, group):
+        title, keys = NUMBER_GROUPS[group]
+        super().__init__(title=title[:45])
+        self.bot, self.keys, self.inputs = bot, keys, {}
+        for k in keys:
+            label, default, lo, hi = NUMBERS[k]
+            ti = discord.ui.TextInput(label=label[:45], default=str(bot.num(guild, k)), max_length=6,
+                                      placeholder=f"{lo}–{hi}, по умолчанию {default}")
+            self.inputs[k] = ti
+            self.add_item(ti)
+
+    async def on_submit(self, inter: discord.Interaction):
+        if not allowed(self.bot, inter):
+            return await inter.response.send_message("⛔ Только для Главы, заместителя или владельца.", ephemeral=True)
+        out, bad = [], []
+        for k, ti in self.inputs.items():
+            label, _, lo, hi = NUMBERS[k]
+            try:
+                v = int(str(ti.value).strip())
+            except ValueError:
+                bad.append(label)
+                continue
+            v = max(lo, min(hi, v))
+            self.bot.db.gset(inter.guild, f"set:{k}", v)
+            if k == "probation_days":
+                self.bot.db.gset(inter.guild, "probation:days", v)  # старый ключ /наставник срок — в ногу
+            out.append(f"• {label}: **{v}**")
+        if self.bot.num(inter.guild, "exam_pass") > self.bot.num(inter.guild, "exam_questions"):
+            out.append("⚠️ Верных ответов нужно больше, чем вопросов — бот будет требовать все вопросы.")
+        await inter.response.send_message("✅ Сохранено:\n" + "\n".join(out) +
+                                          (f"\n❌ Не число: {', '.join(bad)}" if bad else ""), ephemeral=True)
+        log.warning("Настройки «%s»: числа %s (%s)", inter.guild.name, [k for k in self.inputs], inter.user)
+        await refresh_after_settings(self.bot, inter.guild)
+
+
+def text_default(bot, guild, key):
+    """Текущий текст семьи для правки (свой или стандартный)."""
+    if key == "rules":
+        return bot.rules_text(guild)
+    if key == "welcome":
+        return bot.welcome_text(guild)
+    if key == "checklist":
+        return "\n".join(bot.checklist(guild))
+    return "\n".join(f"{q} | {h}" for q, h in bot.situational(guild))
+
+
+class TextModal(discord.ui.Modal):
+    def __init__(self, bot, guild, key):
+        title, hint = TEXTS[key]
+        super().__init__(title=title[:45])
+        self.bot, self.key = bot, key
+        self.body = discord.ui.TextInput(label=hint[:45], style=discord.TextStyle.paragraph, max_length=4000,
+                                         default=text_default(bot, guild, key)[:4000], required=False,
+                                         placeholder="Пусто — вернуть стандартный текст")
+        self.add_item(self.body)
+
+    async def on_submit(self, inter: discord.Interaction):
+        if not allowed(self.bot, inter):
+            return await inter.response.send_message("⛔ Только для Главы, заместителя или владельца.", ephemeral=True)
+        val = str(self.body.value or "").strip()
+        title = TEXTS[self.key][0]
+        if self.key == "situational" and val and len([ln for ln in val.splitlines() if ln.strip()]) < 2:
+            return await inter.response.send_message("❌ Нужно хотя бы 2 вопроса — по одному в строке.", ephemeral=True)
+        if val:
+            self.bot.db.gset(inter.guild, f"text:{self.key}", val)
+        else:
+            self.bot.db.gdel(inter.guild, f"text:{self.key}")
+        await inter.response.send_message(f"✅ {title}: {'сохранено' if val else 'вернул стандартный'}. "
+                                          "Панели и база юриста обновятся сами.", ephemeral=True)
+        log.warning("Настройки «%s»: текст %s (%s)", inter.guild.name, self.key, inter.user)
+        await refresh_after_settings(self.bot, inter.guild)
+
+
+class SettingPick(discord.ui.Select):
+    """Выбор: какую группу чисел или какой текст править."""
+
+    def __init__(self, bot, kind):
+        self.bot, self.kind = bot, kind
+        if kind == "num":
+            opts = [discord.SelectOption(label=t[:100], value=g, description=", ".join(NUMBERS[k][0] for k in ks)[:100])
+                    for g, (t, ks) in NUMBER_GROUPS.items()]
+        else:
+            opts = [discord.SelectOption(label=t[:100], value=k, description=h[:100]) for k, (t, h) in TEXTS.items()]
+        super().__init__(placeholder="Что настроить?", options=opts)
+
+    async def callback(self, inter: discord.Interaction):
+        if not allowed(self.bot, inter):
+            return await inter.response.send_message("⛔ Только для Главы, заместителя или владельца.", ephemeral=True)
+        v = self.values[0]
+        modal = NumbersModal(self.bot, inter.guild, v) if self.kind == "num" else TextModal(self.bot, inter.guild, v)
+        await inter.response.send_modal(modal)
+
+
+def numbers_text(bot, guild):
+    lines = ["**🔢 Числа семьи** — выбери группу, откроется окно с текущими значениями:"]
+    for g, (t, keys) in NUMBER_GROUPS.items():
+        lines.append(f"\n{t}")
+        lines += [f"• {NUMBERS[k][0]}: **{bot.num(guild, k)}**" for k in keys]
+    return "\n".join(lines)
+
+
 class ModulesView(discord.ui.View):
     """mod=None — список модулей; mod — один модуль: рубильник + действия. back — колбэк «назад в мастер» (или None)."""
 
@@ -131,6 +247,10 @@ class ModulesView(discord.ui.View):
         self.bot, self.mod, self.back = bot, mod, back
         if mod is None:
             self.add_item(ModulePick(bot, guild))
+            for label, emoji, kind in (("Числа", "🔢", "num"), ("Тексты", "📜", "text")):
+                b = discord.ui.Button(label=label, emoji=emoji, style=discord.ButtonStyle.primary, row=4)
+                b.callback = self._settings(kind)
+                self.add_item(b)
             if back:
                 b = discord.ui.Button(label="Назад в мастер", emoji="↩️", style=discord.ButtonStyle.secondary, row=4)
                 b.callback = back
@@ -146,6 +266,20 @@ class ModulesView(discord.ui.View):
         up.callback = self._up
         self.add_item(tg)
         self.add_item(up)
+
+    def _settings(self, kind):
+        async def cb(inter: discord.Interaction):
+            if not allowed(self.bot, inter):
+                return await inter.response.send_message("⛔ Только для Главы, заместителя или владельца.",
+                                                         ephemeral=True)
+            v = discord.ui.View(timeout=600)
+            v.add_item(SettingPick(self.bot, kind))
+            text = numbers_text(self.bot, inter.guild) if kind == "num" else (
+                "**📜 Тексты семьи** — выбери, откроется окно с текущим текстом. Очистить поле — вернуть стандартный.\n"
+                + "\n".join(f"• {t} — {'свой' if self.bot.db.gget(inter.guild, f'text:{k}') else 'стандартный'}"
+                            for k, (t, _) in TEXTS.items()))
+            await inter.response.send_message(text, view=v, ephemeral=True)
+        return cb
 
     async def _toggle(self, inter: discord.Interaction):
         if not allowed(self.bot, inter):

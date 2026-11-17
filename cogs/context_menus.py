@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Команды через правый клик: по участнику (паспорт, досье, управление, выговор) и по сообщению
+"""Команды через правый клик: по участнику («👤 Карточка» — профиль / досье с действиями, выговор) и по сообщению
 (пожаловаться, спросить юриста, в летопись)."""
 import datetime as dt
 import json
@@ -65,8 +65,10 @@ ACTIONS = [
     ("unmute", "Снять мут", "🔊", STAFF),
     ("warn", "Выговор…", "⚖️", STAFF),
     ("blacklist", "В чёрный список…", "⛔", STAFF),
+    ("fine", "Штраф…", "🧾", config.TREASURY + ["hr_head"]),
     ("expel", "Исключить из семьи…", "🚪", CHIEFS),
 ]
+DOSSIER = config.HR + config.MENTORS + config.DIPLO + config.TREASURY  # кто видит досье в «👤 Карточке»
 
 
 class ManageSelect(discord.ui.Select):
@@ -84,9 +86,9 @@ class ContextMenus(commands.Cog):
         self.menus = []
         self.reported = {}  # (guild, user) -> когда последний раз жаловался
         spec = [
-            ("🪪 Паспорт", self.m_passport, None, discord.Member),
-            ("📋 Досье", self.m_dossier, perms(move_members=True), discord.Member),
-            ("🛠 Управление", self.m_manage, perms(move_members=True), discord.Member),
+            # одна карточка вместо «Паспорт» + «Досье» + «Управление»: рядовому — профиль,
+            # должностным — досье, а у кого есть права — ещё и действия под ним
+            ("👤 Карточка", self.m_card, None, discord.Member),
             ("⚖️ Выговор", self.m_warn, perms(moderate_members=True), discord.Member),
             ("🛡 Пожаловаться", self.m_report, None, discord.Message),
             ("⚖️ Спросить юриста", self.m_lawyer, None, discord.Message),
@@ -107,14 +109,19 @@ class ContextMenus(commands.Cog):
             self.bot.tree.remove_command(m.name, type=m.type)
 
     # ---------- по участнику ----------
-    async def m_passport(self, inter: discord.Interaction, member: discord.Member):
-        act = self.bot.get_cog("Activity")
-        await act.profile.callback(act, inter, member)
+    async def m_card(self, inter: discord.Interaction, member: discord.Member):
+        bot = self.bot
+        if not bot.has(inter.user, DOSSIER):  # рядовым — обычная карточка участника
+            act = bot.get_cog("Activity")
+            if not act:
+                return await inter.response.send_message("Модуль активности не загружен.", ephemeral=True)
+            return await inter.response.send_message(embed=act.profile_embed(member), ephemeral=True)
+        view = self.manage_view(inter, member)
+        await inter.response.send_message(embed=self.dossier_embed(inter, member), view=view or discord.utils.MISSING,
+                                          ephemeral=True)
 
-    async def m_dossier(self, inter: discord.Interaction, member: discord.Member):
+    def dossier_embed(self, inter, member):
         bot, db = self.bot, self.bot.db
-        if not bot.has(inter.user, config.HR + config.MENTORS + config.DIPLO):
-            return await inter.response.send_message("⛔ Досье видит только состав с должностью.", ephemeral=True)
         gid = inter.guild.id
         apps = db.all("SELECT * FROM applications WHERE guild_id=? AND user_id=? ORDER BY id DESC", gid, member.id)
         last = apps[0] if apps else None
@@ -138,8 +145,8 @@ class ContextMenus(commands.Cog):
         if ms:
             done = sum(1 for x in json.loads(ms["checklist"] or "[]") if x)
             e.add_field(name="Наставничество", value=f"<@{ms['mentor_id']}> · {ms['status']} · чек-лист {done}/"
-                                                    f"{len(config.MENTOR_CHECKLIST)}", inline=False)
-        e.add_field(name=f"⚖️ Выговоры ({len(warns)}/3)",
+                                                    f"{len(bot.checklist(inter.guild))}", inline=False)
+        e.add_field(name=f"⚖️ Выговоры ({len(warns)}/{bot.num(inter.guild, 'warn_limit')})",
                     value="\n".join(f"№{w['id']} · {w['created_at'][:10]} · {w['reason'][:60]}" for w in warns[:3]) or "нет",
                     inline=False)
         if a:
@@ -150,22 +157,25 @@ class ContextMenus(commands.Cog):
             e.add_field(name="🌙 Отпуск", value=f"до {discord.utils.format_dt(parse_dt(vac['until']), 'D')}: {vac['reason']}",
                         inline=False)
         e.add_field(name="⛔ Чёрный список", value=f"**ДА** — №{bl['id']}: {bl['reason']}" if bl else "чисто", inline=False)
-        await inter.response.send_message(embed=e, ephemeral=True)
+        tr = bot.get_cog("Treasury")
+        if tr and bot.feature(inter.guild, "treasury:fines"):
+            fines = tr.unpaid(inter.guild, member.id)
+            if fines:
+                e.add_field(name="🧾 Неоплаченные штрафы",
+                            value=", ".join(f"№{f['id']} {f['amount']:,}".replace(",", " ") for f in fines[:5]), inline=False)
+        return e
 
-    async def m_manage(self, inter: discord.Interaction, member: discord.Member):
-        if member.bot:
-            return await inter.response.send_message("Это бот.", ephemeral=True)
+    def manage_view(self, inter, member):
+        """Меню действий под карточкой (или None, если прав ни на что нет / это бот / это сам человек)."""
+        if member.bot or member.id == inter.user.id:  # себе — ничего: ни ранг, ни мут, ни штраф
+            return None
         allowed = [(k, label, emoji) for k, label, emoji, who in ACTIONS if self.bot.has(inter.user, who)]
-        if member.id == inter.user.id:
-            allowed = []  # себе — ничего: ни ранг, ни мут, ни наставника
         if not allowed:
-            return await inter.response.send_message("⛔ Нет доступных действий.", ephemeral=True)
+            return None
         opts = [discord.SelectOption(label=label, value=k, emoji=emoji) for k, label, emoji in allowed][:25]
         v = discord.ui.View(timeout=300)
         v.add_item(ManageSelect(self, member, opts))
-        e = self.bot.embed(f"🛠 Управление: {member.display_name}", f"Сейчас: **{self.bot.rank_name(member)}**",
-                           config.COLOR, inter.guild)
-        await inter.response.send_message(embed=e, view=v, ephemeral=True)
+        return v
 
     async def do_action(self, inter: discord.Interaction, target: discord.Member, key: str):
         bot, g = self.bot, inter.guild
@@ -227,7 +237,7 @@ class ContextMenus(commands.Cog):
             async def done(i, reason):
                 await i.response.defer(ephemeral=True)
                 n = await bot.give_warn(g, target, i.user, reason)
-                await i.followup.send(f"✅ Выговор ({n}/3).", ephemeral=True)
+                await i.followup.send(f"✅ Выговор ({n}/{bot.num(g, 'warn_limit')}).", ephemeral=True)
             return await inter.response.send_modal(ReasonModal(f"Выговор: {target.display_name}", done))
         if kind == "blacklist":
             async def done(i, reason):
@@ -245,6 +255,22 @@ class ContextMenus(commands.Cog):
                                                                             f"{i.user.mention}", 0x212121, g))
                 await i.followup.send("✅ Внесён в ЧС.", ephemeral=True)
             return await inter.response.send_modal(ReasonModal(f"ЧС: {target.display_name}", done))
+        if kind == "fine":
+            tr = bot.get_cog("Treasury")
+            if not tr:
+                return await inter.response.send_message("Казна не загружена.", ephemeral=True)
+
+            async def done(i, text):
+                amount, _, reason = str(text).strip().partition(" ")
+                from cogs.treasury import parse_amount
+                n = parse_amount(amount)
+                if not n:
+                    return await i.response.send_message("❌ Начни с суммы: «30к опоздал на сбор».", ephemeral=True)
+                await i.response.defer(ephemeral=True)
+                why = tr.why_not(i.guild, i.user, "fines", config.TREASURY + ["hr_head"])
+                await i.followup.send(why or await tr.fine(i.guild, i.user, target, n, reason or "без причины"),
+                                      ephemeral=True)
+            return await inter.response.send_modal(ReasonModal(f"Штраф: {target.display_name} (сумма и за что)", done))
         if kind == "expel":
             async def done(i, reason):
                 await i.response.defer(ephemeral=True)
@@ -262,7 +288,7 @@ class ContextMenus(commands.Cog):
         async def done(i, reason):
             await i.response.defer(ephemeral=True)
             n = await self.bot.give_warn(i.guild, member, i.user, reason)
-            await i.followup.send(f"✅ Выговор {member.mention} ({n}/3).", ephemeral=True)
+            await i.followup.send(f"✅ Выговор {member.mention} ({n}/{self.bot.num(i.guild, 'warn_limit')}).", ephemeral=True)
         await inter.response.send_modal(ReasonModal(f"Выговор: {member.display_name}", done))
 
     # ---------- по сообщению ----------

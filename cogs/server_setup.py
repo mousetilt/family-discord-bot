@@ -585,16 +585,35 @@ class ServerSetup(commands.Cog):
         await inter.response.send_message(embed=wizard_embed(self.bot, inter.guild), view=WizardView(self),
                                           ephemeral=True)
 
+    async def refresh_texts(self, guild):
+        """Правила и «о семье» поменяли в /настройки — правим закреплённые сообщения на месте (картинки остаются)."""
+        bot = self.bot
+        for key, title, body, color in (("rules", f"📜 Правила семьи {config.FAMILY}", bot.rules_text(guild), config.COLOR),
+                                        ("welcome", f"🏛 Семья {config.FAMILY}", bot.welcome_text(guild), config.GOLD)):
+            c, mid = bot.ch(guild, key), bot.db.gget(guild, f"panel:{key}")
+            if not c or not mid:
+                continue
+            try:
+                msg = await c.fetch_message(int(mid))
+                e = bot.embed(title, body[:4000], color, guild)
+                if msg.embeds and msg.embeds[0].image:
+                    e.set_image(url=msg.embeds[0].image.url)
+                if msg.embeds and msg.embeds[0].thumbnail:
+                    e.set_thumbnail(url=msg.embeds[0].thumbnail.url)
+                await msg.edit(embed=e)
+            except (discord.HTTPException, ValueError):
+                pass
+
     async def post_panels(self, guild, repost):
         bot = self.bot
 
         async def rules():
-            e = bot.embed(f"📜 Правила семьи {config.FAMILY}", config.RULES_TEXT, config.COLOR, guild)
+            e = bot.embed(f"📜 Правила семьи {config.FAMILY}", bot.rules_text(guild)[:4000], config.COLOR, guild)
             e.set_image(url="attachment://banner.png")
             return {"embed": e, "file": discord.File(config.ASSETS / "banner.png", filename="banner.png")}
 
         async def welcome():
-            e = bot.embed(f"🏛 Семья {config.FAMILY}", config.WELCOME_TEXT, config.GOLD, guild)
+            e = bot.embed(f"🏛 Семья {config.FAMILY}", bot.welcome_text(guild)[:4000], config.GOLD, guild)
             e.set_thumbnail(url="attachment://emblem.png")
             return {"embed": e, "file": discord.File(config.ASSETS / "emblem.png", filename="emblem.png")}
 

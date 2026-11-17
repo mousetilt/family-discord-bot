@@ -3,7 +3,6 @@
 import asyncio
 import datetime as dt
 import json
-import re
 
 import discord
 from discord import app_commands
@@ -11,43 +10,17 @@ from discord.ext import commands, tasks
 
 from core import config
 from core.botcore import guarded, now, now_iso, staff_only
+from core.parse import parse_when as _parse_when
 
 REMIND_BEFORE = 15 * 60   # за сколько до начала пинговать тех, кто отметился «Иду»
 CHECK_AFTER = 10 * 60     # через сколько после начала отмечать, кто реально пришёл в войс
 
 
 def parse_when(text, base=None):
-    """«сегодня 20:00», «завтра в 19.30», «15.11 21:00», «через 40 минут» → время начала (UTC) или None.
-    Время считаем по часовому поясу семьи (config.GATHER_UTC_OFFSET, по умолчанию Москва)."""
-    tz = dt.timezone(dt.timedelta(hours=config.GATHER_UTC_OFFSET))
-    base = (base or now()).astimezone(tz)
-    s = (text or "").lower().replace("ё", "е")
-    m = re.search(r"через\s+(\d{1,3})?\s*(мин|час)", s)
-    if m:
-        n = int(m.group(1) or 1)
-        return (base + (dt.timedelta(minutes=n) if m.group(2) == "мин" else dt.timedelta(hours=n))).astimezone(dt.timezone.utc)
-    t = re.search(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)", s)
-    date = re.search(r"(?<!\d)(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?(?!\d)", s if t else "")
-    if not t:
-        t = re.search(r"(?<!\d)([01]?\d|2[0-3])\.([0-5]\d)(?!\d)", s)
-    if not t:
-        return None
-    when = base.replace(hour=int(t.group(1)), minute=int(t.group(2)), second=0, microsecond=0)
-    try:
-        if date:
-            y = int(date.group(3) or base.year)
-            when = when.replace(year=y + 2000 if y < 100 else y, month=int(date.group(2)), day=int(date.group(1)))
-        elif "послезавтра" in s:
-            when += dt.timedelta(days=2)
-        elif "завтра" in s:
-            when += dt.timedelta(days=1)
-        elif when < base - dt.timedelta(minutes=5) and "сегодня" not in s:
-            when += dt.timedelta(days=1)  # «в 02:00» поздним вечером — это уже завтра
-    except ValueError:
-        return None
-    if when < base - dt.timedelta(minutes=5) or when > base + dt.timedelta(days=30):
-        return None
-    return when.astimezone(dt.timezone.utc)
+    """Время сбора по часовому поясу семьи → datetime (UTC) или None. Общий разборщик (core/parse.py):
+    до 30 дней вперёд, начавшийся 5 минут назад сбор — ещё «сейчас»."""
+    return _parse_when(text, base, max_days=30, grace_min=5)
+
 
 RSVP = {"yes": ("Иду", "✅", discord.ButtonStyle.success),
         "maybe": ("Возможно", "🤔", discord.ButtonStyle.secondary),

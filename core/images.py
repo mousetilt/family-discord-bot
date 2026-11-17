@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Красивые карточки: приветствие, «новый член семьи», семейный паспорт."""
+"""Красивые карточки: приветствие, «новый член семьи», визитка семьи."""
 import io
 from functools import lru_cache
 
@@ -20,15 +20,6 @@ def font(name, size):
         except OSError:
             continue
     return ImageFont.load_default()
-
-
-def mono(size):
-    for path in ("DejaVuSansMono.ttf", "consola.ttf", "cour.ttf"):
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
-            continue
-    return font("Montserrat-Medium.ttf", size)
 
 
 def _gradient(w, h, stops=GOLD_STOPS):
@@ -162,51 +153,6 @@ def welcome_card(avatar_bytes, title, name, subtitle):
     for i, ln in enumerate(wrap(subtitle, f_sub, maxw, 2)):
         draw_text(bg, (x, 256 + i * 36), ln, f_sub, fill=CREAM)
     return _png(bg)
-
-
-def passport_card(avatar_bytes, d):
-    """d: nick, discord, static, rank, joined, mentor, voice, messages, warns, number, plaque, mrz_name"""
-    bg = Image.open(config.ASSETS / "passport_bg.png").convert("RGBA")
-    av = rounded(load_avatar(avatar_bytes, 246), 17)
-    bg.alpha_composite(av, (47, 153))
-    f_pl = fit_font(d.get("plaque", ""), "Montserrat-Bold.ttf", 230, 20, 12, spacing=2)
-    draw_text(bg, (170, 428), d.get("plaque", "").upper(), f_pl, spacing=2, gold=True, anchor_center=True)
-
-    lab = font("Montserrat-Bold.ttf", 15)
-    x1, x2 = 334, 660
-    draw_text(bg, (x1, 146), "ИГРОВОЙ НИК", lab, fill=(168, 25, 46), spacing=3, shadow=False)
-    draw_text(bg, (x1, 166), d.get("nick", "—"), fit_font(d.get("nick", "—"), "Montserrat-ExtraBold.ttf", 620, 40, 22))
-
-    rows = [
-        [("DISCORD", d.get("discord", "—")), ("STATIC ID", d.get("static", "—"))],
-        [("РАНГ", d.get("rank", "—")), ("В СЕМЬЕ С", d.get("joined", "—"))],
-        [("НАСТАВНИК", d.get("mentor", "—")), ("В ГОЛОСОВЫХ", d.get("voice", "—"))],
-        [("СООБЩЕНИЙ", d.get("messages", "—")), ("ВЫГОВОРЫ", d.get("warns", "—"))],
-    ]
-    y = 236
-    for row in rows:
-        for (label, value), x in zip(row, (x1, x2)):
-            draw_text(bg, (x, y), label, lab, fill=(168, 25, 46), spacing=3, shadow=False)
-            v = str(value)
-            draw_text(bg, (x, y + 20), v, fit_font(v, "Montserrat-Bold.ttf", 300, 26, 14))
-        y += 72
-    f_m = mono(22)
-    name = (d.get("mrz_name") or "FAMILY").upper()
-    l1 = f"P<{translit(d.get('family') or config.FAMILY).upper()}<<{name}".replace(" ", "<").replace("_", "<")
-    l2 = f"{str(d.get('static', '0')).rjust(9, '0')}<{d.get('number', '0')}<RUS<ONLINE<{d.get('rank_code', 'X')}"
-    for i, ln in enumerate((l1, l2)):
-        ln = (ln + "<" * 44)[:44]
-        draw_text(bg, (40, 552 + i * 30), ln, f_m, fill=(200, 192, 180), shadow=False)
-    return _png(bg)
-
-
-TR = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
-              ["a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p", "r", "s", "t", "u",
-               "f", "kh", "ts", "ch", "sh", "shch", "", "y", "", "e", "yu", "ya"]))
-
-
-def translit(s):
-    return "".join(TR.get(c, TR.get(c.lower(), c).upper() if c.isupper() else c) for c in s)
 
 
 def family_card(d):

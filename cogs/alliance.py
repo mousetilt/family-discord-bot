@@ -819,6 +819,16 @@ class Alliance(commands.Cog):
                 await self.sync_member(m)
         if self.hub():
             await self.build_hub(self.hub())
+        await self.refresh_boards()
+
+    async def refresh_boards(self):
+        """Состав альянса поменялся — обновить доски отношений семей (там раздел «🏰 Альянс»)."""
+        diplo = self.bot.get_cog("Diplomacy")
+        for g in self.bot.home_guilds if diplo else []:
+            try:
+                await diplo.update_board(g)
+            except Exception:
+                log.exception("Доска отношений «%s»", g.name)
 
     async def leave(self, row, why):
         self.bot.db.q("UPDATE alliance_families SET status='left' WHERE guild_id=?", row["guild_id"])
@@ -834,6 +844,7 @@ class Alliance(commands.Cog):
                     await m.remove_roles(r, reason=f"{A}: семья вышла из альянса")
                 except discord.HTTPException:
                     pass
+        await self.refresh_boards()
 
     def charter(self):
         return self.bot.db.get("alliance_charter") or DEFAULT_CHARTER

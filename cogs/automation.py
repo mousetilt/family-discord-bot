@@ -11,7 +11,6 @@
 import datetime as dt
 import json
 import logging
-import re
 import time
 
 import aiohttp
@@ -21,6 +20,7 @@ from discord.ext import commands, tasks
 
 from core import config
 from core.botcore import guarded, staff_only
+from core.parse import parse_when as _parse_when
 
 log = logging.getLogger("family-bot.auto")
 UA = {"User-Agent": "DiscordFamilyBot/1.0 (self-hosted Discord bot; aiohttp)"}  # честно: мы бот
@@ -50,45 +50,10 @@ CREATE TABLE IF NOT EXISTS relay_posts(
 
 # ─────────────────────────────── время «по-человечески» ───────────────────────────────
 def parse_when(text, base=None):
-    """«20:00», «завтра 18:30», «через 2 часа», «25.11 19:00», «в 9» (по Москве) → unix-время в будущем или None."""
-    s = " ".join(str(text or "").lower().replace("ё", "е").split())
-    base = base or dt.datetime.now(MSK)
-    m = re.search(r"через\s+(\d+)?\s*(мин|час|ден|дня|дней|сут)", s)
-    if m:
-        n = int(m.group(1) or 1)
-        unit = {"мин": "minutes", "час": "hours"}.get(m.group(2), "days")
-        t = base + dt.timedelta(**{unit: n})
-    else:
-        tm = re.search(r"(\d{1,2}):(\d{2})", s)
-        date = re.search(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?", s)
-        if date and not tm and not date.group(3):  # «20.30» без другого времени — это время, не дата
-            tm, date = date, None
-        if tm:
-            hh, mm = int(tm.group(1)), int(tm.group(2))
-        else:
-            h = re.search(r"\bв\s+(\d{1,2})\b", s)
-            if not h:
-                return None
-            hh, mm = int(h.group(1)), 0
-        if hh > 23 or mm > 59:
-            return None
-        try:
-            if date:
-                y = date.group(3)
-                y = (int(y) + 2000 if len(y) == 2 else int(y)) if y else base.year
-                t = dt.datetime(y, int(date.group(2)), int(date.group(1)), hh, mm, tzinfo=MSK)
-                if not date.group(3) and t <= base:
-                    t = t.replace(year=t.year + 1)
-            else:
-                day = 2 if "послезавтра" in s else 1 if "завтра" in s else 0
-                t = (base + dt.timedelta(days=day)).replace(hour=hh, minute=mm, second=0, microsecond=0)
-                if day == 0 and t <= base:
-                    t += dt.timedelta(days=1)  # «в 20:00», а уже 21:00 — значит завтра
-        except ValueError:
-            return None
-    if t <= base or t - base > dt.timedelta(days=60):
-        return None
-    return int(t.timestamp())
+    """«20:00», «завтра 18:30», «через 2 часа», «25.11 19:00», «в 9» (по Москве) → unix-время в будущем или None.
+    Общий разборщик (core/parse.py): не дальше 60 дней."""
+    t = _parse_when(text, base, max_days=60, grace_min=0)
+    return int(t.timestamp()) if t and t.timestamp() > dt.datetime.now(dt.timezone.utc).timestamp() else None
 
 
 # ─────────────────────────────── поиск ───────────────────────────────

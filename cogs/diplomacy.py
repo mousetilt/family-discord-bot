@@ -134,6 +134,10 @@ class Diplomacy(commands.Cog):
                 e.add_field(name=f"{emoji} {name} ({len(fams)})",
                             value="\n".join(f"**{r['family']}**{' — ' + r['note'] if r['note'] else ''}"
                                             for r in fams)[:1024], inline=False)
+        allies = self.alliance_families(guild)
+        if allies:  # семьи альянса — союзники автоматически, руками заносить не нужно
+            e.add_field(name=f"🏰 Альянс ({len(allies)})", value=", ".join(f"**{f}**" for f in allies)[:1024],
+                        inline=False)
         treaties = bot.db.all("SELECT * FROM treaties WHERE guild_id=? AND active=1 ORDER BY id DESC LIMIT 10", guild.id)
         if treaties:
             e.add_field(name="📜 Действующие договоры",
@@ -149,7 +153,23 @@ class Diplomacy(commands.Cog):
         except discord.HTTPException:
             pass
 
+    def alliance_families(self, guild):
+        """Семьи альянса (кроме своей), если наша семья в нём."""
+        ally = self.bot.get_cog("Alliance")
+        if not ally or not ally.fam(guild.id) or ally.fam(guild.id)["status"] != "active":
+            return []
+        return [r["family"] for r in ally.active() if r["guild_id"] != guild.id]
+
+    async def family_auto(self, inter: discord.Interaction, current: str):
+        """Подсказки названий семей: доска отношений + альянс — меньше опечаток и дублей."""
+        names = [r["family"] for r in self.bot.db.all("SELECT family FROM relations WHERE guild_id=? ORDER BY family",
+                                                       inter.guild.id)]
+        names += [f for f in self.alliance_families(inter.guild) if f not in names]
+        cur = (current or "").lower()
+        return [app_commands.Choice(name=n[:100], value=n[:100]) for n in names if cur in n.lower()][:25]
+
     @rel.command(name="установить", description="Задать отношения с семьёй (союз, пакт, нейтралитет, война…)")
+    @app_commands.autocomplete(family=family_auto)
     @app_commands.rename(family="семья", status="статус", note="заметка")
     @app_commands.choices(status=STATUS_CHOICES)
     @staff_only(config.DIPLO)
@@ -169,6 +189,7 @@ class Diplomacy(commands.Cog):
         await inter.response.send_message(f"✅ {emoji} {family}: {name}", ephemeral=True)
 
     @rel.command(name="удалить", description="Убрать семью с доски отношений")
+    @app_commands.autocomplete(family=family_auto)
     @app_commands.rename(family="семья")
     @staff_only(config.DIPLO)
     async def rel_del(self, inter: discord.Interaction, family: str):
@@ -251,6 +272,7 @@ class Diplomacy(commands.Cog):
 
     # ---------- договоры ----------
     @treaty.command(name="заключить", description="Заключить договор с семьёй")
+    @app_commands.autocomplete(family=family_auto)
     @app_commands.rename(family="семья", title="название", days="срок_дней")
     @app_commands.describe(days="0 — бессрочно")
     @staff_only(config.DIPLO)

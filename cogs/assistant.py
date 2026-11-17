@@ -777,7 +777,7 @@ class Assistant(commands.Cog):
             wl = "\n".join(f"№{r['id']} · <t:{int(parse_dt(r['created_at']).timestamp())}:d> · {r['reason'][:120]}"
                             for r in rows)
             if t == "warns":
-                return f"**{m.display_name}** — активных выговоров: {len(rows)}/3" + (f"\n{wl}" if wl else "")
+                return f"**{m.display_name}** — активных выговоров: {len(rows)}/{bot.num(g, 'warn_limit')}" + (f"\n{wl}" if wl else "")
             act = bot.get_cog("Activity")
             if act:
                 act.flush(m)
@@ -788,7 +788,7 @@ class Assistant(commands.Cog):
             return (f"**{m.display_name}** — {bot.rank_name(m) or 'не в семье'}\n"
                     f"🎙 В войсе: {fmt_hours(r['voice_seconds']) if r else '0 мин'} (за неделю "
                     f"{fmt_hours(r['week_voice']) if r else '0 мин'}) · 💬 {r['messages'] if r else 0} сообщ.\n"
-                    f"⚖️ Выговоры: {len(rows)}/3 · 📣 Сборы: {came} из {total} · был в сети: {last}")
+                    f"⚖️ Выговоры: {len(rows)}/{bot.num(g, 'warn_limit')} · 📣 Сборы: {came} из {total} · был в сети: {last}")
         if t == "top":
             week = a.get("period") != "all"
             v, mcol = ("week_voice", "week_messages") if week else ("voice_seconds", "messages")
@@ -1176,7 +1176,7 @@ class Assistant(commands.Cog):
                         out.append(f"⛔ {m.display_name} — не ниже тебя по иерархии, не трогаю.")
                     else:
                         n = await bot.give_warn(g, m, me, str(a.get("reason") or "без причины")[:300])
-                        out.append(f"⚖️ Выговор {m.display_name} ({n}/3).")
+                        out.append(f"⚖️ Выговор {m.display_name} ({n}/{bot.num(g, 'warn_limit')}).")
                         tr = bot.get_cog("Treasury")
                         if a.get("fine") and tr:  # выговор + штраф одной фразой
                             out.append(await tr.speech(g, me, {"type": "fine_add", "amount": a.get("fine"),

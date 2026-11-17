@@ -187,7 +187,7 @@ class Staff(commands.Cog):
         if fine and tr:  # выговор + штраф
             extra = "\n" + await tr.speech(inter.guild, inter.user, {"type": "fine_add", "amount": fine,
                                                                       "reason": reason}, member)
-        await inter.followup.send(f"✅ Выговор выдан ({n}/3).{extra}", ephemeral=True)
+        await inter.followup.send(f"✅ Выговор выдан ({n}/{self.bot.num(inter.guild, 'warn_limit')}).{extra}", ephemeral=True)
 
     @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="выговоры", description="Посмотреть выговоры")

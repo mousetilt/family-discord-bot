@@ -12,6 +12,7 @@ from discord.ext import commands
 from . import config
 from .ai import AI
 from .db import DB, gid_of as guild_id_of
+from . import family as family_mod
 from .family import brand as family_brand, feature as family_feature, profile as family_profile
 from .kb import KnowledgeBase
 
@@ -204,6 +205,28 @@ class FamilyBot(commands.Bot):
     def feature(self, guild, key):
         """Включён ли модуль у этой семьи (/настройки)."""
         return guild is None or family_feature(self.db, guild_id_of(guild), key)
+
+    def num(self, guild, key):
+        """Число семьи из /настройки → «🔢 Числа» (core/family.NUMBERS)."""
+        return family_mod.number(self.db, guild_id_of(guild) if guild is not None else self.home_id, key)
+
+    def rules_text(self, guild):
+        """Правила семьи: свои (/настройки → «📜 Тексты») или стандартные — под семью."""
+        own = family_mod.text(self.db, guild_id_of(guild), "rules") if guild is not None else None
+        if own:
+            return own
+        return self.brand(guild, config.RULES_TEXT.replace("3 активных выговора",
+                                                          f"{self.num(guild, 'warn_limit')} активных выговора"))
+
+    def welcome_text(self, guild):
+        own = family_mod.text(self.db, guild_id_of(guild), "welcome") if guild is not None else None
+        return own or self.brand(guild, config.WELCOME_TEXT)
+
+    def checklist(self, guild):
+        return family_mod.checklist(self.db, guild_id_of(guild))
+
+    def situational(self, guild):
+        return family_mod.situational(self.db, guild_id_of(guild))
 
     # ---------- профиль семьи ----------
     def family(self, guild):
@@ -452,14 +475,15 @@ class FamilyBot(commands.Bot):
         self.db.q("INSERT INTO warns(guild_id, user_id, moderator_id, reason, created_at) VALUES(?,?,?,?,?)",
                   guild.id, member.id, moderator.id, reason, now_iso())
         n = self.db.one("SELECT COUNT(*) n FROM warns WHERE guild_id=? AND user_id=? AND active=1", guild.id, member.id)["n"]
-        e = self.embed(f"⚖️ Выговор ({n}/3)",
+        lim = self.num(guild, "warn_limit")
+        e = self.embed(f"⚖️ Выговор ({n}/{lim})",
                        f"**Кому:** {member.mention}\n**Выдал:** {moderator.mention}\n**Причина:** {reason}",
                        config.RED, guild)
         c = self.ch(guild, "warns")
         if c:
             await c.send(embed=e)
-        await safe_dm(member, f"⚖️ Ты получил выговор в семье {config.FAMILY} ({n}/3).\nПричина: {reason}")
-        if n >= 3:
+        await safe_dm(member, f"⚖️ Ты получил выговор в семье {config.FAMILY} ({n}/{lim}).\nПричина: {reason}")
+        if n >= lim:
             council = self.ch(guild, "council_chat")
             if council:
                 await council.send(f"🚨 У {member.mention} **{n} активных выговора**. Рассмотрите исключение.")

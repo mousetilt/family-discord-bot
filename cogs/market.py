@@ -11,16 +11,11 @@ from discord.ext import commands, tasks
 
 from core import config
 from core.botcore import family_only, guarded, now, now_iso, parse_dt
-
-MULT = {"к": 1e3, "k": 1e3, "тыс": 1e3, "кк": 1e6, "kk": 1e6, "млн": 1e6, "ккк": 1e9, "kkk": 1e9, "млрд": 1e9}
-
+from core.parse import find_amount
 
 def parse_price(s):
-    s = (s or "").lower().replace(" ", "").replace(" ", "").replace(",", ".")
-    m = re.search(r"(\d+(?:\.\d+)?)(ккк|kkk|кк|kk|млрд|млн|тыс|к|k)?", s)
-    if not m:
-        return None
-    return int(float(m.group(1)) * MULT.get(m.group(2) or "", 1))
+    """Цена из свободного текста («1.5кк, торг») — общий разборщик сумм, как в казне."""
+    return find_amount(s)
 
 
 def fmt_price(n):
@@ -168,7 +163,7 @@ class Market(commands.Cog):
         row = self.bot.db.one("SELECT * FROM market WHERE id=?", cur.lastrowid)
         msg = await self.send_listing(inter.guild, row, image)
         await inter.followup.send(f"✅ Объявление №{row['id']} опубликовано: {msg.jump_url}\n"
-                                  f"Через {config.MARKET_DAYS} дн. оно истечёт — его можно будет поднять.", ephemeral=True)
+                                  f"Через {self.bot.num(inter.guild, 'market_days')} дн. оно истечёт — его можно будет поднять.", ephemeral=True)
 
     # ---------- кнопки ----------
     async def button(self, inter, a, lid):
@@ -307,9 +302,13 @@ class Market(commands.Cog):
     @tasks.loop(hours=6)
     @guarded
     async def expire(self):
-        border = (now() - dt.timedelta(days=config.MARKET_DAYS)).isoformat()
+        # срок у каждой семьи свой (/настройки → «Числа»): берём самый короткий, точнее — проверяем по строке
+        border = (now() - dt.timedelta(days=1)).isoformat()
         rows = self.bot.db.all("SELECT * FROM market WHERE status='active' AND bumped_at<?", border)
         for row in rows:
+            days = self.bot.num(row["guild_id"], "market_days")
+            if parse_dt(row["bumped_at"]) > now() - dt.timedelta(days=days):
+                continue
             self.bot.db.q("UPDATE market SET status='expired' WHERE id=?", row["id"])
             row = self.bot.db.one("SELECT * FROM market WHERE id=?", row["id"])
             for g in filter(None, [self.bot.get_guild(row["guild_id"])]):

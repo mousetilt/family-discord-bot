@@ -1,0 +1,28 @@
+# Проверка на каждый push: все модули грузятся, разборщики и настройки работают.
+# Бесплатно (GitHub Actions для публичного репозитория). Токен Discord и ключи ИИ не нужны.
+name: Проверка бота
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Зависимости
+        run: pip install -r requirements.txt pyflakes
+      - name: Необъявленные имена и опечатки (pyflakes)
+        run: |
+          python -m pyflakes core cogs bot.py launcher.py | grep -v -E "imported but unused|redefinition of unused|assigned to but never used|f-string is missing placeholders" > flakes.txt || true
+          cat flakes.txt
+          test ! -s flakes.txt
+      - name: Тесты
+        run: python -m unittest discover -s tests -v

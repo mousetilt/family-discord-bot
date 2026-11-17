@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Наставничество и испытательный срок: каждому новичку — наставник, личная ветка, чек-лист и решение через N дней.
-• Срок — /наставник срок (probation:days, по умолчанию config.MENTOR_DAYS). Срок заводится и без наставника
+• Срок — /наставник срок или /настройки → «Числа» (set:probation_days). Срок заводится и без наставника
   (mentor_id=0, без ветки) — тогда напоминания и решение идут в кадровый журнал.
 • /настройки → Кадры: «auto» — по окончании срока бот сам переводит в Члены семьи, если экзамен сдан (или выключен)
   и за срок не было выговоров; иначе спрашивает. «remind» — напоминания на середине срока и за сутки до конца."""
@@ -84,10 +84,7 @@ class Mentorship(commands.Cog):
 
     # ---------- данные ----------
     def days(self, guild):
-        try:
-            return max(1, min(60, int(self.bot.db.gget(guild, "probation:days") or config.MENTOR_DAYS)))
-        except (TypeError, ValueError):
-            return config.MENTOR_DAYS
+        return self.bot.num(guild, "probation_days")  # /настройки → «Числа» (или /наставник срок)
 
     def exam_ok(self, guild, user_id):
         if not self.bot.feature(guild, "hr:exam"):
@@ -117,14 +114,15 @@ class Mentorship(commands.Cog):
 
     def card(self, guild, row):
         checklist = json.loads(row["checklist"] or "[]")
-        done = sum(1 for x in checklist if x)
-        total = len(config.MENTOR_CHECKLIST)
+        items = self.bot.checklist(guild)  # свой чек-лист семьи — /настройки → «Тексты»
+        total = len(items)
+        done = sum(1 for x in checklist[:total] if x)  # чек-лист могли укоротить — лишние отметки не считаем
         bar = "▰" * done + "▱" * (total - done)
         voice, gatherings, warns = self.stats(row)
         status = {"active": "🟢 Идёт испытательный срок", "done": "🎓 Пройден", "failed": "❌ Не пройден",
                   "left": "🚪 Ушёл с сервера"}.get(row["status"], row["status"])
         lines = "\n".join(f"{'✅' if i < len(checklist) and checklist[i] else '⬜'} **{i + 1}.** {t}"
-                          for i, t in enumerate(config.MENTOR_CHECKLIST))
+                          for i, t in enumerate(items))
         mentor = f"<@{row['mentor_id']}>" if row["mentor_id"] else "не назначен"
         exam = "" if not self.bot.feature(guild, "hr:exam") else \
             ("\n**Экзамен:** ✅ сдан" if self.exam_ok(guild, row["newbie_id"]) else
@@ -145,11 +143,12 @@ class Mentorship(commands.Cog):
         if row["status"] != "active":
             return v
         checklist = json.loads(row["checklist"] or "[]")
-        for i in range(len(config.MENTOR_CHECKLIST)):
+        guild = self.bot.get_guild(row["guild_id"])
+        items = self.bot.checklist(guild) if guild else list(config.MENTOR_CHECKLIST)
+        for i in range(len(items)):
             v.add_item(MentorCheck(row["id"], i, i < len(checklist) and bool(checklist[i])))
         v.add_item(MentorStat(row["id"]))
-        guild = self.bot.get_guild(row["guild_id"])
-        if checklist and all(checklist) and len(checklist) >= len(config.MENTOR_CHECKLIST) \
+        if checklist and all(checklist[:len(items)]) and len(checklist) >= len(items) \
                 and guild and self.exam_ok(guild, row["newbie_id"]):
             v.add_item(MentorDecision(row["id"], "promote"))
         return v
@@ -227,7 +226,7 @@ class Mentorship(commands.Cog):
             rid = db.q("INSERT INTO mentorships(guild_id, newbie_id, mentor_id, thread_id, checklist, started_at, "
                        "due_at, voice_start) VALUES(?,?,?,?,?,?,?,?)", guild.id, newbie.id,
                        mentor.id if thread else 0, thread.id if thread else None,
-                       json.dumps([False] * len(config.MENTOR_CHECKLIST)), start.isoformat(),
+                       json.dumps([False] * len(self.bot.checklist(guild))), start.isoformat(),
                        (start + dt.timedelta(days=days)).isoformat(), a["voice_seconds"] if a else 0).lastrowid
         row = db.one("SELECT * FROM mentorships WHERE id=?", rid)
         if not thread:
@@ -301,7 +300,10 @@ class Mentorship(commands.Cog):
             return await inter.response.send_message("Отмечать пункты может только наставник или руководство.",
                                                      ephemeral=True)
         checklist = json.loads(row["checklist"] or "[]")
-        checklist += [False] * (len(config.MENTOR_CHECKLIST) - len(checklist))
+        total = len(self.bot.checklist(inter.guild))
+        if i >= total:
+            return await inter.response.send_message("Чек-лист семьи поменяли — нажми «🔄 Обновить».", ephemeral=True)
+        checklist += [False] * (total - len(checklist))
         checklist[i] = not checklist[i]
         self.bot.db.q("UPDATE mentorships SET checklist=? WHERE id=?", json.dumps(checklist), mid)
         row = self.bot.db.one("SELECT * FROM mentorships WHERE id=?", mid)
@@ -382,7 +384,8 @@ class Mentorship(commands.Cog):
         if not c:
             return
         checklist = json.loads(row["checklist"] or "[]")
-        done, total = sum(1 for x in checklist if x), len(config.MENTOR_CHECKLIST)
+        total = len(self.bot.checklist(guild))
+        done = sum(1 for x in checklist[:total] if x)
         voice, gatherings, warns = self.stats(row)
         todo = []
         if done < total:
@@ -517,6 +520,7 @@ class Mentorship(commands.Cog):
     @staff_only(config.LEAD + ["hr_head"])
     async def days_cmd(self, inter: discord.Interaction, days: app_commands.Range[int, 1, 60]):
         self.bot.db.gset(inter.guild, "probation:days", int(days))
+        self.bot.db.gset(inter.guild, "set:probation_days", int(days))  # то же число, что в /настройки → «Числа»
         auto = self.bot.feature(inter.guild, "hr:auto")
         await self.bot.log(inter.guild, f"⚙️ Испытательный срок: **{days} дн.** ({inter.user.mention})", "hrlog")
         await inter.response.send_message(
@@ -533,7 +537,7 @@ class Mentorship(commands.Cog):
         for r in rows:
             done = sum(1 for x in json.loads(r["checklist"] or "[]") if x)
             mentor = f"<@{r['mentor_id']}>" if r["mentor_id"] else "без наставника"
-            lines.append(f"<@{r['newbie_id']}> ← {mentor} · {done}/{len(config.MENTOR_CHECKLIST)} · "
+            lines.append(f"<@{r['newbie_id']}> ← {mentor} · {done}/{len(self.bot.checklist(inter.guild))} · "
                          f"решение {discord.utils.format_dt(parse_dt(r['due_at']), 'R')}")
         await inter.response.send_message(embed=self.bot.embed(f"🎓 На испытательном сроке: {len(rows)}",
                                                                "\n".join(lines)[:4000] or "Никого", config.GOLD,
