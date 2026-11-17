@@ -134,7 +134,7 @@ def _related(track, exclude):
     if artist:
         queries.append(f"scsearch15:{artist}")
     queries.append(f"scsearch15:{track.title}")
-    found = []
+    found, seen = [], set()
     with yt_dlp.YoutubeDL(opts) as y:
         for q in queries:
             try:
@@ -146,6 +146,10 @@ def _related(track, exclude):
                 url = en and (en.get("webpage_url") or en.get("url"))
                 if not url or not url.startswith("http") or url.split("?")[0] in exclude:
                     continue
+                name = norm_title(en.get("title"))
+                if name and (name in exclude or name in seen):
+                    continue  # та же песня у другого загрузчика — не по кругу
+                seen.add(name)
                 dur = en.get("duration")
                 if dur and (dur < 45 or dur > 900):  # без джинглов и часовых миксов
                     continue
@@ -163,10 +167,16 @@ class Track:
         self.artist, self.auto = artist, auto  # auto — подобран автоплеем
 
 
+def norm_title(title):
+    """«Кино - Группа крови (Live)» → «киногруппакрови»: одну песню у разных загрузчиков считаем одной."""
+    t = re.sub(r"[\(\[].*?[\)\]]", "", (title or "").lower())
+    return re.sub(r"\W+", "", t)
+
+
 class Player:
     def __init__(self):
         self.queue = deque()
-        self.history = deque(maxlen=40)  # ссылки сыгранных — автоплей не повторяется
+        self.history = deque(maxlen=40)  # ссылки и названия сыгранных — автоплей не повторяется
         self.current = None
         self.volume = 0.6
         self.loop = "off"
@@ -174,6 +184,19 @@ class Player:
         self.panel = None
         self.leave_task = None
         self.leave_alone = False
+        self.starting = None  # play_next уже подбирает/запускает трек — второй параллельный не нужен
+        self.again = False  # пока шёл запуск, play_next звали ещё раз
+        self.gen = 0  # растёт при «стоп»/уходе/тревоге: долгие поиски, начатые до сброса, свой трек не включают
+
+    def reset(self):
+        self.queue.clear()
+        self.current = None
+        self.gen += 1
+
+    def remember(self, track):
+        if track.url and not track.radio:
+            self.history.append(track.url.split("?")[0])
+            self.history.append(norm_title(track.title))
 
 
 class MusicControls(discord.ui.View):
@@ -288,63 +311,108 @@ class Music(commands.Cog):
         return Overlay(disnake.PCMVolumeTransformer(src, volume=volume))
 
     async def play_next(self, guild, failed=0):
+        """Следующий трек. Подбор/загрузка идут секундами (автоплей, yt-dlp), поэтому вызов, пришедший в это
+        время (/играть, after, ИИ), ничего не делает — идущий сам возьмёт свежую очередь. Иначе два вызова
+        дерутся за плеер: второй затирает p.current играющего трека."""
         p = self.player(guild)
-        vc = self.vc(guild)
-        if not vc:
+        if p.starting:
+            p.again = True  # если идущий запуск прервут сбросом (стоп/радио) — он повторит с новой очередью
             return
-        if p.loop == "track" and p.current and not failed:
-            track = p.current
-        else:
-            if p.loop == "queue" and p.current and not p.current.radio and not failed:
-                p.queue.append(p.current)
-            if not p.queue and not failed and p.current and not p.current.radio and self.autoplay_on(guild):
-                await self.add_related(guild, p.current)
-            if not p.queue:
-                p.current = None
-                await self.update_panel(guild)
-                self.schedule_leave(guild, 300)
-                return
-            track = p.queue.popleft()
-        p.current = track
-        if track.url and not track.radio:
-            p.history.append(track.url.split("?")[0])
+        token = p.starting = object()
         try:
-            src = await self.source(track, p.volume)
-        except Exception as e:
-            log.warning("Не удалось воспроизвести %s: %s", track.title, e)
-            if p.text:
-                await p.text.send(f"⚠️ Не удалось включить **{track.title}** — пропускаю.", delete_after=30)
-            p.current = None
-            if track.auto and not p.queue and failed < 2:
-                await self.add_related(guild, track)  # автоплей не сдаётся с первой осечки
-            if failed < 3:
-                return await self.play_next(guild, failed + 1)
-            return
-        if p.leave_task:
-            p.leave_task.cancel()
-            p.leave_task = None
+            while True:
+                p.again = False
+                await self._play_next(guild, p, failed)
+                failed = 0
+                vc = self.vc(guild)
+                # трек пошёл (starting сброшен) — дальше очередь двигает after; иначе подхватываем отложенный вызов
+                if not (p.again and p.starting is token and p.queue and vc and not vc.is_playing()
+                        and not vc.is_paused()):
+                    break
+        finally:
+            if p.starting is token:
+                p.starting = None
+
+    async def _play_next(self, guild, p, failed):
+        gen = p.gen
+        while True:
+            vc = self.vc(guild)
+            if not vc or p.gen != gen:
+                return
+            if p.loop == "track" and p.current and not failed:
+                track = p.current
+            else:
+                if p.loop == "queue" and p.current and not p.current.radio and not failed:
+                    p.queue.append(p.current)
+                # автоплей — только если в войсе есть люди: пустой комнате музыка не нужна
+                if not p.queue and not failed and p.current and not p.current.radio and self.autoplay_on(guild) \
+                        and vc.channel and self.humans(guild, vc.channel.id):
+                    await self.add_related(guild, p.current)
+                    if p.gen != gen:
+                        return
+                if not p.queue:
+                    p.current = None
+                    await self.update_panel(guild)
+                    self.schedule_leave(guild, 300)
+                    return
+                track = p.queue.popleft()
+            p.current = track
+            p.remember(track)
+            try:
+                src = await self.source(track, p.volume)
+                break
+            except Exception as e:
+                log.warning("Не удалось воспроизвести %s: %s", track.title, e)
+                p.current = None
+                if p.gen != gen:
+                    return
+                if p.text:
+                    try:
+                        await p.text.send(f"⚠️ Не удалось включить **{track.title}** — пропускаю.", delete_after=30)
+                    except discord.HTTPException:
+                        pass
+                if track.auto and not p.queue and failed < 2:
+                    await self.add_related(guild, track)  # автоплей не сдаётся с первой осечки
+                if failed >= 3:
+                    await self.update_panel(guild)
+                    return
+                failed += 1
 
         def after(err):
             if err:
                 log.warning("Ошибка плеера: %s", err)
             asyncio.run_coroutine_threadsafe(self.play_next(guild), self.bot.loop)
 
-        # пока искали трек (yt-dlp — секунды), связь с войсом могла оборваться: даём ей переподключиться
-        for _ in range(10):
+        # Пока грузили трек, могло случиться: «стоп» (gen), обрыв связи (ждём переподключения до 5 с),
+        # чужой звук — объявление/фраза (ждём, пока договорит, до 2 мин).
+        waited = 0.0
+        while True:
+            if p.gen != gen:
+                src.cleanup()
+                return
             vc = self.vc(guild)
-            if vc and vc.is_connected():
+            ok = bool(vc and vc.is_connected())
+            lock = self.locks.get(guild.id)  # объявление ходит по войсам — между фразами тишина, но не наша
+            if ok and not vc.is_playing() and not vc.is_paused() and not (lock and lock.locked()):
+                break
+            if waited >= (120 if ok else 5):
                 break
             await asyncio.sleep(0.5)
+            waited += 0.5
+        if p.leave_task and not p.leave_alone:
+            p.leave_task.cancel()  # таймер «остался один» не трогаем — пустой комнате музыка не нужна
+            p.leave_task = None
         try:
             if not vc or not vc.is_connected():
                 raise disnake.ClientException("Not connected to voice.")
             if vc.is_playing() or vc.is_paused():
-                # пока искали, заиграло другое (объявление/радио) — трек в начало очереди, его after включит наш
-                src.cleanup()
+                src.cleanup()  # чужой звук так и не закончился — трек остаётся первым в очереди
                 p.queue.appendleft(track)
                 p.current = None
+                await self.update_panel(guild)
                 return
             vc.play(src, after=after)
+            p.starting = None  # трек пошёл: если он сразу оборвётся, его after должен пройти
         except disnake.ClientException as e:
             log.warning("Плеер: голос недоступен (%s) — трек %s вернул в очередь", e, track.title)
             try:
@@ -369,12 +437,13 @@ class Music(commands.Cog):
     async def add_related(self, guild, track):
         """Автоплей: кладёт в очередь один похожий трек. False — ничего не нашлось."""
         p = self.player(guild)
+        gen = p.gen
         try:
             found = await asyncio.wait_for(asyncio.to_thread(_related, track, set(p.history)), timeout=40)
         except Exception as e:
             log.info("Автоплей не нашёл похожего: %s", e)
             return False
-        if not found:
+        if not found or p.gen != gen:  # пока искали, нажали «стоп» — в очередь ничего не кладём
             return False
         title, url, dur, thumb, artist = random.choice(found[:5])  # не всегда первый — меньше зацикливания
         p.queue.append(Track(title, url, None, dur, thumb=thumb, artist=artist, auto=True))
@@ -393,9 +462,8 @@ class Music(commands.Cog):
             if guild.id in self.hold and not (alone and nobody):
                 return  # бот слушает команды — остаёмся
             if vc and ((alone and nobody) or not vc.is_playing()):
+                p.reset()  # до disconnect: его after и идущий подбор трека не должны ничего включать
                 await vc.disconnect()
-                p.current = None
-                p.queue.clear()
                 await self.update_panel(guild)
         p.leave_task = asyncio.create_task(leave())
 
@@ -539,7 +607,7 @@ class Music(commands.Cog):
         if not vc:
             return
         p = self.player(inter.guild)
-        p.queue.clear()
+        p.reset()  # и прерывает подбор трека, если он шёл — иначе тот включился бы вместо радио
         p.loop = "off"
         name = station.value if station else "Своё радио"
         p.queue.append(Track(name, url or config.RADIO[station.value], inter.user, radio=True))
@@ -571,8 +639,7 @@ class Music(commands.Cog):
             vc.stop()
             msg = "⏭ Пропущено"
         elif action == "stop":
-            p.queue.clear()
-            p.current = None
+            p.reset()
             p.loop = "off"
             vc.stop()
             if inter.guild.id not in self.hold:  # «Джарвис» слушает — музыку выключаем, но из войса не выходим
@@ -755,9 +822,11 @@ class Music(commands.Cog):
                             return False
                         return True
                     return False
-                p.queue.clear()
-                p.current = None
+                p.reset()
                 vc.stop()
+            elif p.starting and not priority and not (vc and vc.channel and vc.channel.id in channel_ids):
+                return False  # идёт подбор трека (пауза между песнями) — в чужой войс не уводим
+            music_ch = vc.channel.id if vc and vc.channel and (p.current or p.queue or p.starting) else None
             files = []
             if siren:
                 files.append(config.ASSETS / "siren.wav")
@@ -788,7 +857,10 @@ class Music(commands.Cog):
             if hold and vc:
                 if vc.channel.id != hold and self.dn.get_channel(hold):
                     await vc.move_to(self.dn.get_channel(hold))  # вернуться туда, где слушаем
-            elif vc and not p.current:
+            elif vc and music_ch and (p.current or p.queue or p.starting):
+                if vc.channel.id != music_ch and self.dn.get_channel(music_ch):
+                    await vc.move_to(self.dn.get_channel(music_ch))  # музыка ждёт — назад к слушателям
+            elif vc and not p.current and not p.queue and not p.starting:
                 await vc.disconnect()
             return True
 

@@ -1111,8 +1111,7 @@ class Assistant(commands.Cog):
                         vc.stop()
                         out.append("⏭ Пропустил.")
                     else:
-                        p.queue.clear()
-                        p.current = None
+                        p.reset()  # и обрывает подбор следующего трека (автоплей), если он шёл
                         p.loop = "off"
                         vc.stop()
                         if g.id not in music.hold:  # «Джарвис» слушает — остаёмся в войсе
@@ -1219,8 +1218,8 @@ class Assistant(commands.Cog):
                         vc = music.vc(g)
                         if vc:
                             p = music.player(g)
-                            p.queue.clear()
-                            p.current, p.loop = None, "off"
+                            p.reset()
+                            p.loop = "off"
                             vc.stop()
                             await vc.disconnect()
                     if g.me.voice and g.me.voice.channel:  # «призрак» в войсе после перезапуска

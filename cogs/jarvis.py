@@ -776,7 +776,8 @@ class Jarvis(commands.Cog):
         vc = music.vc(guild) if music else None
         if not vc or (vc.channel and vc.channel.id == channel.id):
             return
-        if vc.is_playing() and music.player(guild).current and music.humans(guild, vc.channel.id):
+        p = music.player(guild)
+        if (vc.is_playing() and p.current or p.starting) and music.humans(guild, vc.channel.id):
             return  # в старом канале люди слушают музыку — не уводим её
         lock = music.locks.setdefault(guild.id, asyncio.Lock())
         async with lock:  # не дёргаем соединение посреди фразы
