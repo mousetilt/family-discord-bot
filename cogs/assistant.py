@@ -70,6 +70,7 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "warns
          "alarm": config.LEAD, "car_list": USERS, **{t: GARAGE_BY for t in ("car_add", "car_give", "car_status", "car_remove")},
          "web_search": USERS, "missed": USERS, "draft": config.LEAD + ["events", "hr_head", "recruiter", "diplomat"],
          "accept": config.HR, "recruit_stats": config.HR + ["treasurer"], "mute": MOD, "unmute": MOD, "warn": MOD, "purge": MOD, "rank": config.LEAD,
+         "promote_newbies": config.HR,  # как accept: кадры и руководство
          **{t: config.TREASURY for t in TREASURY_ACTS}, "dues_set": LEADS, "salary_rate_set": LEADS,
          "fine_add": config.TREASURY + ["hr_head"], "fine_list": config.TREASURY + ["hr_head"]}
 LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив",
@@ -85,7 +86,7 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "music_play": "🎵 Включить", "music_skip": "⏭ Пропустить трек", "music_stop": "⏹ Выключить музыку",
          "music_volume": "🔊 Громкость", "gather": "📣 Сбор", "announce": "📢 Объявление", "alarm": "🚨 Тревога",
          "mute": "🔇 Мут", "unmute": "🔊 Снять мут", "warn": "⚖️ Выговор", "purge": "🧹 Очистить чат",
-         "rank": "🔁 Ранг", "accept": "🛂 Принять в семью", "car_list": "🚗 Автопарк", "car_add": "🚗 Добавить машину",
+         "rank": "🔁 Ранг", "accept": "🛂 Принять в семью", "promote_newbies": "🎓 Новичков — в Члены семьи", "car_list": "🚗 Автопарк", "car_add": "🚗 Добавить машину",
          "car_give": "🔁 Передать машину", "car_status": "🔧 Статус машины", "car_remove": "🗑 Списать машину",
          "web_search": "🔎 Поиск", "missed": "🕰 Что я пропустил", "draft": "📝 Черновик",
          "recruit_stats": "📊 Статистика рекрутёров", "treasury_in": "➕ Приход в казну", "treasury_out": "➖ Расход из казны",
@@ -186,6 +187,9 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
 - mute: {{"users":[...],"minutes":1..1440,"reason":"..."}}; unmute: {{"users":[...]}}; purge: {{"count":1..100}}
 - warn: {{"user":id,"reason":"...","fine":"30к" или null — если просят ещё и штраф}}; unwarn: {{"user":id}}; warns: {{"user":id}} — показать выговоры
 - rank: {{"user":id,"rank":"newbie"|"member"|"senior"}}; post: {{"user":id,"post":{"|".join(config.STAFF_POSTS)},"add":true|false}}
+- promote_newbies: {{"only_active":true}} — перевести ВСЕХ новичков разом в Члены семьи: «переведи/повысь
+  (всех активных) новичков в члены», «новичков в мемберы», «кто прошёл испытательный — в члены». Бот сам отберёт:
+  не в неактиве и со сданным экзаменом. «всех новичков, даже неактивных» → "only_active":false. Это НЕ inactive
 - accept: {{"user":id,"names":["как назвал"],"nick":"ник в игре или null","static":"Static ID или null"}} — принять
   человека в семью ВРУЧНУЮ, без экзамена («прими Петю в семью», «возьми Васю без экзамена»)
 - expel: {{"user":id,"reason":"..."}}; kick / ban: {{"user":id,"reason":"..."}}; nick: {{"user":id,"nick":"..."}}
@@ -194,7 +198,7 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
 - dm: написать В ЛС. Конкретному человеку — {{"users":[id],"names":["как назвал"],"text":"..."}} (id ОБЯЗАТЕЛЬНО
   из списка; «напиши Платону» → id Платона, НЕ автора). Всем — {{"source":"family","text":"..."}}. Кого не нашёл в
   списке — НЕ шли автору, верни actions:[] и переспроси ник. chronicle: {{"text":"..."}} — запись в летопись
-- inactive: {{"days":1..90}}; digest — сводка по семье
+- inactive: {{"days":1..90}} — ТОЛЬКО отчёт «кто не появлялся», никого не переводит и не трогает; digest — сводка по семье
 - АВТОПАРК: car_list {{"user":id или null}} — чьи машины; car_add {{"model":"Elegy","plate":"А123ВС" или null,
   "user":id у кого или null (общая),"note":"..."}}; car_give {{"plate" или "model","user":id или null (в общий гараж)}};
   car_status {{"plate" или "model","status":"ok"|"repair","note":"..."}}; car_remove {{"plate" или "model","reason":"..."}}
@@ -640,6 +644,17 @@ class Assistant(commands.Cog):
             return f"{LABEL[t]} {who} · {a.get('reason', '')}" + (f" + штраф {a['fine']}" if a.get("fine") else "")
         if t == "rank":
             return f"{LABEL[t]} {who} → {config.BASE_RANKS.get(a.get('rank'), a.get('rank'))}"
+        if t == "promote_newbies":
+            men = self.bot.get_cog("Mentorship")
+            if not men:
+                return f"{LABEL[t]}: наставничество не загружено"
+            ready, idle, no_exam, _ = men.newbie_pool(g, a.get("only_active") is not False)
+            names = ", ".join(m.display_name for m in ready[:15]) + (" …" if len(ready) > 15 else "")
+            skip = " · ".join(x for x in (f"неактив {len(idle)}" if idle else "",
+                                          f"без экзамена {len(no_exam)}" if no_exam else "") if x)
+            return (f"{LABEL[t]}: {len(ready)} чел." + (f" ({names})" if names else "")
+                    + (f" · пропущу: {skip}" if skip else "")
+                    + ("" if a.get("only_active") is not False else " · включая неактивных"))
         if t == "announce":
             return f"{LABEL[t]}: «{a.get('title', '')}» {'+ голосом' if a.get('voice') else ''}"
         if t == "gather":
@@ -798,14 +813,8 @@ class Assistant(commands.Cog):
                 f"{i + 1}. {self.name(g, r['user_id'])} — 🎙 {fmt_hours(r['v'])} · 💬 {r['m']}" for i, r in enumerate(rows))
         if t == "inactive":
             days = max(1, min(90, int(a.get("days") or 5)))
-            border, vac, out = now() - dt.timedelta(days=days), bot.role(g, "vacation"), []
-            for m in bot.family_members(g):
-                if (vac and vac in m.roles) or m.voice:
-                    continue
-                r = db.one("SELECT last_seen FROM activity WHERE guild_id=? AND user_id=?", g.id, m.id)
-                last = parse_dt(r["last_seen"]) if r and r["last_seen"] else None
-                if not last or last < border:
-                    out.append(m.display_name)
+            from cogs.mentorship import is_inactive  # одна мерка с массовым переводом новичков
+            out = [m.display_name for m in bot.family_members(g) if is_inactive(bot, g, m, days)]
             return f"💤 Не появлялись {days}+ дн. ({len(out)}): " + (", ".join(out[:40]) or "таких нет, все молодцы")
         if t == "bl_check":
             m = self.one(g, a)
@@ -1187,6 +1196,10 @@ class Assistant(commands.Cog):
                         out.append("❌ Не нашёл, кого принять.")
                     else:
                         out.append((await apps.manual_accept(g, me, m, a.get("nick"), a.get("static")))[1])
+                elif t == "promote_newbies":
+                    men = bot.get_cog("Mentorship")
+                    out.append(await men.promote_newbies(g, me, a.get("only_active") is not False) if men
+                               else "❌ Наставничество не загружено.")
                 elif t in ("car_add", "car_give", "car_status", "car_remove"):
                     gar = bot.get_cog("Garage")
                     out.append(await gar.speech(g, me, a, self.one(g, a)) if gar else "Автопарк не загружен.")

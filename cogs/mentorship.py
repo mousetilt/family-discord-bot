@@ -22,6 +22,18 @@ DECISIONS = {
     "extend": ("Продлить на 3 дня", "⏳", discord.ButtonStyle.secondary),
     "fail": ("Не прошёл — исключить", "❌", discord.ButtonStyle.danger),
 }
+INACTIVE_DAYS = 5   # как отчёт «💤 Неактив» по умолчанию: кто не появлялся столько дней — неактивен
+BULK_MAX = 50       # за один массовый перевод — не больше (лимиты Discord на роли)
+
+
+def is_inactive(bot, guild, member, days=INACTIVE_DAYS):
+    """Та же мерка, что в отчёте «💤 Неактив»: отпускник или сидит в войсе — активен, иначе по last_seen."""
+    vac = bot.role(guild, "vacation")
+    if (vac and vac in member.roles) or member.voice:
+        return False
+    r = bot.db.one("SELECT last_seen FROM activity WHERE guild_id=? AND user_id=?", guild.id, member.id)
+    last = parse_dt(r["last_seen"]) if r and r["last_seen"] else None
+    return not last or last < now() - dt.timedelta(days=days)
 
 
 class MentorCheck(discord.ui.DynamicItem[discord.ui.Button], template=r"mchk:(?P<mid>\d+):(?P<i>\d+)"):
@@ -464,6 +476,60 @@ class Mentorship(commands.Cog):
                     pass
             await self.close_card(guild, row["id"])
         return text
+
+    # ---------- массовый перевод (речь: promote_newbies) ----------
+    def newbie_pool(self, guild, only_active=True, days=INACTIVE_DAYS, actor=None):
+        """Новички семьи → (готовы, неактив, без экзамена, не по чину). Мерки те же, что у авто-испытательного
+        срока: экзамен (если включён hr:exam) + активность как в отчёте «Неактив»."""
+        role = self.bot.role(guild, "newbie")
+        ready, idle, no_exam, higher = [], [], [], []
+        if not role:
+            return ready, idle, no_exam, higher
+        for m in role.members:
+            if m.bot:
+                continue
+            if actor is not None and (m.id == actor.id or not self.bot.outranks(actor, m)):
+                higher.append(m)
+            elif not self.exam_ok(guild, m.id):
+                no_exam.append(m)
+            elif only_active and is_inactive(self.bot, guild, m, days):
+                idle.append(m)
+            else:
+                ready.append(m)
+        return ready, idle, no_exam, higher
+
+    async def promote_newbies(self, guild, by, only_active=True, days=INACTIVE_DAYS):
+        """Перевести всех подходящих новичков в Члены семьи. Идущий испытательный срок закрывается как пройденный
+        (тот же promote, что у кнопки и автоперевода). Возвращает отчёт строкой."""
+        ready, idle, no_exam, higher = self.newbie_pool(guild, only_active, days, by)
+        done, failed = [], []
+        for m in ready[:BULK_MAX]:
+            try:
+                row = self.bot.db.one("SELECT * FROM mentorships WHERE guild_id=? AND newbie_id=? AND status='active'",
+                                      guild.id, m.id)
+                if row:
+                    await self.promote(guild, row, m, by)
+                    await self.close_card(guild, row["id"])
+                else:
+                    await self.bot.set_rank(m, "member", by, reason="Массовый перевод новичков")
+                done.append(m.display_name)
+            except discord.HTTPException:
+                failed.append(m.display_name)
+        lines = [f"🎓 Переведены в Члены семьи ({len(done)}): " + (", ".join(done) or "никого")]
+        if len(ready) > BULK_MAX:
+            lines.append(f"⏳ Ещё {len(ready) - BULK_MAX} — повтори команду.")
+        if idle:
+            lines.append(f"💤 Пропустил неактивных {days}+ дн. ({len(idle)}): " + ", ".join(m.display_name for m in idle[:20]))
+        if no_exam:
+            lines.append(f"📕 Без сданного экзамена ({len(no_exam)}): " + ", ".join(m.display_name for m in no_exam[:20]))
+        if higher:
+            lines.append(f"⛔ Не по чину ({len(higher)}): " + ", ".join(m.display_name for m in higher[:10]))
+        if failed:
+            lines.append("⚠️ Не вышло (права/иерархия ролей бота): " + ", ".join(failed[:10]))
+        if done:
+            await self.bot.log(guild, f"🎓 Массовый перевод новичков в Члены семьи ({by.mention}): {', '.join(done)}"[:1900],
+                               "hrlog", 0x26A69A)
+        return "\n".join(lines)
 
     async def close_card(self, guild, mid):
         row = self.bot.db.one("SELECT * FROM mentorships WHERE id=?", mid)
