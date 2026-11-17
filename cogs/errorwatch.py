@@ -86,7 +86,10 @@ class ErrorCollector(logging.Handler):
     def emit(self, record):
         try:
             text = record.getMessage()
-            if any(n in text for n in NOISE) or record.name.startswith("family-bot.errors"):
+            if any(n in text for n in NOISE) or record.name.startswith("family-bot.errors") or \
+                    ("Task was destroyed but it is pending" in text and "coro=<Event.wait()" in text):
+                # utils.sane_wait_for в discord.py/disnake при таймауте подключения к войсу бросает
+                # задачи Event.wait() без отмены — сборщик мусора потом ругается. Безвредно.
                 return
             self.queue.append((signature(record), int(record.created)))
         except Exception:
