@@ -27,7 +27,7 @@ USERS = config.ORGANIZERS + config.HR + ["senior", "treasurer"]
 MOD = config.LEAD + ["hr_head"]
 INFO = "\u200b"   # пометка «это ответ-справка»: показываем целиком и зачитываем в голосе
 # справки — только чтение, выполняются сразу
-ASK = {"law", "profile", "top", "inactive", "warns", "bl_check", "market", "digest", "queue", "roll", "recruit_stats",
+ASK = {"law", "profile", "top", "inactive", "people", "warns", "bl_check", "market", "digest", "queue", "roll", "recruit_stats",
        "car_list",
        "web_search", "missed", "draft",
        "treasury_balance", "treasury_debtors", "salary_rates", "fine_list"}
@@ -58,7 +58,7 @@ DAILY_CHAT = 120   # сообщений в сутки на человека бе
 NAME_ANYWHERE = re.compile(r"(?<![а-яёa-z])швейцар(?![а-яёa-z])", re.I)  # «…, швейцар» в любом месте фразы
 TALK_SEC = 300     # сколько помним разговор с человеком
 ANSWER_SEC = 120   # сколько ждём ответ на свой вопрос без обращения «Швейцар»
-PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "warns": USERS, "bl_check": USERS,
+PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "people": USERS, "warns": USERS, "bl_check": USERS,
          "market": USERS, "queue": USERS, "roll": USERS, "digest": config.LEAD, "music_pause": USERS,
          "music_resume": USERS, "voice_mute": USERS, "voice_unmute": USERS, "remind": USERS,
          "post": config.POST_GIVERS, "unwarn": MOD, "expel": LEADS, "bl_add": MOD, "kick": config.LEAD, "ban": LEADS,
@@ -73,7 +73,7 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "warns
          "promote_newbies": config.HR,  # как accept: кадры и руководство
          **{t: config.TREASURY for t in TREASURY_ACTS}, "dues_set": LEADS, "salary_rate_set": LEADS,
          "fine_add": config.TREASURY + ["hr_head"], "fine_list": config.TREASURY + ["hr_head"]}
-LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив",
+LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив", "people": "👥 Кто в семье",
          "warns": "⚖️ Выговоры", "bl_check": "⛔ Проверка ЧС", "market": "🛒 Рынок", "queue": "🎶 Очередь",
          "roll": "🎲 Кубик", "digest": "🗞 Сводка", "music_pause": "⏸ Пауза", "music_resume": "▶️ Продолжить",
          "voice_mute": "🎙 Выключить микрофоны", "voice_unmute": "🎙 Включить микрофоны", "remind": "⏰ Напоминание",
@@ -200,7 +200,15 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
 - dm: написать В ЛС. Конкретному человеку — {{"users":[id],"names":["как назвал"],"text":"..."}} (id ОБЯЗАТЕЛЬНО
   из списка; «напиши Платону» → id Платона, НЕ автора). Всем — {{"source":"family","text":"..."}}. Кого не нашёл в
   списке — НЕ шли автору, верни actions:[] и переспроси ник. chronicle: {{"text":"..."}} — запись в летопись
-- inactive: {{"days":1..90}} — ТОЛЬКО отчёт «кто не появлялся», никого не переводит и не трогает; digest — сводка по семье
+- people — ЛЮБОЙ вопрос «кто…/покажи…/сколько…» про людей семьи: «кто без экзамена», «кто должен взнос», «кто не
+  отбыл срок», «кто сейчас в войсе», «кто с выговорами», «покажи новичков/старших», «кто неактив». НЕ отвечай на
+  такое словами и не выдумывай имён — верни people с фильтрами (ненужные — null, несколько — все сразу):
+  {{"rank":"<роль>"|null,"post":{"|".join(config.STAFF_POSTS)}|null,"exam":true|false|null,
+  "inactive_days":N|null,"active":true|false|null,"probation_done":true|false|null,"in_voice":true|false|null,
+  "warns":true|false|null,"dues":"paid"|"unpaid"|null,"in_family":true,"limit":30}}
+  Роли: {", ".join(config.ROSTER_ORDER)}. «кто в войсе и 5+ дней неактив» → in_voice:true + inactive_days:5.
+  "reply" оставь пустым — список придёт из базы. Это только справка: переводить новичков — promote_newbies
+- inactive: {{"days":1..90}} — старый отчёт «кто не появлялся» (вместо него — people); digest — сводка по семье
 - АВТОПАРК: car_list {{"user":id или null}} — чьи машины; car_add {{"model":"Elegy","plate":"А123ВС" или null,
   "user":id у кого или null (общая),"note":"..."}}; car_give {{"plate" или "model","user":id или null (в общий гараж)}};
   car_status {{"plate" или "model","status":"ok"|"repair","note":"..."}}; car_remove {{"plate" или "model","reason":"..."}}
@@ -646,6 +654,9 @@ class Assistant(commands.Cog):
             return f"{LABEL[t]} {who} · {a.get('reason', '')}" + (f" + штраф {a['fine']}" if a.get("fine") else "")
         if t == "rank":
             return f"{LABEL[t]} {who} → {config.BASE_RANKS.get(a.get('rank'), a.get('rank'))}"
+        if t == "people":
+            from core import people
+            return f"{LABEL[t]}: {people.criteria(people.filters(a))}"
         if t == "promote_newbies":
             men = self.bot.get_cog("Mentorship")
             if not men:
@@ -817,6 +828,9 @@ class Assistant(commands.Cog):
                           f"ORDER BY ({v}/60 + {mcol}*2) DESC LIMIT 10", g.id)
             return f"🏆 Топ — {'неделя' if week else 'всё время'}\n" + "\n".join(
                 f"{i + 1}. {self.name(g, r['user_id'])} — 🎙 {fmt_hours(r['v'])} · 💬 {r['m']}" for i, r in enumerate(rows))
+        if t == "people":
+            from core import people
+            return people.render(people.query(bot, g, a))
         if t == "inactive":
             days = max(1, min(90, int(a.get("days") or 5)))
             from cogs.mentorship import is_inactive  # одна мерка с массовым переводом новичков

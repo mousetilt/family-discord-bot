@@ -15,6 +15,7 @@ from discord.ext import commands, tasks
 
 from core import config
 from core.botcore import fmt_hours, guarded, now, now_iso, parse_dt, safe_dm, staff_only
+from core.people import INACTIVE_DAYS, is_inactive  # noqa: F401 — одна мерка «неактива» (отчёт, people, перевод)
 
 log = logging.getLogger("family-bot.mentor")
 DECISIONS = {
@@ -22,7 +23,6 @@ DECISIONS = {
     "extend": ("Продлить на 3 дня", "⏳", discord.ButtonStyle.secondary),
     "fail": ("Не прошёл — исключить", "❌", discord.ButtonStyle.danger),
 }
-INACTIVE_DAYS = 5   # как отчёт «💤 Неактив» по умолчанию: кто не появлялся столько дней — неактивен
 BULK_MAX = 50       # за один массовый перевод — не больше (лимиты Discord на роли)
 
 
@@ -32,16 +32,6 @@ def clamp_days(v):
         return None if v in (None, "", False) else max(0, min(365, int(v)))
     except (TypeError, ValueError):
         return None
-
-
-def is_inactive(bot, guild, member, days=INACTIVE_DAYS):
-    """Та же мерка, что в отчёте «💤 Неактив»: отпускник или сидит в войсе — активен, иначе по last_seen."""
-    vac = bot.role(guild, "vacation")
-    if (vac and vac in member.roles) or member.voice:
-        return False
-    r = bot.db.one("SELECT last_seen FROM activity WHERE guild_id=? AND user_id=?", guild.id, member.id)
-    last = parse_dt(r["last_seen"]) if r and r["last_seen"] else None
-    return not last or last < now() - dt.timedelta(days=days)
 
 
 class MentorCheck(discord.ui.DynamicItem[discord.ui.Button], template=r"mchk:(?P<mid>\d+):(?P<i>\d+)"):
