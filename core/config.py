@@ -219,6 +219,9 @@ STRUCTURE = [
         ("text", "botcmd", "🔧・бот-команды", {}),
     ]},
 ]
+# Войсы, которых «Друг семьи» не видит вовсе (явный запрет на его роль; ставится при сборке и на каждом старте бота)
+FRIEND_HIDDEN_VOICES = ["waiting", "interview1", "interview2", "training", "trip1", "trip2", "trip3", "business",
+                        "lounge", "kitchen", "balcony", "main_voice", "duo", "music", "creator"]
 
 # ─────────────────────────────── ТЕКСТЫ ───────────────────────────────
 RULES_TEXT = f"""**1. Общие правила**

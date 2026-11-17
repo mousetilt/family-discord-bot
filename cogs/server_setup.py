@@ -134,6 +134,31 @@ async def ensure_new_channels(bot, guild):
     return made
 
 
+FRIEND_DENY = dict(view_channel=False, connect=False)
+
+
+async def hide_voices_from_friends(bot, guild):
+    """Явный запрет роли «Друг семьи» на войсы из config.FRIEND_HIDDEN_VOICES (в т.ч. привязанные каналы семьи).
+    Идемпотентно: трогает только каналы, где запрета ещё нет. Возвращает число исправленных каналов."""
+    friend = bot.role(guild, "friend")
+    if not friend:
+        return 0
+    fixed = 0
+    for key in config.FRIEND_HIDDEN_VOICES:
+        ch = bot.ch(guild, key)
+        if not isinstance(ch, discord.VoiceChannel):
+            continue
+        cur = ch.overwrites_for(friend)
+        if cur.view_channel is False and cur.connect is False:
+            continue
+        try:
+            await ch.set_permissions(friend, overwrite=PO(**FRIEND_DENY), reason="Друзья семьи не видят этот войс")
+            fixed += 1
+        except discord.HTTPException as e:
+            log.warning("Скрыть войс %s от друзей на %s: %s", key, guild.name, e)
+    return fixed
+
+
 async def build_server(bot, guild, progress):
     db = bot.db
     R = {}
@@ -179,6 +204,8 @@ async def build_server(bot, guild, progress):
         for ctype, key, name, extra in cat["channels"]:
             c_ow = build_overwrites(guild, R, extra.get("view", cat["view"]), extra.get("send", cat["send"]),
                                    kind=ctype, connect=extra.get("connect"), speak=extra.get("speak"))
+            if key in config.FRIEND_HIDDEN_VOICES and R.get("friend"):
+                c_ow[R["friend"]] = PO(**FRIEND_DENY)
             # сначала по сохранённому ID (канал могли переименовать или перенести), потом по названию
             ch = bot.ch(guild, key)
             want = discord.TextChannel if ctype == "text" else discord.VoiceChannel
@@ -207,6 +234,7 @@ async def build_server(bot, guild, progress):
                     await ch.edit(overwrites=c_ow)
             db.gset(guild, f"ch:{key}", ch.id)
         await progress(f"✅ {cat['name']}")
+    await hide_voices_from_friends(bot, guild)  # привязанные каналы семьи сборка не трогает — им запрет отдельно
     await progress("✅ Права доступа выставлены по ролям")
 
     afk = bot.ch(guild, "afk")
@@ -532,6 +560,10 @@ class ServerSetup(commands.Cog):
                 made = await ensure_new_channels(self.bot, g)
                 if made:
                     log.info("«%s»: созданы каналы %s", g.name, ", ".join(made))
+                if self.bot.db.gget(g, "role:leader"):
+                    hidden = await hide_voices_from_friends(self.bot, g)
+                    if hidden:
+                        log.info("«%s»: войсов скрыто от друзей семьи — %s", g.name, hidden)
                 if hub and self.bot.db.gget(g, "role:leader"):
                     await hub.post_panels(g, False)  # панели с новой версией сами переставятся
             except Exception:
