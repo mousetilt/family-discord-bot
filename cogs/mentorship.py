@@ -26,6 +26,14 @@ INACTIVE_DAYS = 5   # как отчёт «💤 Неактив» по умолч�
 BULK_MAX = 50       # за один массовый перевод — не больше (лимиты Discord на роли)
 
 
+def clamp_days(v):
+    """Срок из речи ИИ («7 дней или более») → 0..365 или None (не назвали — берём настройку семьи)."""
+    try:
+        return None if v in (None, "", False) else max(0, min(365, int(v)))
+    except (TypeError, ValueError):
+        return None
+
+
 def is_inactive(bot, guild, member, days=INACTIVE_DAYS):
     """Та же мерка, что в отчёте «💤 Неактив»: отпускник или сидит в войсе — активен, иначе по last_seen."""
     vac = bot.role(guild, "vacation")
@@ -477,31 +485,73 @@ class Mentorship(commands.Cog):
             await self.close_card(guild, row["id"])
         return text
 
+    # ---------- выслуга новичка ----------
+    def newbie_since(self, guild, member):
+        """Когда человек стал новичком → (дата UTC или None, строка идущего срока или None).
+        Приоритет: идущий испытательный срок → принятая заявка → вход на сервер."""
+        db = self.bot.db
+        row = db.one("SELECT * FROM mentorships WHERE guild_id=? AND newbie_id=? AND status='active'",
+                     guild.id, member.id)
+        start = None
+        try:
+            if row and row["started_at"]:
+                start = parse_dt(row["started_at"])
+            else:
+                app = db.one("SELECT decided_at, created_at FROM applications WHERE guild_id=? AND user_id=? AND "
+                             "status='accepted' ORDER BY id DESC", guild.id, member.id)
+                if app and (app["decided_at"] or app["created_at"]):
+                    start = parse_dt(app["decided_at"] or app["created_at"])
+        except (TypeError, ValueError):
+            start = None
+        start = start or member.joined_at
+        if start is not None and start.tzinfo is None:
+            start = start.replace(tzinfo=dt.timezone.utc)
+        return start, row
+
+    def served(self, guild, member, min_days=None):
+        """Отбыл ли новичок срок. Мерка одна с автопереводом: идущий срок — по его due_at (с продлениями
+        «⏳ +3 дня»), без строки срока — дата «стал новичком» + срок семьи (/наставник срок, probation:days).
+        min_days — срок, явно названный в команде («7 дней или более»), он главнее настройки."""
+        start, row = self.newbie_since(guild, member)
+        if start is None:
+            return False  # не знаем, когда пришёл, — не переводим вслепую
+        if min_days is not None:
+            return (now() - start).days >= min_days
+        if row and row["due_at"]:
+            try:
+                return parse_dt(row["due_at"]) <= now()
+            except (TypeError, ValueError):
+                pass
+        return (now() - start).days >= self.days(guild)
+
     # ---------- массовый перевод (речь: promote_newbies) ----------
-    def newbie_pool(self, guild, only_active=True, days=INACTIVE_DAYS, actor=None):
-        """Новички семьи → (готовы, неактив, без экзамена, не по чину). Мерки те же, что у авто-испытательного
-        срока: экзамен (если включён hr:exam) + активность как в отчёте «Неактив»."""
+    def newbie_pool(self, guild, only_active=True, days=INACTIVE_DAYS, actor=None, min_days=None):
+        """Новички семьи → (готовы, неактив, без экзамена, не отбыли срок, не по чину). Мерки те же, что у
+        авто-испытательного срока: выслуга (served), экзамен (если включён hr:exam), активность как в «Неактиве»."""
         role = self.bot.role(guild, "newbie")
-        ready, idle, no_exam, higher = [], [], [], []
+        ready, idle, no_exam, fresh, higher = [], [], [], [], []
         if not role:
-            return ready, idle, no_exam, higher
+            return ready, idle, no_exam, fresh, higher
         for m in role.members:
             if m.bot:
                 continue
             if actor is not None and (m.id == actor.id or not self.bot.outranks(actor, m)):
                 higher.append(m)
+            elif not self.served(guild, m, min_days):
+                fresh.append(m)
             elif not self.exam_ok(guild, m.id):
                 no_exam.append(m)
             elif only_active and is_inactive(self.bot, guild, m, days):
                 idle.append(m)
             else:
                 ready.append(m)
-        return ready, idle, no_exam, higher
+        return ready, idle, no_exam, fresh, higher
 
-    async def promote_newbies(self, guild, by, only_active=True, days=INACTIVE_DAYS):
+    async def promote_newbies(self, guild, by, only_active=True, days=INACTIVE_DAYS, min_days=None):
         """Перевести всех подходящих новичков в Члены семьи. Идущий испытательный срок закрывается как пройденный
-        (тот же promote, что у кнопки и автоперевода). Возвращает отчёт строкой."""
-        ready, idle, no_exam, higher = self.newbie_pool(guild, only_active, days, by)
+        (тот же promote, что у кнопки и автоперевода). min_days — срок из команды, иначе срок семьи. → отчёт."""
+        min_days = clamp_days(min_days)
+        ready, idle, no_exam, fresh, higher = self.newbie_pool(guild, only_active, days, by, min_days)
         done, failed = [], []
         for m in ready[:BULK_MAX]:
             try:
@@ -517,7 +567,11 @@ class Mentorship(commands.Cog):
                 failed.append(m.display_name)
         lines = [f"🎓 Переведены в Члены семьи ({len(done)}): " + (", ".join(done) or "никого")]
         if len(ready) > BULK_MAX:
-            lines.append(f"⏳ Ещё {len(ready) - BULK_MAX} — повтори команду.")
+            lines.append(f"🔁 Ещё {len(ready) - BULK_MAX} — повтори команду.")
+        if fresh:
+            term = min_days if min_days is not None else self.days(guild)
+            lines.append(f"⏳ Ещё не отбыли срок ({term} дн.) — {len(fresh)} чел.: "
+                         + ", ".join(m.display_name for m in fresh[:20]))
         if idle:
             lines.append(f"💤 Пропустил неактивных {days}+ дн. ({len(idle)}): " + ", ".join(m.display_name for m in idle[:20]))
         if no_exam:

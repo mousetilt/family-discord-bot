@@ -187,9 +187,11 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
 - mute: {{"users":[...],"minutes":1..1440,"reason":"..."}}; unmute: {{"users":[...]}}; purge: {{"count":1..100}}
 - warn: {{"user":id,"reason":"...","fine":"30к" или null — если просят ещё и штраф}}; unwarn: {{"user":id}}; warns: {{"user":id}} — показать выговоры
 - rank: {{"user":id,"rank":"newbie"|"member"|"senior"}}; post: {{"user":id,"post":{"|".join(config.STAFF_POSTS)},"add":true|false}}
-- promote_newbies: {{"only_active":true}} — перевести ВСЕХ новичков разом в Члены семьи: «переведи/повысь
-  (всех активных) новичков в члены», «новичков в мемберы», «кто прошёл испытательный — в члены». Бот сам отберёт:
-  не в неактиве и со сданным экзаменом. «всех новичков, даже неактивных» → "only_active":false. Это НЕ inactive
+- promote_newbies: {{"only_active":true,"min_days":7 или null}} — перевести ВСЕХ новичков разом в Члены семьи:
+  «переведи/повысь (всех активных) новичков в члены», «новичков в мемберы», «кто прошёл испытательный — в члены».
+  Бот сам отберёт: отбыл срок, не в неактиве, сдал экзамен. Назвали срок («кто 7 дней или более в семье», «кто
+  неделю с нами» → 7) — число дней в "min_days"; не назвали — null (срок семьи). «даже неактивных» →
+  "only_active":false. Это НЕ inactive
 - accept: {{"user":id,"names":["как назвал"],"nick":"ник в игре или null","static":"Static ID или null"}} — принять
   человека в семью ВРУЧНУЮ, без экзамена («прими Петю в семью», «возьми Васю без экзамена»)
 - expel: {{"user":id,"reason":"..."}}; kick / ban: {{"user":id,"reason":"..."}}; nick: {{"user":id,"nick":"..."}}
@@ -648,9 +650,13 @@ class Assistant(commands.Cog):
             men = self.bot.get_cog("Mentorship")
             if not men:
                 return f"{LABEL[t]}: наставничество не загружено"
-            ready, idle, no_exam, _ = men.newbie_pool(g, a.get("only_active") is not False)
+            from cogs.mentorship import clamp_days
+            md = clamp_days(a.get("min_days"))
+            ready, idle, no_exam, fresh, _ = men.newbie_pool(g, a.get("only_active") is not False, min_days=md)
             names = ", ".join(m.display_name for m in ready[:15]) + (" …" if len(ready) > 15 else "")
-            skip = " · ".join(x for x in (f"неактив {len(idle)}" if idle else "",
+            term = md if md is not None else men.days(g)
+            skip = " · ".join(x for x in (f"не отбыли срок {term} дн. — {len(fresh)}" if fresh else "",
+                                          f"неактив {len(idle)}" if idle else "",
                                           f"без экзамена {len(no_exam)}" if no_exam else "") if x)
             return (f"{LABEL[t]}: {len(ready)} чел." + (f" ({names})" if names else "")
                     + (f" · пропущу: {skip}" if skip else "")
@@ -1198,7 +1204,8 @@ class Assistant(commands.Cog):
                         out.append((await apps.manual_accept(g, me, m, a.get("nick"), a.get("static")))[1])
                 elif t == "promote_newbies":
                     men = bot.get_cog("Mentorship")
-                    out.append(await men.promote_newbies(g, me, a.get("only_active") is not False) if men
+                    out.append(await men.promote_newbies(g, me, a.get("only_active") is not False,
+                                                             min_days=a.get("min_days")) if men
                                else "❌ Наставничество не загружено.")
                 elif t in ("car_add", "car_give", "car_status", "car_remove"):
                     gar = bot.get_cog("Garage")
