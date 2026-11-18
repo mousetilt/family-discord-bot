@@ -285,7 +285,7 @@ class Gatherings(commands.Cog):
     @app_commands.default_permissions(create_events=True)
     @app_commands.command(name="сбор", description="Объявить сбор семьи")
     @app_commands.rename(what="что", when="когда", where="где", limit="мест", remind="напомнить_через")
-    @app_commands.describe(what="Что делаем", when="Время по Москве: «сегодня 20:00», «завтра 19:30», «через 40 минут»", where="Место сбора",
+    @app_commands.describe(what="Что делаем", when="По Москве: «сегодня 20:00», «завтра 19:30», «суббота 21:00», «через 40 минут»", where="Место сбора",
                            limit="Сколько людей нужно (0 — без лимита)",
                            remind="Через сколько минут бот голосом позовёт всех на сбор (0 — только сразу)")
     @staff_only(config.ORGANIZERS)

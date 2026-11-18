@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """ИИ-юрист: ответы по ООС-правилам проекта и IC-законам сервера, разбор ситуаций, составление документов.
 Без ИИ-ключа работает как поиск по базе знаний с цитатами пунктов."""
+import asyncio
 import io
 import logging
 import time
@@ -11,7 +12,7 @@ from discord.ext import commands
 
 from core import config
 from core.ai import AIUnavailable
-from core.kb import fetch_url, read_file
+from core.kb import FetchBlocked, fetch_url, new_session, read_file
 
 log = logging.getLogger("family-bot.lawyer")
 KB_STAFF = config.LEAD + ["hr_head"]
@@ -270,15 +271,36 @@ class Lawyer(commands.Cog):
             return await inter.response.send_message("⛔ Недостаточно прав.", ephemeral=True)
         await inter.response.defer(ephemeral=True, thinking=True)
         rows = self.bot.db.all("SELECT * FROM kb_docs WHERE guild_id IN (0, ?) AND url IS NOT NULL", inter.guild.id)
-        ok, bad = 0, []
-        for r in rows:
+        ok, bad, later = 0, [], []
+        progress = None
+        async with new_session() as s:  # одна сессия на прогон: общие куки, keep-alive
+            for i, r in enumerate(rows, 1):
+                if i > 1:
+                    await asyncio.sleep(2)  # вежливо, чтобы форум не включал анти-флуд
+                try:
+                    t, content, url2 = await fetch_url(r["url"], session=s)
+                    self.bot.kb.add(r["guild_id"], r["title"], url2, r["category"], content, inter.user.id)
+                    ok += 1
+                except FetchBlocked:
+                    later.append(f"⏳ №{r['id']} {r['title'][:60]} — временно недоступен, попробуй позже")
+                except Exception as e:
+                    bad.append(f"❌ №{r['id']} {r['title'][:60]} — {e}")
+                if i % 5 == 0 and i < len(rows):
+                    text = f"⏳ Обновляю базу: {i}/{len(rows)} (готово {ok}, ошибок {len(bad) + len(later)})…"
+                    try:
+                        if progress is None:
+                            progress = await inter.followup.send(text, ephemeral=True, wait=True)
+                        else:
+                            await progress.edit(content=text)
+                    except discord.HTTPException:
+                        pass
+        report = f"🔄 Обновлено: {ok}/{len(rows)}\n" + "\n".join(bad + later)
+        if progress is not None:
             try:
-                t, content, url2 = await fetch_url(r["url"])
-                self.bot.kb.add(r["guild_id"], r["title"], url2, r["category"], content, inter.user.id)
-                ok += 1
-            except Exception as e:
-                bad.append(f"❌ №{r['id']} {r['title'][:60]} — {e}")
-        await inter.followup.send(f"🔄 Обновлено: {ok}/{len(rows)}\n" + "\n".join(bad)[:1800], ephemeral=True)
+                return await progress.edit(content=report[:1900])
+            except discord.HTTPException:
+                pass
+        await inter.followup.send(report[:1900], ephemeral=True)
 
 
 async def setup(bot):

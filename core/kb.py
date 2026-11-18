@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """База знаний для ИИ-юриста: тексты правил и законов, импорт с форума, поиск по ним."""
+import asyncio
 import hashlib
 import io
 import logging
 import math
+import random
 import re
 from array import array
+from urllib.parse import urlsplit
 from collections import Counter
 
 import aiohttp
@@ -344,39 +347,98 @@ def parse_generic(html):
     return title, _clean_block(main)
 
 
+LAWS_SECTION = "https://forum.russia.online/forums/zakonodatel-naya-baza.1471/"  # Referer для форума
+RETRY_CODES = (403, 429)       # временный анти-флуд форума — пробуем ещё раз с паузой
+RETRY_DELAYS = (3, 6, 12)      # 4 попытки: сразу, +3 с, +6 с, +12 с (плюс джиттер)
+PAGE_PAUSE = 1.5               # пауза между страницами одной темы
+
+
+class FetchBlocked(ValueError):
+    """Сайт так и не пустил (403/429) после всех повторов — временно, стоит попробовать позже."""
+
+    def __init__(self, status):
+        super().__init__(f"Сайт ответил кодом {status} (анти-флуд) — временно недоступен, попробуй позже")
+        self.status = status
+
+
+def _headers(url):
+    parts = urlsplit(url)
+    referer = LAWS_SECTION if parts.netloc == "forum.russia.online" else f"{parts.scheme}://{parts.netloc}/"
+    return {
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Accept-Encoding": "gzip, deflate",  # br не просим — для него нужна отдельная библиотека
+        "Connection": "keep-alive",
+        "Referer": referer,
+    }
+
+
+def _is_login_wall(html):
+    """403 от XenForo со страницей входа — это не анти-флуд, повторять бессмысленно."""
+    head = html[:5000]
+    return 'data-template="login"' in head or bool(re.search(r"<title>\s*(Вход|Log in)\b", head, re.I))
+
+
+def new_session():
+    """Сессия для скачивания документов: одна на прогон — общие куки и keep-alive."""
+    return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=40))
+
+
 async def _get(session, url):
-    async with session.get(url, allow_redirects=True) as r:
-        if r.status != 200:
-            raise ValueError(f"Сайт ответил кодом {r.status}")
-        return await r.text(errors="replace")
+    status = None
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        if attempt:
+            await asyncio.sleep(RETRY_DELAYS[attempt - 1] + random.uniform(0, 1.5))
+        async with session.get(url, allow_redirects=True, headers=_headers(url)) as r:
+            if r.status == 200:
+                return await r.text(errors="replace")
+            status = r.status
+            if status not in RETRY_CODES:
+                raise ValueError(f"Сайт ответил кодом {status}")
+            if status == 403 and _is_login_wall(await r.text(errors="replace")):
+                raise ValueError("Тема закрыта для гостей (форум просит войти) — скачай текст вручную "
+                                 "и загрузи файлом: /база файл")
+            retry_after = r.headers.get("Retry-After", "")
+        if retry_after.isdigit() and attempt < len(RETRY_DELAYS):
+            await asyncio.sleep(min(int(retry_after), 30))
+    raise FetchBlocked(status)
 
 
-async def fetch_url(url, max_pages=10):
-    """Скачивает тему форума (все посты автора, до max_pages страниц) или обычную страницу."""
-    url = url.strip().split("#")[0]
+async def _fetch(s, url, max_pages):
     m = re.match(r"(https?://[^/]+/threads/[^/?#]+?)/?(?:page-\d+)?/?(?:\?.*)?$", url)
-    headers = {"User-Agent": UA, "Accept-Language": "ru-RU,ru;q=0.9"}
-    timeout = aiohttp.ClientTimeout(total=40)
-    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as s:
-        if m:
-            base = m.group(1) + "/"
-            html = await _get(s, base)
-            title, author, posts, pages = parse_thread(html)
-            for p in range(2, min(pages, max_pages) + 1):
-                try:
-                    _, _, more, _ = parse_thread(await _get(s, f"{base}page-{p}"), author)
-                    posts += more
-                except Exception:
-                    break
-            content = "\n\n".join(posts).strip()
-            if not content:
-                raise ValueError("Не нашёл текст в теме — возможно, она закрыта для гостей.")
-            return title, content, base
-        html = await _get(s, url)
-        title, content = parse_generic(html)
-        if len(content) < 50:
-            raise ValueError("На странице почти нет текста.")
-        return title, content[:300000], url
+    if m:
+        base = m.group(1) + "/"
+        html = await _get(s, base)
+        title, author, posts, pages = parse_thread(html)
+        for p in range(2, min(pages, max_pages) + 1):
+            await asyncio.sleep(PAGE_PAUSE)
+            try:
+                _, _, more, _ = parse_thread(await _get(s, f"{base}page-{p}"), author)
+                posts += more
+            except FetchBlocked:
+                raise  # не сохраняем полдокумента вместо целого — пусть останется старая версия
+            except Exception:
+                break
+        content = "\n\n".join(posts).strip()
+        if not content:
+            raise ValueError("Не нашёл текст в теме — возможно, она закрыта для гостей.")
+        return title, content, base
+    html = await _get(s, url)
+    title, content = parse_generic(html)
+    if len(content) < 50:
+        raise ValueError("На странице почти нет текста.")
+    return title, content[:300000], url
+
+
+async def fetch_url(url, max_pages=10, session=None):
+    """Скачивает тему форума (все посты автора, до max_pages страниц) или обычную страницу.
+    session — общая сессия прогона (куки/keep-alive); без неё создаётся своя."""
+    url = url.strip().split("#")[0]
+    if session is not None:
+        return await _fetch(session, url, max_pages)
+    async with new_session() as s:
+        return await _fetch(s, url, max_pages)
 
 
 def read_file(filename, data: bytes):

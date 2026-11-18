@@ -184,16 +184,21 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
 - move: {{"users":[id...]}} или {{"source":"my"|"all"|"channel:<id>"}}, плюс "to": id канала и "to_name": как назвал автор
 - disconnect: {{"users":[...]}} или {{"source":...}} — выкинуть людей из войса (не путай с leave)
 - voice_mute / voice_unmute: {{"users":[...]}} или {{"source":...}} — микрофоны в войсе
-- say: {{"text":"что произнести голосом"}} — САМ зайду в войс (где стою или в войс автора) и скажу вслух.
-  «зайди к X и спроси/скажи», «спроси у X как дела», «передай X…», «поздоровайся в войсе» — это say с ГОТОВОЙ
-  фразой от себя, напр. {{"type":"say","text":"Дарья, ну как ты, рассказывай!"}}. Если ещё и слушать команды —
-  добавь отдельным действием listen.
+- say: {{"text":"что произнести голосом","names":["к кому идти"] или null,"to_name":"канал, если назван" или null,
+  "all":true|false}} — САМ найду войс и скажу вслух; автору сидеть в войсе НЕ нужно, не отказывай из-за этого.
+  «зайди к X и спроси/скажи», «спроси у X как дела», «передай X…» — names:[X] (пойду в ЕГО войс);
+  «зайди к ребятам/ко всем в войс и передай…», «передай всем в войсе, что…» — all:true (скажу во всех войсах с людьми);
+  «скажи в балконе…» — to_name; «скажи в войсе, что…», «поздоровайся в войсе» — без уточнений (где я стою, войс
+  автора или самый людный). Фраза ГОТОВАЯ, от себя, напр. {{"type":"say","names":["Дарья"],"text":"Дарья, ну как ты,
+  рассказывай!"}} или {{"type":"say","all":true,"text":"Народ, сбор отменяется!"}}. names — только тот, К КОМУ идти,
+  а не о ком речь. Если ещё и слушать команды — добавь отдельным действием listen.
 - ask_voice: {{"users":[id],"names":["как назвал"],"question":"вопрос вслух, готовой фразой от тебя",
   "report_to":id или null,"report_to_name":"кому прислать ответ" или null}} — САМ найду человека в ЕГО войсе,
   спрошу вслух, послушаю ответ и пришлю расшифровку в ЛС (по умолчанию — автору). Это когда ответ надо ПРИНЕСТИ:
   «зайди к Эмилю и спроси, сколько поднял, ответ напиши мне», «узнай у Даши в войсе…, скинь Юлиану». Просто
   спросить/сказать без возврата ответа — это say. gather: {{"what":"...","when":"...","where":"..."}} — сбор
-- announce: {{"title":"...","text":"...","voice":true|false,"at":"когда, если просят позже: «в 20:00», «завтра 18:00», «через 2 часа»; иначе null"}};
+  (when как сказал автор: «сегодня 20:00», «завтра 19:30», «суббота 21:00», «в пятницу 20:00», «через 2 часа»)
+- announce: {{"title":"...","text":"...","voice":true|false,"at":"когда, если просят позже: «в 20:00», «завтра 18:00», «в пятницу 20:00», «через 2 часа»; иначе null"}};
 - draft: {{"kind":"announce"|"event"|"pr"|"recruit"|"congrats","topic":"о чём"}} — написать черновик текста (не публикуя); alarm: {{"text":"..."}} — тревога во всех войсах
 - mute: {{"users":[...],"minutes":1..1440,"reason":"..."}}; unmute: {{"users":[...]}}; purge: {{"count":1..100}}
 - warn: {{"user":id,"reason":"...","fine":"30к" или null — если просят ещё и штраф}}; unwarn: {{"user":id}}; warns: {{"user":id}} — показать выговоры
@@ -518,6 +523,50 @@ class Assistant(commands.Cog):
                 out.append(best)
         return out
 
+    def say_channel(self, g, author, a):
+        """Куда идти говорить (say) → ([id каналов], «куда» для ответа) или ([], почему некуда).
+        Порядок: названный человек → названный канал → «всем» (все войсы с людьми) → где бот уже стоит/слушает →
+        войс автора → самый людный войс семьи. Автору сидеть в войсе не обязательно."""
+        music = self.bot.get_cog("Music")
+        jarvis = self.bot.get_cog("Jarvis")
+        if not music:
+            return [], "голосовой модуль не загружен"
+
+        def people(c):
+            return [m for m in c.members if not m.bot] if c else []
+
+        q = {"users": a.get("users"), "user": a.get("user"),
+             "names": a.get("names") or ([a["target_name"]] if a.get("target_name") else None)}
+        if q["users"] or q["user"] or q["names"]:
+            found = [m for m in self.find_members(g, q) if not m.bot]
+            inv = next((m for m in found if m.voice and m.voice.channel), None)
+            if inv:
+                return [inv.voice.channel.id], f"к {inv.display_name} в {inv.voice.channel.mention}"
+            if found:
+                return [], f"{found[0].display_name} сейчас не в войсе — некуда идти"
+        if a.get("to") or a.get("to_name"):
+            c = self.find_voice(g, a.get("to"), a.get("to_name"))
+            if c:
+                return [c.id], f"в {c.mention}"
+        if a.get("all"):
+            chans = music.voice_targets(g, limit=5)
+            if chans:
+                return [c.id for c in chans], "во все войсы, где есть люди (" + ", ".join(c.mention for c in chans) + ")"
+            return [], "в войсе сейчас пусто — некому передавать"
+        li = jarvis.listeners.get(g.id) if jarvis else None
+        vc = music.vc(g) if music.dn else None
+        bot_ch = g.get_channel(li.channel_id if li else
+                               (vc.channel.id if vc and vc.is_connected() and vc.channel else 0))
+        if people(bot_ch):
+            return [bot_ch.id], f"тут, в {bot_ch.mention}"
+        mem = g.get_member(author.id)
+        if mem and mem.voice and mem.voice.channel:
+            return [mem.voice.channel.id], f"в твой войс {mem.voice.channel.mention}"
+        chans = music.voice_targets(g, limit=1)
+        if chans:
+            return [chans[0].id], f"в {chans[0].mention}, где больше всего народу"
+        return [], "в войсе сейчас пусто — некому передавать"
+
     # ---------- приём сообщений ----------
     def claims(self, message, in_lawyer_channel=None):
         """Берёт ли помощник это сообщение. «Швейцар, …» — всегда; упоминание бота — везде, кроме канала юриста
@@ -758,7 +807,8 @@ class Assistant(commands.Cog):
             return ("Не вышло. " + " ".join(r.lstrip("❌⛔⚠️ ") for r in acts if r.startswith(("❌", "⛔", "⚠️"))))[:200] \
                 if failed else (reply or "Готово")
         e = discord.Embed(title="🎩 Подтверди", description=(reply + "\n\n" if reply else "") +
-                          "\n".join(f"• {self.describe(ctx.guild, a)}" for a in plan), color=config.COLOR)
+                          "\n".join(f"• {self.describe(ctx.guild, {**a, '_author': ctx.author})}" for a in plan),
+                          color=config.COLOR)
         self.remember(ctx, request, "Попросил подтвердить: " + (reply or "действие"))
         if getattr(ctx, "voice", False):
             ctx.pending = plan
@@ -806,6 +856,10 @@ class Assistant(commands.Cog):
             return f"{LABEL[t]} {who or a.get('source', '')} → {to.name if to else '?'}"
         if t in ("mute",):
             return f"{LABEL[t]} {who} на {a.get('minutes', 10)} мин · {a.get('reason', '')}"
+        if t == "say":
+            ids, where = self.say_channel(g, a.get("_author") or g.me, a)
+            return (f"🗣 Скажу в войсе: {where if ids else '— (' + where + ')'} — "
+                    f"«{str(a.get('text') or '')[:150]}»")
         ms = self.find_members(g, a)
         if t == "warn":
             m = ms[0] if ms else None
@@ -1301,14 +1355,20 @@ class Assistant(commands.Cog):
                             pass
                     out.append(f"🔀 Перенёс {n} чел. в {to.mention}" if t == "move" else f"🔌 Отключил {n} чел.")
                 elif t == "say":
-                    # сам захожу в войс: где уже стою, иначе — в войс автора команды
-                    say_ch = (me.voice.channel if me.voice and me.voice.channel
-                              else (message.author.voice.channel if message.author.voice else None))
-                    if not (say_ch and music):
-                        out.append("❌ Зайди сам в войс — я подойду и скажу.")
+                    # сам нахожу, куда идти (say_channel) — автору сидеть в войсе не нужно
+                    text = str(a.get("text") or "").strip()[:400]
+                    ids, where = self.say_channel(g, me, a)
+                    if not text:
+                        out.append("❌ Не понял, что сказать.")
+                    elif not ids:
+                        out.append(f"❌ {where[:1].upper() + where[1:]}.")
+                    elif await music.announce(g, ids, text=text):
+                        out.append(f"🗣 Сказал {where}.")
                     else:
-                        await music.announce(g, [say_ch.id], text=str(a.get("text", ""))[:400])
-                        out.append("🗣 Сказал.")
+                        vc = music.vc(g) if music.dn else None
+                        out.append(f"❌ Не вышло сказать {where}"
+                                   + (f": в <#{vc.channel.id}> играет музыка, не перебиваю." if vc and vc.channel
+                                      and vc.is_playing() else " — голосовой модуль не готов, попробуй через минуту."))
                 elif t == "ask_voice":
                     q = {"users": a.get("users"), "user": a.get("user"),
                          "names": a.get("names") or ([a["target_name"]] if a.get("target_name") else None)}

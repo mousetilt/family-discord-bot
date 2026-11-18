@@ -64,8 +64,25 @@ def fmt_amount(n):
 
 
 # ─────────────────────────────── время ───────────────────────────────
+WEEKDAYS = [  # основа (любой падеж) → номер дня недели, пн=0 … вс=6; «ё» уже заменена на «е»
+    (r"понедельник\w*|пн", 0), (r"вторник\w*|вт", 1), (r"сред[аеуы]|ср", 2), (r"четверг\w*|чт", 3),
+    (r"пятниц\w*|пт", 4), (r"суббот\w*|сб", 5), (r"воскресень\w*|вс", 6),
+]
+WEEKDAY_RX = [(re.compile(rf"(?<!\w)(?:{p})(?!\w)"), n) for p, n in WEEKDAYS]
+NEXT_WEEK = re.compile(r"следующ\w*\s+(?:\w+\s+)?(?:понедельник|вторник|сред|четверг|пятниц|суббот|воскресень|"
+                       r"пн|вт|ср|чт|пт|сб|вс)|через\s+неделю")
+
+
+def _weekday(s):
+    for rx, n in WEEKDAY_RX:
+        if rx.search(s):
+            return n
+    return None
+
+
 def parse_when(text, base=None, max_days=60, grace_min=0):
-    """«20:00», «20.30», «в 9», «завтра 18:30», «послезавтра в 7», «25.11 19:00», «через 40 минут / 2 часа / 3 дня»
+    """«20:00», «20.30», «в 9», «завтра 18:30», «послезавтра в 7», «25.11 19:00», «через 40 минут / 2 часа / 3 дня»,
+    «суббота 21:00», «в пятницу 20:00», «следующий понедельник 20:00»
     (время семьи, по умолчанию Москва) → datetime в UTC или None.
     grace_min — сколько минут «в прошлом» ещё считать этим временем (сбор, который только что начался);
     уже прошедшее сегодня время без «сегодня» — это завтра, прошедшая дата без года — следующий год."""
@@ -99,6 +116,13 @@ def parse_when(text, base=None, max_days=60, grace_min=0):
                 t = dt.datetime(y, int(date.group(2)), int(date.group(1)), hh, mm, tzinfo=MSK)
                 if not date.group(3) and t < base - grace:
                     t = t.replace(year=t.year + 1)
+            elif (wd := _weekday(s)) is not None:
+                delta = (wd - base.weekday()) % 7
+                t = (base + dt.timedelta(days=delta)).replace(hour=hh, minute=mm, second=0, microsecond=0)
+                if delta == 0 and t < base - grace:
+                    t += dt.timedelta(days=7)  # «во вторник 9:00», а сегодня вторник и уже 21:00
+                if NEXT_WEEK.search(s):
+                    t += dt.timedelta(days=7)  # «следующую субботу», «через неделю в субботу»
             else:
                 day = 2 if "послезавтра" in s else 1 if "завтра" in s else 0
                 t = (base + dt.timedelta(days=day)).replace(hour=hh, minute=mm, second=0, microsecond=0)

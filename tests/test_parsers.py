@@ -45,6 +45,22 @@ class When(unittest.TestCase):
         for text, want in cases.items():
             self.assertEqual(self.at(text), want, text)
 
+    def test_weekdays(self):
+        cases = {"суббота 21:00": "21.11 21:00", "в пятницу 19:30": "20.11 19:30",
+                 "вторник в 9": "24.11 09:00",  # сегодня вторник, 9:00 уже прошло → через неделю
+                 "во вторник 22:00": "17.11 22:00",  # сегодня, ещё не прошло
+                 "следующий понедельник 20:00": "30.11 20:00", "в сб 21:00": "21.11 21:00",
+                 "через неделю в субботу 20:00": "28.11 20:00", "в воскресенье в 12": "22.11 12:00",
+                 "в среду 18:00": "18.11 18:00", "25.11 19:00 суббота": "25.11 19:00"}  # явная дата главнее
+        for text, want in cases.items():
+            self.assertEqual(self.at(text), want, text)
+        for text, wd in {"суббота 21:00": 5, "в пятницу 19:30": 4, "вторник в 9": 1,
+                         "следующий понедельник 20:00": 0}.items():
+            t = parse_when(text, self.base)
+            self.assertGreater(t, self.base, text)
+            self.assertEqual(t.astimezone(MSK).weekday(), wd, text)
+        self.assertEqual(self.at("среди ночи в 3"), "18.11 03:00")  # «среди» — не среда
+
     def test_limits(self):
         self.assertIsNone(self.at("абв"))
         self.assertIsNone(self.at("25:00"))
