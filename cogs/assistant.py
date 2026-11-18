@@ -17,7 +17,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from core import config
+from core import agent, config
 from core.forum import forum_intent
 from core.names import forms, similarity
 from core.botcore import fmt_hours, now, now_iso, parse_dt, safe_dm
@@ -31,7 +31,7 @@ INFO = "\u200b"   # пометка «это ответ-справка»: пок�
 ASK = {"law", "profile", "top", "inactive", "people", "warns", "bl_check", "market", "digest", "queue", "roll", "recruit_stats",
        "car_list",
        "web_search", "missed", "draft",
-       "treasury_balance", "treasury_debtors", "salary_rates", "fine_list", "forum_check"}
+       "treasury_balance", "treasury_debtors", "salary_rates", "fine_list", "forum_check", "law_doc"}
 # казна (cogs/treasury.py): запись — после «Выполнить», справки — сразу
 TREASURY_ACTS = {"treasury_in", "treasury_out", "treasury_due", "treasury_balance", "treasury_debtors", "dues_set",
                  "salary_rates", "salary_rate_set", "salary_ranks", "salary_role", "salary_pay",
@@ -44,7 +44,7 @@ GARAGE_BY = config.LEAD + ["senior", "treasurer"]  # ведут автопарк
 CHANNEL_ONLY = {"purge", "slowmode", "poll"}  # работают с текущим каналом — в ЛС их не выполняем
 # болтать со Швейцаром может вся семья и друзья; им доступны только безобидные вещи
 EVERYONE = config.FAMILY_PLUS
-FOR_ALL = {"forum_check", "paid_claim", "vacation", "vacation_end", "room", "car_list", "web_search", "missed", "law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
+FOR_ALL = {"forum_check", "law_doc", "paid_claim", "vacation", "vacation_end", "room", "car_list", "web_search", "missed", "law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
            "music_pause", "music_resume", "music_volume", "listen", "listen_stop", "leave", "invite", "forget"}
 INVITE_GAP = 10 * 60  # один человек зовёт кого-то в войс через бота не чаще раза в 10 минут
 # живые отговорки вместо казённых фраз
@@ -78,6 +78,7 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "peopl
          "paid_claim": config.FAMILY_RANKS, "undo": USERS, "vacation": config.FAMILY_RANKS,
          "vacation_end": config.FAMILY_RANKS, "room": config.FAMILY_PLUS, "mentor_assign": config.MENTORS,
          "relation_set": config.DIPLO, "protocol": config.LEAD,
+         "law_doc": USERS,
          "forum_check": config.FAMILY_RANKS}  # себя — любой из семьи; другого — руководство и старший состав (проверка внутри)
 LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив", "people": "👥 Кто в семье",
          "warns": "⚖️ Выговоры", "bl_check": "⛔ Проверка ЧС", "market": "🛒 Рынок", "queue": "🎶 Очередь",
@@ -103,7 +104,7 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "fine_list": "🧾 Неоплаченные штрафы", "fine_paid": "✅ Оплата штрафа", "paid_claim": "🧾 Заявка в казну", "undo": "↩️ Отменить последнее",
          "vacation": "🌴 Отпуск", "vacation_end": "👋 Из отпуска", "room": "🔊 Моя комната",
          "mentor_assign": "🧑‍🏫 Наставник", "relation_set": "🤝 Отношения с семьёй", "protocol": "📝 Протокол собрания",
-         "forum_check": "🔎 Проверка по форуму"}
+         "forum_check": "🔎 Проверка по форуму", "law_doc": "📄 Черновик документа"}
 
 # как каналы называют в разговоре (ключ канала из настроек → слова)
 CHANNEL_HINTS = {
@@ -744,6 +745,8 @@ class Assistant(commands.Cog):
         итог для озвучки."""
         ai = self.bot.ai_for(ctx.author.guild)
         fi = forum_intent(request)  # «проверь меня по форуму» понятно и без ИИ — и не уйдёт к юристу
+        if fi is not None and ai.is_claude and agent.multi_step(request):
+            fi = None  # «собери дела … и сделай черновик» — это цепочка, пусть решает модель
         if fi is None and not ai.on:
             await send(content="ИИ не настроен — помощник не работает. Руководство может подключить бесплатный ключ: "
                                "`/ии ключ`.")
@@ -757,10 +760,12 @@ class Assistant(commands.Cog):
                 system = SYSTEM if self.bot.has(ctx.author, USERS) else SYSTEM_LITE
                 if self.bot.feature(ctx.author.guild, "treasury") and self.bot.has(ctx.author, config.TREASURY):
                     system = system[:-len(TAIL)] + ACT_TREASURY + TAIL
+                if ai.is_claude:  # многошаговые цепочки — только на Claude (бесплатным промпт прежний)
+                    system = system[:-len(TAIL)] + agent.PROMPT + TAIL
                 system = self.bot.brand(ctx.author.guild, system)
-                data = await ai.ask_json(system, f"{self.context(ctx)}\n\n{card}{self.chat(ctx)}{self.history(ctx)}"
-                                                          f"Сообщение от {ctx.author.display_name}: {request}",
-                                                  max_tokens=500, smart=True, cache=True)
+                prompt = (f"{self.context(ctx)}\n\n{card}{self.chat(ctx)}{self.history(ctx)}"
+                          f"Сообщение от {ctx.author.display_name}: {request}")
+                data = await ai.ask_json(system, prompt, max_tokens=500, smart=True, cache=True)
             except Exception as e:
                 log.warning("Швейцар: ИИ не ответил — %s", str(e)[:200])
                 text = random.choice(NO_AI)
@@ -775,8 +780,10 @@ class Assistant(commands.Cog):
                 persona.apply(ctx.author.guild.id, ctx.author.id, data.get("mood"), data.get("remember"))
             except Exception:
                 log.exception("Швейцар: не записал досье")
+        if fi is None and ai.is_claude and data.get("continue"):
+            data = await self.agent(ctx, ai, system, prompt, data, send)
         plan = [a for a in (data.get("actions") or []) if isinstance(a, dict) and a.get("type") in PERMS]
-        reply = str(data.get("reply") or "")[:500]
+        reply = str(data.get("reply") or "")[:agent.REPLY_CHARS if data.get("_agent") else 500]
         if not plan:
             reply = reply or random.choice(HUH)
             self.remember(ctx, request, reply, ask="?" in reply)
@@ -808,6 +815,69 @@ class Assistant(commands.Cog):
                 await send(content=f"🤔 «{raw}» — это кто из них?", view=view)
                 return "Уточни кнопкой, кого ты имел в виду"
         return await self.proceed(ctx, request, send, plan, reply)
+
+    async def agent(self, ctx, ai, system, prompt, data, send):
+        """Многошаговая цепочка (только Claude): справки выполняются сразу, их результат — обратно модели;
+        изменяющие действия копятся и возвращаются в финальный план (дальше — права и «Выполнить», как всегда).
+        → data финального шага с пометкой _agent (длинный ответ разрешён)."""
+        tr, pending, done, deliver, status = agent.Transcript(), [], [], [], None
+        voice = getattr(ctx, "voice", False)
+        boss = self.bot.has(ctx.author, USERS)
+        for step in range(1, agent.MAX_STEPS):
+            acts = [a for a in (data.get("actions") or []) if isinstance(a, dict) and a.get("type") in PERMS]
+            reads, muts = agent.split(acts, ASK)
+            pending = agent.merge(pending, muts)
+            if not data.get("continue") or not reads:
+                break
+            allowed = [a for a in reads if self.may(ctx.author, a["type"])][:agent.STEP_READS]
+            denied = [LABEL[a["type"]] for a in reads if not self.may(ctx.author, a["type"])]
+            for a in allowed:
+                if a["type"] == "profile" and not boss:  # чужие профили — только тем, у кого есть права
+                    a.pop("names", None)
+                    a.pop("users", None)
+                    a["user"] = ctx.author.id
+            done += [agent.progress_label(a["type"]) for a in allowed]
+            if not voice and allowed:
+                status = await self._progress(send, status, agent.progress_text(done))
+            res = await self.run(ctx, allowed, None) if allowed else []
+            text = "\n\n".join(r.lstrip(INFO) for r in res)
+            if denied:
+                text += "\n\nНЕТ ПРАВ у автора: " + ", ".join(denied)
+            deliver += [r.lstrip(INFO) for a, r in zip(allowed, res) if a["type"] in agent.DELIVER]
+            tr.add(step, allowed or reads, text)
+            try:
+                data = await ai.ask_json(system, prompt + tr.render(last=step >= agent.MAX_STEPS - 1),
+                                         max_tokens=900, smart=True, cache=True)
+            except Exception as e:  # noqa: BLE001 — лимит/сеть посреди цепочки: отдаём то, что успели
+                log.warning("Швейцар-агент: шаг %d не ответил — %s", step + 1, str(e)[:150])
+                data = {"reply": "ИИ сорвался посреди задачи. Вот что успел собрать:\n" + text[:1200], "actions": []}
+                break
+            if not isinstance(data, dict):
+                data = {"reply": random.choice(HUH), "actions": []}
+                break
+        acts = [a for a in (data.get("actions") or []) if isinstance(a, dict) and a.get("type") in PERMS]
+        reads, muts = agent.split(acts, ASK)
+        if data.get("continue"):  # шаги кончились, а модель хочет ещё — справки выполнит обычный план (последний шаг)
+            reads = reads[:agent.STEP_READS]
+        if not voice and status is not None:
+            await self._progress(send, status, agent.progress_text(done, finished=True))
+        for doc in deliver:  # документ/черновик — человеку целиком, кусками по 1900
+            for i in range(0, min(len(doc), 5700), 1900):
+                await send(content=doc[i:i + 1900])
+        return {**data, "actions": reads + agent.merge(pending, muts), "_agent": True}
+
+    @staticmethod
+    async def _progress(send, status, text):
+        """Сообщение с ходом цепочки: первый раз — отправить, дальше — править его же."""
+        if not text:
+            return status
+        try:
+            if status is None:
+                return await send(content=text)
+            await status.edit(content=text)
+        except (discord.HTTPException, AttributeError):
+            pass
+        return status
 
     async def proceed(self, ctx, request, send, plan, reply):
         """Выполнить план (безопасное — сразу, серьёзное — через «Выполнить»)."""
@@ -1090,6 +1160,15 @@ class Assistant(commands.Cog):
         g, me, bot, db, t = message.guild, message.author, self.bot, self.bot.db, a["type"]
         if t == "forum_check":
             return await self.forum_check(message, g, me, a)
+        if t == "law_doc":
+            law = bot.get_cog("Lawyer")
+            if not law:
+                return "Юрист не загружен."
+            q = " ".join(str(a.get(k) or "") for k in ("kind", "question")).strip() or str(message.content or "")
+            facts = str(a.get("facts") or "").strip()
+            res = await law.safe_full(g.id, (f"Составь документ: {q}" + (f"\nФакты дела: {facts}" if facts else ""))[:3000],
+                                      "doc", member=me)
+            return str(res.get("text") or "Юрист не ответил.")
         if t == "law":
             law = bot.get_cog("Lawyer")
             q = str(a.get("question") or message.content or "")[:500]
