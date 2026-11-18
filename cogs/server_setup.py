@@ -98,7 +98,7 @@ def find_category(bot, guild, cat):
 
 # Каналы, добавленные после первой сборки сервера: при старте бот создаёт их сам (один раз, без «Собрать сервер»).
 # Значение — модуль, без которого канал не нужен. Удалили канал руками — второй раз не создаём (флаг auto:<key>).
-AUTO_CHANNELS = {"panel": None, "treasury_log": "treasury", "garage": "garage"}
+AUTO_CHANNELS = {"panel": None, "treasury_log": "treasury", "garage": "garage", "audit": "journal", "voice_log": "journal"}
 
 
 async def ensure_new_channels(bot, guild):
@@ -411,7 +411,7 @@ def audit(bot, guild):
         out.append("✅ У бота права администратора")
     else:
         need = ["manage_roles", "manage_channels", "moderate_members", "move_members", "manage_messages",
-                "kick_members", "ban_members", "manage_guild"]
+                "kick_members", "ban_members", "manage_guild", "view_audit_log"]
         miss = [n for n in need if not getattr(p, n)]
         out.append("⚠️ Боту не хватает прав: " + ", ".join(miss) if miss else "✅ Права бота в порядке")
         bad |= bool(miss)

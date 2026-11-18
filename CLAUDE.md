@@ -126,6 +126,12 @@
 - SQLite в режиме WAL (`core/db.py`), файлы `*.db-wal`/`*.db-shm` в `.gitignore`.
 - В копиях базы (`daily.make_backup`) автор анонимных обращений стирается; `bot_errors` в копию чужой семье не попадает.
 
+- **Журнал действий** — `cogs/journal.py`, модуль `journal` (voice · mic · members · messages · server). Каналы
+  `voice_log` «🎙・журнал-войса» и `audit` «📜・журнал-действий» (AUTO_CHANNELS, иначе `logs`); строки копятся в `buf` и
+  уходят пачкой раз в 3 с. Таблица `member_log` (guild_id, user_id, actor_id, kind), чистится по `set:journal_days`.
+  «Кто сделал» — `Journal.actor()` (журнал аудита, ≤20 с; без права view_audit_log — без автора). Действия руководства —
+  `on_audit_log_entry_create` по `SERVER_ACTIONS`. `/журнал человек|последнее` (LEAD + hr_head). Сообщения не из кэша
+  (до перезапуска) при удалении не пишутся — автора не знаем.
 - **Крупная обнова 2026.11.18** (после ревизии 2):
   - Паспорт (картинка `/профиль`) **убран**: `/профиль` и «👤 Карточка» — обычный embed (`Activity.profile_embed`).
   - **Настройки семьи без кода**: `/настройки` → «🔢 Числа» (`core/family.NUMBERS`, ключи `set:<имя>`, доступ

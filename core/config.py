@@ -216,6 +216,8 @@ STRUCTURE = [
     ]},
     {"name": "🛠 СЛУЖЕБНОЕ", "view": LEAD, "send": "all", "channels": [
         ("text", "logs", "🤖・логи", {}),
+        ("text", "audit", "📜・журнал-действий", {"topic": "Ники, роли, сообщения, действия руководства — пишет бот"}),
+        ("text", "voice_log", "🎙・журнал-войса", {"topic": "Войсы: вход, выход, микрофон, камера, стрим — пишет бот"}),
         ("text", "botcmd", "🔧・бот-команды", {}),
     ]},
 ]
@@ -345,5 +347,5 @@ EXTENSIONS = [
     "cogs.streams", "cogs.appeals", "cogs.promo", "cogs.interviews", "cogs.alliance", "cogs.boosts", "cogs.assistant", "cogs.jarvis", "cogs.daily", "cogs.persona",
     "cogs.maintenance", "cogs.families", "cogs.control", "cogs.hub",
     "cogs.treasury", "cogs.recruit", "cogs.nickcheck",
-    "cogs.automation", "cogs.garage", "cogs.errorwatch",
+    "cogs.automation", "cogs.garage", "cogs.errorwatch", "cogs.journal",
 ]
