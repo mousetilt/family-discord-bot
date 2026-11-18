@@ -818,6 +818,24 @@ class ForumWatch(commands.Cog):
                                                 q, re.I))
         return text, wants
 
+    def case_card(self, g, case_id):
+        """Полная карточка дела семьи для документа юриста (любая роль). → текст или "" (нет такого)."""
+        try:
+            c = self.bot.db.one("SELECT * FROM forum_cases WHERE guild_id=? AND id=?", g.id, int(case_id))
+        except (TypeError, ValueError):
+            return ""
+        if not c:
+            return ""
+        st = self.case_status(g, c)
+        _dot, outcome = self.case_verdict(c, c["role"], st)
+        return (f"ДЕЛО, ПО КОТОРОМУ СОСТАВЛЯЕМ ДОКУМЕНТ — «{c['title']}» ({c['url'] or 'без ссылки'}):\n"
+                f"Вид: {c['kind'] or '?'}" + (f", №{c['case_no']}" if c["case_no"] else "") + "\n"
+                f"Наш человек: {c['defendant']} — {ROLE_RU.get(c['role'], c['role'])}\n"
+                f"Подал: {c['applicant'] or '?'}\nСтатус: {STATUS.get(st, st)}" +
+                (f", итог: {outcome}" if st != "pending" else "") + f"\nСуть: {c['summary'] or '—'}\n"
+                f"Текст заявления:\n{(c['body'] or '— не загружен')[:3000]}\n"
+                f"Последний ответ / решение:\n{(c['decision'] or '—')[:1500]}")
+
     async def fetch_doc(self, g, url):
         """Закрытая тема форума аккаунтом семьи (для /база). → (название, текст, ссылка) или None (нет аккаунта)."""
         creds, tid = self.creds(g), thread_id(url)

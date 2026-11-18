@@ -189,10 +189,36 @@ class Lawyer(commands.Cog):
             return []
         return [str(q).strip()[:100] for q in (data.get("questions") or []) if str(q).strip()][:3]
 
-    async def answer_full(self, gid, question, mode="q", member=None, template=None, clarify=False, images=None):
+    def known_fields(self, gid, member):
+        """Поля документа, которые бот знает сам (анкета, форум-список, профиль семьи) — вставить как есть.
+        Ничего личного сверх игрового ника и статика."""
+        lines = []
+        if member is not None:
+            r = self.bot.db.one("SELECT nick, static_id FROM applications WHERE guild_id=? AND user_id=? "
+                                "AND COALESCE(nick, '')<>'' ORDER BY (status='accepted') DESC, id DESC LIMIT 1",
+                                gid, member.id)
+            p = self.bot.db.one("SELECT name, static_id FROM forum_people WHERE guild_id=? AND user_id=?", gid,
+                                member.id) if r is None else None
+            name = (r and r["nick"]) or (p and p["name"])
+            static = (r and r["static_id"]) or (p and p["static_id"])
+            if name:
+                lines.append(f"Заявитель (от кого): {name}" + (f", static {static}" if static else ""))
+        guild = self.bot.get_guild(gid)
+        fam = self.bot.family(guild) if guild else {}
+        if fam.get("server"):
+            lines.append(f"Сервер: {fam['server']}")
+        import datetime as _dt
+        msk = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(hours=3)
+        lines.append("Дата: " + msk.strftime("%d.%m.%Y"))
+        return ("ИЗВЕСТНЫЕ ПОЛЯ — вставь их в документ как есть; всё, чего нет здесь, в деле или в вопросе, оставь "
+                "[заполнить]:\n" + "\n".join(lines)) if lines else ""
+
+    async def answer_full(self, gid, question, mode="q", member=None, template=None, clarify=False, images=None,
+                          case_id=None):
         """→ {text, sources, ai, mode, questions}. questions — не хватает фактов (тогда text пуст, спроси человека).
         member из семьи — юрист знает о делах против семьи (forumwatch); просят защиту по делу — режим defense.
-        images — [(mime, bytes)] скрины жалобы/документа: читает Gemini или Claude; без зрения — только текст."""
+        images — [(mime, bytes)] скрины жалобы/документа: читает Gemini или Claude; без зрения — только текст.
+        case_id — дело из forum_cases (/юрист дело:): его карточка целиком идёт в запрос (поля документа из неё)."""
         bot = self.bot
         ai = bot.ai_for(gid)
         res = {"text": "", "sources": [], "ai": False, "mode": mode, "questions": []}
@@ -213,22 +239,31 @@ class Lawyer(commands.Cog):
                 fam, defense = fw.cases_context(guild, question)
             except Exception:  # noqa: BLE001 — без контекста дел юрист всё равно ответит
                 log.exception("Юрист: контекст дел")
+        card = fw.case_card(guild, case_id) if fw and guild and case_id else ""
+        if card:
+            fam = (fam + "\n\n" if fam else "") + card
+            defense = defense or mode in ("q", "case")
         if defense and mode in ("q", "case"):
             mode = "defense"
         res["mode"] = mode
         images = images if images and ai.vision else None
-        if clarify and mode in ASK_MODES and not images:  # к скрину уточнения не нужны — факты на картинке
+        if clarify and mode in ASK_MODES and not images and not card:  # скрин/карточка дела — факты уже есть
             res["questions"] = await self.clarify(ai, question)
             if res["questions"]:
                 return res
         tmpl = self.template_text(gid, question, template) if mode == "doc" else ""
+        if mode == "doc":
+            known = self.known_fields(gid, member)
+            tmpl = (tmpl + "\n\n" + known).strip() if known else tmpl
         context, sources, _ = await bot.kb.context_smart(gid, question, ai)  # смысл + слова; без Gemini — по словам
         system = (f"{bot.brand(gid, BASE_PROMPT)}\n\nЗАДАЧА: {MODES[mode][1]}" + (f"\n\n{fam}" if fam else "") +
                   (f"\n\n{tmpl}" if tmpl else "") + f"\n\nДОКУМЕНТЫ:\n{context}")
         if images:
             system += "\n\nК вопросу приложены скриншоты — опирайся и на них (кто, против кого, суть, даты)."
-        reply = await ai.ask(system, question, max_tokens=1600 if mode in ("doc", "defense") else 900, smart=True,
-                             cache=True, images=images)
+        long = mode in ("doc", "defense")
+        # Claude пишет документ целиком (дороже, но это и есть его работа); бесплатным — прежний объём
+        tokens = (3500 if ai.is_claude else 1600) if long else 900
+        reply = await ai.ask(system, question, max_tokens=tokens, smart=True, cache=True, images=images)
         text, missing = verify(reply or "ИИ не дал ответа, попробуй переформулировать.", bot.kb.docs(gid))
         if missing:  # самопроверка: ссылок, которых нет в базе, ИИ мог выдумать
             text += ("\n\n⚠️ Не нашёл в базе: " + ", ".join(missing[:6]) +
@@ -256,8 +291,9 @@ class Lawyer(commands.Cog):
     async def send_answer(self, send, question, text, sources, mode, guild):
         title = f"⚖️ {MODES[mode][0]}: {question[:200]}"
         src = [f"[{t}]({u})" if u else t for t, u in sources[:6]]
-        if len(text) > 3900:
-            e = self.bot.embed(title, text[:1500] + "…\n\n📎 Полный текст — в файле.", config.COLOR, guild)
+        if mode == "doc" or len(text) > 3900:
+            body = text if len(text) <= 3900 and mode != "doc" else text[:1500] + "…"
+            e = self.bot.embed(title, body + "\n\n📎 Готовый текст к копированию — в файле.", config.COLOR, guild)
             if src:
                 e.add_field(name="Источники", value="\n".join(src)[:1024], inline=False)
             await send(embed=e, file=discord.File(io.BytesIO(text.encode("utf-8")), filename="документ.txt"))
@@ -272,21 +308,37 @@ class Lawyer(commands.Cog):
     # ---------- команды для всех ----------
     @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="юрист", description="ИИ-юрист: вопрос, разбор ситуации или составление документа")
-    @app_commands.rename(question="вопрос_или_ситуация", mode="режим", doc="документ")
-    @app_commands.describe(doc="Какой документ составить (по формату форума): иск, апелляция, обращение…")
+    @app_commands.rename(question="вопрос_или_ситуация", mode="режим", doc="документ", case="дело")
+    @app_commands.describe(doc="Какой документ составить (по формату форума): иск, апелляция, обращение…",
+                           case="Дело с форума из списка семьи — юрист возьмёт стороны, номер, текст и решение")
     @app_commands.choices(mode=[app_commands.Choice(name=v[0], value=k) for k, v in MODES.items()], doc=DOC_CHOICES)
     async def lawyer_cmd(self, inter: discord.Interaction, question: str, mode: app_commands.Choice[str] = None,
-                         doc: app_commands.Choice[str] = None):
+                         doc: app_commands.Choice[str] = None, case: str = None):
         mode = "doc" if doc else (mode.value if mode else "q")
         template = doc.value if doc else None
         left = self.cooldown_left(inter.user.id)
         if left:
             return await inter.response.send_message(f"⏳ Подожди {left} сек.", ephemeral=True)
         await inter.response.defer(thinking=True)
-        res = await self.safe_full(inter.guild.id, question, mode, member=inter.user, template=template, clarify=True)
+        case_id = int(case) if case and str(case).isdigit() else None
+        res = await self.safe_full(inter.guild.id, question, mode, member=inter.user, template=template, clarify=True,
+                                   case_id=case_id)
         if res["questions"]:
             return await self.ask_back(inter.followup.send, question, res, inter.user.id, inter.guild.id, template)
         await self.send_answer(inter.followup.send, question, res["text"], res["sources"], res["mode"], inter.guild)
+
+    @lawyer_cmd.autocomplete("case")
+    async def case_ac(self, inter: discord.Interaction, current: str):
+        cur = (current or "").lower()
+        rows = self.bot.db.all("SELECT id, title, defendant, case_no FROM forum_cases WHERE guild_id=? "
+                               "ORDER BY (status='pending') DESC, updated_ts DESC LIMIT 60", inter.guild.id)
+        out = []
+        for r in rows:
+            name = f"{r['title'] or 'дело'} — {r['defendant'] or '?'}"
+            if cur and cur not in name.lower() and cur != str(r["case_no"] or ""):
+                continue
+            out.append(app_commands.Choice(name=name[:100], value=str(r["id"])))
+        return out[:25]
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
