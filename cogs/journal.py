@@ -33,6 +33,8 @@ KINDS = {"voice": "🎙 Войс", "mic": "🎤 Микро и камера", "me
 CHANNEL = {"voice": "voice_log", "mic": "voice_log"}   # остальное — в audit
 LINE_MAX, DESC_MAX = 600, 3900
 AUDIT_WINDOW = 20   # секунд: запись журнала аудита свежее этого — относится к событию
+SUS_WINDOW, SUS_N = 600, 5   # «подозрительно»: 5 одинаковых действий над чужими за 10 минут от не-руководства
+SUS_WHAT = {"roles": "снимает роли у людей", "delete": "удаляет чужие сообщения", "timeout": "раздаёт тайм-ауты"}
 A = discord.AuditLogAction
 # действия руководства, которые пишем прямо из журнала аудита (участников, мут, перенос и удаление сообщений —
 # пишут свои события выше, с привязкой к человеку)
@@ -86,6 +88,7 @@ class Journal(commands.Cog):
         bot.db.c.executescript(SCHEMA)
         bot.db.c.commit()
         self.buf = {}       # (guild_id, ключ канала) → [строки]
+        self.sus, self.sus_alerted = {}, {}  # (guild_id, actor_id, что) → [monotonic]; когда последний раз тревожили
         self.joined = {}    # (guild_id, user_id) → когда зашёл в текущий войс (monotonic)
         self.flush.start()
         self.cleanup.start()
@@ -145,6 +148,29 @@ class Journal(commands.Cog):
     @cleanup.before_loop
     async def _ready(self):
         await self.bot.wait_until_ready()
+
+    async def suspect(self, guild, actor, what):
+        """Массовые действия над чужими от того, кто не в руководстве, — одна тревога совету в час."""
+        if actor is None or getattr(actor, "bot", False):
+            return
+        m = guild.get_member(actor.id)
+        if m is None or m.id == guild.owner_id or self.bot.has(m, config.LEAD):
+            return
+        key, t = (guild.id, actor.id, what), time.monotonic()
+        dq = self.sus.setdefault(key, [])
+        dq[:] = [x for x in dq if t - x < SUS_WINDOW] + [t]
+        if len(dq) < SUS_N or t - self.sus_alerted.get(key, -1e9) < 3600:
+            return
+        self.sus_alerted[key] = t
+        text = f"{who(m)} за 10 минут {SUS_WHAT[what]}: **{len(dq)}** раз. Проверь журнал: `/журнал человек`."
+        self.put(guild, "server", "🕵️ Подозрительно: " + text, None, m, icon="🚨")
+        c = self.bot.ch(guild, "council_chat")
+        if c:
+            try:
+                await c.send(embed=discord.Embed(title="🕵️ Подозрительная активность", description=text, color=0xE53935),
+                             allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException:
+                pass
 
     def log_channels(self, guild):
         return {c.id for c in (self.bot.ch(guild, k) for k in ("voice_log", "audit", "logs")) if c}
@@ -242,11 +268,15 @@ class Journal(commands.Cog):
             parts = ([f"+ {', '.join(r.mention for r in added)}"] if added else []) + \
                     ([f"− {', '.join(r.mention for r in removed)}"] if removed else [])
             self.put(g, "members", f"{who(after)}: роли {' · '.join(parts)}{self.by(actor, after)}", after, actor, icon="🎭")
+            if removed and actor is not None and actor.id != after.id:
+                await self.suspect(g, actor, "roles")
         if before.timed_out_until != after.timed_out_until:
             actor = await self.actor(g, A.member_update, after.id)
             until = after.timed_out_until
             text = (f"тайм-аут до {discord.utils.format_dt(until, 'f')}" if until and until > now() else "тайм-аут снят")
             self.put(g, "members", f"{who(after)}: {text}{self.by(actor, after)}", after, actor, icon="⏳")
+            if until and actor is not None and actor.id != after.id:
+                await self.suspect(g, actor, "timeout")
         if before.guild_avatar != after.guild_avatar:
             self.put(g, "members", f"{who(after)} сменил аватар на сервере", after, icon="🖼")
 
@@ -310,6 +340,8 @@ class Journal(commands.Cog):
         self.put(g, "messages", f"удалено сообщение {who(msg.author)} в {msg.channel.mention}"
                                 f"{self.by(actor, msg.author) or ' (сам)'}:\n> {cut(msg.content, 400) or '—'}{files}",
                  msg.author, actor, icon="🗑")
+        if actor is not None and actor.id != msg.author.id:
+            await self.suspect(g, actor, "delete")
 
     @commands.Cog.listener()
     async def on_raw_bulk_message_delete(self, payload):

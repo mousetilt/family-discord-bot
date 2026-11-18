@@ -288,8 +288,64 @@ class Mentorship(commands.Cog):
                 except discord.HTTPException:
                     pass
 
+    # ---------- наставник ушёл, снял роль или в отпуске — переназначить ----------
+    async def reassign_from(self, guild, mentor_id, why):
+        bot, db = self.bot, self.bot.db
+        for row in db.all("SELECT * FROM mentorships WHERE guild_id=? AND mentor_id=? AND status='active'",
+                          guild.id, mentor_id):
+            newbie = guild.get_member(row["newbie_id"])
+            if not newbie:
+                continue
+            new = self.pick_mentor(guild, newbie.id)
+            if new is not None and new.id == mentor_id:
+                new = None
+            th = await self.get_thread(guild, row["thread_id"])
+            if new is None:
+                db.q("UPDATE mentorships SET mentor_id=0 WHERE id=?", row["id"])
+                await bot.log(guild, f"⚠️ {newbie.mention} остался без наставника ({why}), свободных нет — "
+                                     "`/наставник назначить`", "hrlog", 0xFB8C00)
+                if th:
+                    try:
+                        await th.send(f"⚠️ Наставник выбыл ({why}). Нового назначат вручную — вопросы пока пиши сюда.")
+                    except discord.HTTPException:
+                        pass
+                continue
+            db.q("UPDATE mentorships SET mentor_id=? WHERE id=?", new.id, row["id"])
+            row = db.one("SELECT * FROM mentorships WHERE id=?", row["id"])
+            if th:
+                try:
+                    await th.add_user(new)
+                    await th.send(f"🔁 Наставник сменился ({why}): теперь с тобой {new.mention}. {newbie.mention}, "
+                                  "вопросы — сюда же.")
+                    if row["message_id"]:
+                        await th.get_partial_message(row["message_id"]).edit(embed=self.card(guild, row),
+                                                                             view=self.view(row))
+                except discord.HTTPException:
+                    pass
+            await safe_dm(new, f"🎓 Тебе передан новичок **{newbie.display_name}** ({why}).")
+            await bot.log(guild, f"🔁 Наставник {newbie.mention}: <@{mentor_id}> → {new.mention} ({why})", "hrlog",
+                          0x26A69A)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before, after):
+        g = after.guild
+        if not self.bot.is_family(g):
+            return
+        mentor, vac = self.bot.role(g, "mentor"), self.bot.role(g, "vacation")
+        lost = mentor and mentor in before.roles and mentor not in after.roles
+        away = vac and vac not in before.roles and vac in after.roles
+        if lost or away:
+            try:
+                await self.reassign_from(g, after.id, "ушёл в отпуск" if away else "снята роль наставника")
+            except Exception:
+                log.exception("Переназначение наставника")
+
     @commands.Cog.listener()
     async def on_member_remove(self, member):
+        try:
+            await self.reassign_from(member.guild, member.id, "ушёл с сервера")
+        except Exception:
+            log.exception("Переназначение наставника")
         for row in self.bot.db.all("SELECT * FROM mentorships WHERE guild_id=? AND newbie_id=? AND status='active'",
                                    member.guild.id, member.id):
             self.bot.db.q("UPDATE mentorships SET status='left', closed_at=? WHERE id=?", now_iso(), row["id"])
@@ -425,7 +481,9 @@ class Mentorship(commands.Cog):
             return
         _, _, warns = self.stats(row)
         exam = self.exam_ok(guild, newbie.id)
-        if bot.feature(guild, "hr:auto") and exam and not warns:
+        idle_days = bot.num(guild, "auto_idle_days")
+        idle = bool(idle_days) and is_inactive(bot, guild, newbie, idle_days)
+        if bot.feature(guild, "hr:auto") and exam and not warns and not idle:
             # авто-перевод: срок вышел, экзамен сдан (или не нужен), выговоров за срок нет
             db.q("UPDATE mentorships SET asked=1 WHERE id=?", row["id"])
             await self.promote(guild, row, newbie, guild.me, auto=True)
@@ -435,6 +493,8 @@ class Mentorship(commands.Cog):
             why.append("📕 экзамен не сдан")
         if warns:
             why.append(f"⚖️ выговоров за срок: {warns}")
+        if idle:
+            why.append(f"💤 не появлялся {idle_days}+ дн.")
         if bot.feature(guild, "hr:auto") and why:
             why.insert(0, "Автоперевод не сработал:")
         c = await self.where(guild, row)
@@ -574,6 +634,37 @@ class Mentorship(commands.Cog):
             await self.bot.log(guild, f"🎓 Массовый перевод новичков в Члены семьи ({by.mention}): {', '.join(done)}"[:1900],
                                "hrlog", 0x26A69A)
         return "\n".join(lines)
+
+    @app_commands.command(name="перевести-новичков",
+                          description="Перевести в Члены семьи всех новичков, кто отбыл срок, активен и сдал экзамен")
+    @app_commands.rename(min_days="мин_дней", all_="и_неактивных")
+    @app_commands.describe(min_days="Свой срок вместо срока семьи", all_="Переводить и тех, кто давно не появлялся")
+    @app_commands.default_permissions(manage_roles=True)
+    @app_commands.guild_only()
+    async def promote_cmd(self, inter: discord.Interaction, min_days: app_commands.Range[int, 0, 365] = None,
+                          all_: bool = False):
+        if not self.bot.has(inter.user, config.HR):
+            return await inter.response.send_message("⛔ Это решают кадры и руководство.", ephemeral=True)
+        ready, idle, no_exam, fresh, higher = self.newbie_pool(inter.guild, not all_, actor=inter.user, min_days=min_days)
+        term = min_days if min_days is not None else self.days(inter.guild)
+        text = (f"🎓 Переведу в Члены семьи: **{len(ready)}** — " + (", ".join(m.display_name for m in ready[:20]) or "никого")
+                + (f"\n⏳ Не отбыли срок ({term} дн.): {len(fresh)}" if fresh else "")
+                + (f"\n💤 Неактивны: {len(idle)}" if idle else "") + (f"\n📕 Без экзамена: {len(no_exam)}" if no_exam else ""))
+        if not ready:
+            return await inter.response.send_message(text, ephemeral=True)
+        cog, author = self, inter.user
+
+        class Go(discord.ui.View):
+            @discord.ui.button(label="Перевести", emoji="✅", style=discord.ButtonStyle.success)
+            async def go(self, i: discord.Interaction, _):
+                if i.user.id != author.id:
+                    return await i.response.send_message("Подтверждает тот, кто запускал.", ephemeral=True)
+                self.stop()
+                await i.response.edit_message(content="🎓 Перевожу…", view=None)
+                report = await cog.promote_newbies(i.guild, author, not all_, min_days=min_days)
+                await i.followup.send(report[:1990])
+
+        await inter.response.send_message(text, view=Go(timeout=300), ephemeral=True)
 
     async def close_card(self, guild, mid):
         row = self.bot.db.one("SELECT * FROM mentorships WHERE id=?", mid)

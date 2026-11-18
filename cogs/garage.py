@@ -136,15 +136,33 @@ class Garage(commands.Cog):
         await self.journal(guild, actor, v["id"], "give", f"{label(v)}: {was} → {self.owner(guild, v)}")
         return f"🔁 {label(v)} теперь — {self.owner(guild, v)}"
 
-    async def set_status(self, guild, actor, v, status, note=None):
+    async def set_status(self, guild, actor, v, status, note=None, cost=None):
+        """cost — сколько стоил ремонт («50к»): если указан и у автора есть доступ к казне — расход из казны."""
         if not v or v["status"] == "gone":
             return "❌ Не нашёл такую машину."
         if status not in STATUS:
             return "❌ Статус: в строю, в ремонте или списана."
         self.bot.db.q("UPDATE vehicles SET status=?, note=COALESCE(?, note), updated=? WHERE id=?", status,
                       (note or "")[:200] or None, int(time.time()), v["id"])
-        await self.journal(guild, actor, v["id"], status, f"{label(v)}: {STATUS[status]}" + (f" ({note})" if note else ""))
-        return f"{STATUS[status].split()[0]} {label(v)} — {STATUS[status]}"
+        await self.journal(guild, actor, v["id"], status, f"{label(v)}: {STATUS[status]}" + (f" ({note})" if note else "")
+                           + (f" · ремонт {cost}" if cost else ""))
+        text = f"{STATUS[status].split()[0]} {label(v)} — {STATUS[status]}"
+        if cost:
+            text += "\n" + await self.repair_cost(guild, actor, v, cost)
+        return text
+
+    async def repair_cost(self, guild, actor, v, cost):
+        """Ремонт машины → расход из казны с пометкой машины (только тем, кто ведёт казну)."""
+        from core.parse import parse_amount
+        tr = self.bot.get_cog("Treasury")
+        amount = parse_amount(cost)
+        if not amount:
+            return f"⚠️ Сумму ремонта «{cost}» не понял — в казну не записал."
+        if not tr or not self.bot.feature(guild, "treasury"):
+            return "💰 Казна выключена — расход на ремонт не записан."
+        if not tr.allowed(actor):
+            return "💰 Расход на ремонт в казну проводит казначей или руководство — передай им сумму."
+        return await tr.spend(guild, actor, amount, f"ремонт: {label(v)}")
 
     # ---------- автодополнение ----------
     async def car_auto(self, inter: discord.Interaction, current: str):
@@ -209,18 +227,20 @@ class Garage(commands.Cog):
         if v:
             await inter.response.send_message(await self.give(inter.guild, inter.user, v, member), ephemeral=True)
 
-    @group.command(name="статус", description="Машина в строю или в ремонте")
-    @app_commands.rename(car="машина", status="статус", note="заметка")
+    @group.command(name="статус", description="Машина в строю или в ремонте (можно сразу списать ремонт из казны)")
+    @app_commands.rename(car="машина", status="статус", note="заметка", cost="ремонт_стоил")
+    @app_commands.describe(cost="Сумма ремонта, например 50к — запишется расходом казны")
     @app_commands.choices(status=[app_commands.Choice(name="в строю", value="ok"),
                                   app_commands.Choice(name="в ремонте", value="repair")])
     @app_commands.autocomplete(car=car_auto)
     @staff_only(GARAGE)
-    async def c_status(self, inter: discord.Interaction, car: str, status: app_commands.Choice[str], note: str = None):
+    async def c_status(self, inter: discord.Interaction, car: str, status: app_commands.Choice[str], note: str = None,
+                       cost: str = None):
         if not await self.gate(inter):
             return
         v = await self._car(inter, car)
         if v:
-            await inter.response.send_message(await self.set_status(inter.guild, inter.user, v, status.value, note),
+            await inter.response.send_message(await self.set_status(inter.guild, inter.user, v, status.value, note, cost),
                                               ephemeral=True)
 
     @group.command(name="списать", description="Убрать машину из автопарка (продана, разбита…)")
@@ -272,7 +292,7 @@ class Garage(commands.Cog):
         if t == "car_give":
             return await self.give(guild, actor, v, member)
         if t == "car_status":
-            return await self.set_status(guild, actor, v, str(a.get("status") or "ok"), a.get("note"))
+            return await self.set_status(guild, actor, v, str(a.get("status") or "ok"), a.get("note"), a.get("cost"))
         if t == "car_remove":
             return await self.set_status(guild, actor, v, "gone", a.get("reason"))
         return ""

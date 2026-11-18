@@ -54,7 +54,7 @@ class JournalTest(unittest.TestCase):
         self.db.c.executescript(SCHEMA)
         self.bot = FakeBot(self.db)
         self.j = object.__new__(Journal)  # без __init__: фоновые циклы в тесте не нужны
-        self.j.bot, self.j.buf, self.j.joined = self.bot, {}, {}
+        self.j.bot, self.j.buf, self.j.joined, self.j.sus, self.j.sus_alerted = self.bot, {}, {}, {}, {}
         perms = NS(view_audit_log=False)  # без журнала аудита «кто сделал» не ищем — и не ждём
         self.g = NS(id=GID, me=NS(guild_permissions=perms))
         self.m = NS(id=50, bot=False, guild=self.g, mention="<@50>", display_name="Даша", name="dasha")

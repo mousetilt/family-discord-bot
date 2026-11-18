@@ -22,6 +22,10 @@ def slug(s):
     return s[:60] or "семья"
 
 
+NEGO_GAP = 10 * 60  # один человек — не чаще раза в 10 минут
+NEGO_MAX = 5        # открытых переговорных на сервер (дипломатов ограничение не касается)
+
+
 class DiploPanel(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -37,6 +41,20 @@ class DiploPanel(discord.ui.View):
                                                          ephemeral=True)
             # канал удалили вручную — запись больше не должна мешать
             db.q("UPDATE negotiations SET status='closed' WHERE channel_id=?", r["channel_id"])
+        # защита от спама переговорными: не чаще раза в NEGO_GAP на человека и не больше NEGO_MAX открытых на сервер
+        last = db.one("SELECT created_at FROM negotiations WHERE guild_id=? AND requester_id=? ORDER BY rowid DESC LIMIT 1",
+                      inter.guild.id, inter.user.id)
+        try:
+            ago = (now() - parse_dt(last["created_at"])).total_seconds() if last and last["created_at"] else 10 ** 9
+        except (TypeError, ValueError):
+            ago = 10 ** 9
+        if ago < NEGO_GAP and not inter.client.has(inter.user, config.DIPLO):
+            return await inter.response.send_message(f"⏳ Новые переговоры можно запросить через "
+                                                     f"{int((NEGO_GAP - ago) // 60) + 1} мин.", ephemeral=True)
+        opened = db.one("SELECT COUNT(*) n FROM negotiations WHERE guild_id=? AND status='open'", inter.guild.id)["n"]
+        if opened >= NEGO_MAX and not inter.client.has(inter.user, config.DIPLO):
+            return await inter.response.send_message("⏳ Сейчас открыто много переговоров — дипломаты заняты, "
+                                                     "попробуй чуть позже.", ephemeral=True)
         try:
             await inter.response.send_modal(DiploRequestModal())
         except discord.NotFound:

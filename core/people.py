@@ -3,11 +3,14 @@
 Одно read-only действие ИИ `people` (cogs/assistant.py): ИИ заполняет фильтры, здесь — отбор СТРОГО по реальным
 данным сервера (роли, БД по guild_id) и ответ шаблоном. Имена и цифры берутся только из посчитанного списка —
 ИИ их не пишет, поэтому выдумать человека не может."""
+import asyncio
 import datetime as dt
 import random
 
+import discord
+
 from core import config
-from core.botcore import now, parse_dt
+from core.botcore import now, parse_dt, safe_dm
 
 INACTIVE_DAYS = 5   # «неактив» без числа — как отчёт «💤 Неактив»
 LIMIT, LIMIT_MAX = 30, 60
@@ -197,3 +200,60 @@ def render(res):
     if res["notes"]:
         text += "\n-# " + " · ".join(res["notes"])
     return text
+
+
+# ---------- что сделать с найденными (кнопки под ответом) ----------
+ACTORS = config.LEAD + ["hr_head"]  # писать всем в ЛС и тегать списком — только руководство и кадры
+MASS_MAX = 40
+
+
+class MassDM(discord.ui.Modal, title="Написать им всем в ЛС"):
+    text = discord.ui.TextInput(label="Текст", style=discord.TextStyle.paragraph, max_length=1500)
+
+    def __init__(self, view):
+        super().__init__()
+        self.v = view
+
+    async def on_submit(self, inter: discord.Interaction):
+        g = inter.guild
+        members = [m for m in (g.get_member(i) for i in self.v.ids[:MASS_MAX]) if m and not m.bot]
+        await inter.response.send_message(f"✉️ Пишу {len(members)} чел…", ephemeral=True)
+        ok = 0
+        for m in members:
+            if await safe_dm(m, f"✉️ От руководства семьи ({inter.user.display_name}):\n{self.text.value}"):
+                ok += 1
+            await asyncio.sleep(1)
+        await inter.edit_original_response(content=f"✉️ Написал {ok} из {len(members)} (у остальных закрыта личка).")
+
+
+class PeopleView(discord.ui.View):
+    """Под ответом «кто…»: написать всем найденным в ЛС или упомянуть их в чате."""
+
+    def __init__(self, author_id, ids):
+        super().__init__(timeout=900)
+        self.author_id, self.ids = author_id, list(ids)
+
+    async def interaction_check(self, inter):
+        if inter.user.id != self.author_id or not inter.client.has(inter.user, ACTORS):
+            await inter.response.send_message("⛔ Это может только тот, кто спрашивал, и только руководство/кадры.",
+                                              ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Написать им в ЛС", emoji="✉️", style=discord.ButtonStyle.primary)
+    async def dm(self, inter: discord.Interaction, _):
+        await inter.response.send_modal(MassDM(self))
+
+    @discord.ui.button(label="Упомянуть в чате", emoji="📣", style=discord.ButtonStyle.secondary)
+    async def ping(self, inter: discord.Interaction, _):
+        ids = self.ids[:MASS_MAX]
+        await inter.response.send_message("📣 " + " ".join(f"<@{i}>" for i in ids),
+                                          allowed_mentions=discord.AllowedMentions(users=True))
+        self.stop()
+
+
+def view_for(bot, author, res):
+    """Кнопки действий — если есть кого и автор вправе (иначе None)."""
+    if not res["rows"] or not bot.has(author, ACTORS):
+        return None
+    return PeopleView(author.id, [m.id for m, _ in res["rows"]])

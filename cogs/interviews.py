@@ -27,6 +27,16 @@ class Interviews(commands.Cog):
         self.bot = bot
         self.greeted = {}
         self.lock = asyncio.Lock()
+        self.queued = {}  # (guild_id, user_id) → когда кандидат зашёл в ожидание (для номера в очереди)
+
+    def position(self, member):
+        """Сколько кандидатов с заявкой ждут дольше этого человека."""
+        waiting = self.bot.ch(member.guild, "waiting")
+        if not waiting:
+            return 0
+        mine = self.queued.get((member.guild.id, member.id), time.monotonic())
+        return sum(1 for m in waiting.members if m.id != member.id and self.candidate(m) and self.app(m)
+                   and self.queued.get((member.guild.id, m.id), 0) < mine)
 
     # ---------- помощники ----------
     def rooms(self, guild):
@@ -103,8 +113,10 @@ class Interviews(commands.Cog):
                                   "кандидата сам.", allowed_mentions=discord.AllowedMentions(roles=True, users=True))
                 except discord.HTTPException:
                     pass
+            ahead = self.position(member)
             text = (f"Здравствуйте, {name}! Добро пожаловать к семье {config.FAMILY_GEN}. "
-                    "Рекрутер уже получил уведомление. Как только он освободится, я перенесу вас на собеседование.")
+                    "Рекрутер уже получил уведомление. Как только он освободится, я перенесу вас на собеседование."
+                    + (f" Перед вами в очереди: {ahead}." if ahead else " Вы первый в очереди."))
         text = self.bot.brand(g, text)
         music = self.bot.get_cog("Music")
         if music and waiting:
@@ -157,8 +169,11 @@ class Interviews(commands.Cog):
             return
         g = member.guild
         waiting = self.bot.ch(g, "waiting")
+        if waiting and before.channel and before.channel.id == waiting.id:
+            self.queued.pop((g.id, member.id), None)
         async with self.lock:
             if waiting and after.channel.id == waiting.id and self.candidate(member):
+                self.queued.setdefault((g.id, member.id), time.monotonic())
                 await self.on_candidate_waiting(member)
             elif after.channel in self.rooms(g) and self.staff(member):
                 await self.on_staff_room(member, after.channel)

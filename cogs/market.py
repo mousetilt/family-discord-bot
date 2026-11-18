@@ -247,6 +247,34 @@ class Market(commands.Cog):
         row = bot.db.one("SELECT * FROM market WHERE id=?", lid)
         await inter.response.edit_message(embed=self.embed(row, inter.guild, image=bool(inter.message.attachments)),
                                           view=None, attachments=inter.message.attachments)
+        await self.offer_writeoff(inter, row)
+
+    async def offer_writeoff(self, inter, row):
+        """Продали машину, которая числится в автопарке, — предложить списать её оттуда одной кнопкой."""
+        gar = self.bot.get_cog("Garage")
+        if not gar or not self.bot.feature(inter.guild, "garage"):
+            return
+        title = str(row["title"] or "").lower()
+        cars = [v for v in gar.cars(inter.guild, row["user_id"]) if v["model"] and v["model"].lower() in title] \
+            if row["user_id"] else []
+        if not cars:
+            return
+        v = cars[0]
+        from cogs.garage import GARAGE, label
+
+        class WriteOff(discord.ui.View):
+            @discord.ui.button(label=f"Списать {label(v)}"[:80], emoji="🗑", style=discord.ButtonStyle.danger)
+            async def go(self, i: discord.Interaction, _):
+                if not i.client.has(i.user, GARAGE):
+                    return await i.response.send_message("⛔ Списывают руководство, старшие и казначей.", ephemeral=True)
+                self.stop()
+                await i.response.edit_message(content=await gar.set_status(i.guild, i.user, v, "gone", "продана на рынке"),
+                                              view=None)
+        try:
+            await inter.followup.send(f"🚗 Это машина из автопарка ({label(v)})? Если продана — спиши её:",
+                                      view=WriteOff(timeout=600), ephemeral=True)
+        except discord.HTTPException:
+            pass
 
     # ---------- поиск и цены ----------
     @group.command(name="поиск", description="Найти объявления")

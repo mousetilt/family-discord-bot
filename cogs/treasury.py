@@ -8,6 +8,7 @@
 • Каждая операция — в канал казны (ch:treasury_log, иначе кадровый журнал).
 Модуль «treasury» в /настройки, по умолчанию включён."""
 import datetime as dt
+import io
 import json
 import logging
 
@@ -372,6 +373,95 @@ class Treasury(commands.Cog):
             text += f"\n⚠️ В казне только {fmt(bal)} — казна уйдёт в минус."
         return text
 
+    # ---------- «я сдал взнос / оплатил штраф» от самого участника ----------
+    SHOT_SYSTEM = ("Ты проверяешь скриншот из RP-игры «Россия Онлайн»: человек показывает, что перевёл деньги "
+                   "(взнос в казну семьи или оплату штрафа). Найди на картинке перевод или оплату. Верни JSON: "
+                   '{"is_payment": true|false, "amount": число в виртах или null, "to": "кому (ник)" или null, '
+                   '"from": "от кого" или null, "when": "дата/время, если видно" или null, '
+                   '"note": "что на скрине, до 100 знаков"}. Не выдумывай: чего не видно — null.')
+
+    async def read_shot(self, guild, mime, data):
+        """Скрин перевода → строка «что видит ИИ» для казначея (или None). Только подсказка, не решение."""
+        ai = self.bot.ai_for(guild)
+        if not ai.on or not data:
+            return None
+        try:
+            d = await ai.ask_json(self.SHOT_SYSTEM, "Что на скриншоте?", max_tokens=300, light=True,
+                                  images=[(mime or "image/png", data)])
+        except Exception as e:  # noqa: BLE001 — нет Gemini, лимит, битая картинка: просто без подсказки
+            log.info("Казна: скрин не прочитан — %s", str(e)[:120])
+            return None
+        if not isinstance(d, dict):
+            return None
+        if d.get("is_payment") is False:
+            return "🤖 На скрине перевода не видно" + (f": {clean(d.get('note'), 100)}" if d.get("note") else "")
+        bits = []
+        try:
+            if d.get("amount") not in (None, ""):
+                bits.append(f"сумма **{fmt(int(float(str(d['amount']).replace(' ', ''))))}**")
+        except (TypeError, ValueError):
+            pass
+        for k, w in (("to", "кому"), ("from", "от"), ("when", "когда")):
+            if d.get(k):
+                bits.append(f"{w}: {clean(d[k], 40)}")
+        return "🤖 На скрине: " + (", ".join(bits) or clean(d.get("note"), 100) or "не разобрал")
+
+    async def claim(self, guild, member, what="due", amount_text=None, image=None):
+        """Участник сам сообщает «сдал взнос» / «оплатил штраф». Ничего не проводим — заявка казначею с кнопками
+        (treasury_pending), подтверждает человек из казны. image — (имя файла, mime, байты) скрина."""
+        if not self.bot.feature(guild, "treasury"):
+            return "💰 Казна у семьи выключена."
+        db, fid = self.bot.db, None
+        amount = parse_amount(amount_text) if amount_text else None
+        if what == "fine":
+            if not self.bot.feature(guild, "treasury:fines"):
+                return "💰 Штрафы у семьи выключены."
+            f = db.one("SELECT * FROM fines WHERE guild_id=? AND user_id=? AND paid=0 ORDER BY id LIMIT 1",
+                       guild.id, member.id)
+            if not f:
+                return "✅ За тобой нет неоплаченных штрафов."
+            fid, amount = f["id"], f["amount"]
+            head = f"оплатил штраф №{fid} — **{fmt(amount)}** ({clean(f['reason'], 80)})"
+        else:
+            if not self.bot.feature(guild, "treasury:dues"):
+                return "💰 Взносы у семьи выключены."
+            need, period = self.dues(guild)
+            amount = amount or need
+            if not amount:
+                return "Членский взнос в семье не настроен — сдавать пока нечего."
+            head = f"сдал членский взнос за {PERIODS[period]} — **{fmt(amount)}**"
+        dup = db.one("SELECT id FROM treasury_pending WHERE guild_id=? AND actor_id=? AND kind=? AND status='wait' "
+                     "AND ts>?", guild.id, member.id, f"{what}_claim", int(now().timestamp()) - PENDING_TTL)
+        if dup:
+            return f"⏳ Твоя заявка №{dup['id']} уже ждёт казначея — дождись решения."
+        seen = await self.read_shot(guild, image[1], image[2]) if image else None
+        summary = f"{member.mention} {head}" + (f"\n{seen}" if seen else "") + ("" if image else "\n📎 Без скрина")
+        cur = db.q("INSERT INTO treasury_pending(guild_id, actor_id, kind, payload, summary, ts) VALUES(?,?,?,?,?,?)",
+                   guild.id, member.id, f"{what}_claim", json.dumps({"uid": member.id, "amount": amount, "fid": fid}),
+                   summary[:900], int(now().timestamp()))
+        pid = cur.lastrowid
+        c = self.bot.ch(guild, "treasury_log") or self.bot.ch(guild, "hrlog")
+        if not c:
+            db.q("UPDATE treasury_pending SET status='fail' WHERE id=?", pid)
+            return "❌ Канала казны нет — скажи казначею лично."
+        v = discord.ui.View(timeout=None)
+        v.add_item(SecondConfirm("ok", pid))
+        v.add_item(SecondConfirm("no", pid))
+        who = " ".join(r.mention for r in (self.bot.role(guild, "treasurer"),) if r)
+        e = self.bot.embed(f"🧾 Заявка №{pid}: {'оплата штрафа' if fid else 'взнос'}", summary +
+                           "\n\nПроверь в игре и подтверди — бот проведёт сам. Ждёт 2 суток.", 0xFB8C00, guild)
+        kw = {}
+        if image:
+            e.set_image(url=f"attachment://{image[0]}")
+            kw["file"] = discord.File(io.BytesIO(image[2]), filename=image[0])
+        try:
+            await c.send(content=who or None, embed=e, view=v, allowed_mentions=discord.AllowedMentions(roles=True), **kw)
+        except discord.HTTPException:
+            db.q("UPDATE treasury_pending SET status='fail' WHERE id=?", pid)
+            return "❌ Не смог отправить заявку в канал казны — скажи казначею лично."
+        return (f"🧾 Заявка №{pid} ушла казначею: {head.replace('**', '')}. Подтвердят — напишу в ЛС."
+                + ("" if image else " В следующий раз прикладывай скрин перевода — так быстрее."))
+
     # ---------- второе подтверждение операций «себе» ----------
     async def second_confirm(self, guild, actor, kind, payload, summary):
         """Операция, где проводящий — сам получатель. Не проводим: в канал казны с кнопками для другого человека."""
@@ -413,6 +503,10 @@ class Treasury(commands.Cog):
                                                      "Отклонить свою операцию можно.", ephemeral=True)
         if not ok:
             db.q("UPDATE treasury_pending SET status='no' WHERE id=?", pid)
+            if r["kind"] in ("due_claim", "fine_claim"):
+                m = g.get_member(r["actor_id"])
+                if m:
+                    await safe_dm(m, f"✖️ Казна не подтвердила твою заявку №{pid}. Уточни у {inter.user.display_name}.")
             return await inter.response.edit_message(content=f"✖️ Отклонено ({inter.user.mention}). Казна не тронута.",
                                                      view=None)
         db.q("UPDATE treasury_pending SET status='ok' WHERE id=?", pid)
@@ -424,6 +518,16 @@ class Treasury(commands.Cog):
                 pairs = [(g.get_member(uid), a) for uid, a in p.get("pairs", [])]
                 text = await self.payout(g, actor, pairs, f"{p.get('reason', 'выплата')} (подтвердил {inter.user.display_name})",
                                          p.get("ranks", False), confirmed=True, after=p.get("after"))
+            elif r["kind"] in ("due_claim", "fine_claim"):
+                m = g.get_member(p.get("uid", 0))
+                if not m:
+                    text = "Человек ушёл с сервера — не провожу."
+                elif r["kind"] == "due_claim":
+                    text = await self.take_due(g, inter.user, m, p.get("amount"))
+                else:
+                    text = await self.fine_paid(g, inter.user, m, p.get("fid"), confirmed=True)
+                if m:
+                    await safe_dm(m, f"✅ Казна подтвердила заявку №{pid}: {text}")
             elif r["kind"] == "fine_paid":
                 m = g.get_member(p.get("uid", 0))
                 text = await self.fine_paid(g, inter.user, m, p.get("fid"), confirmed=True) if m else "Человек ушёл."
@@ -738,6 +842,26 @@ class Treasury(commands.Cog):
                 f"⚠️ В казне {fmt(bal)}, а расход {fmt(n)} — казна уйдёт в минус. Точно?",
                 view=OverdraftView(self, inter.user.id, n, reason), ephemeral=True)
         await inter.response.send_message(await self.spend(inter.guild, inter.user, n, reason), ephemeral=True)
+
+    @app_commands.command(name="сдал", description="Сообщить казне: я сдал взнос или оплатил штраф (можно со скрином)")
+    @app_commands.rename(what="что", amount="сумма", shot="скрин")
+    @app_commands.describe(amount="Если не указать — взнос по ставке семьи / сумма штрафа", shot="Скриншот перевода в игре")
+    @app_commands.choices(what=[app_commands.Choice(name="Членский взнос", value="due"),
+                                app_commands.Choice(name="Штраф", value="fine")])
+    @app_commands.guild_only()
+    async def claim_cmd(self, inter: discord.Interaction, what: app_commands.Choice[str] = None, amount: str = None,
+                        shot: discord.Attachment = None):
+        if not self.bot.in_family(inter.user):
+            return await inter.response.send_message("Это для членов семьи.", ephemeral=True)
+        await inter.response.defer(ephemeral=True, thinking=True)
+        image = None
+        if shot and (shot.content_type or "").startswith("image/") and shot.size <= 8 * 1024 * 1024:
+            try:
+                image = (shot.filename or "shot.png", shot.content_type, await shot.read())
+            except discord.HTTPException:
+                image = None
+        await inter.followup.send(await self.claim(inter.guild, inter.user, what.value if what else "due", amount, image),
+                                  ephemeral=True)
 
     @group.command(name="взнос", description="Отметить, что участник сдал членский взнос")
     @app_commands.rename(member="участник", amount="сумма")

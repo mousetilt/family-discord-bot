@@ -37,13 +37,13 @@ TREASURY_ACTS = {"treasury_in", "treasury_out", "treasury_due", "treasury_balanc
                  "fine_add", "fine_list", "fine_paid"}
 SAFE = {"move", "disconnect", "say", "ask_voice", "music_play", "music_skip", "music_stop", "music_volume", "listen",
         "listen_stop", "leave", "music_pause", "music_resume", "voice_mute", "voice_unmute", "remind", "invite",
-        "forget"} | ASK
+        "forget", "paid_claim"} | ASK  # paid_claim только создаёт заявку казначею — проводит человек
 LEADS = ["leader", "deputy"]
 GARAGE_BY = config.LEAD + ["senior", "treasurer"]  # ведут автопарк (cogs/garage.py)
 CHANNEL_ONLY = {"purge", "slowmode", "poll"}  # работают с текущим каналом — в ЛС их не выполняем
 # болтать со Швейцаром может вся семья и друзья; им доступны только безобидные вещи
 EVERYONE = config.FAMILY_PLUS
-FOR_ALL = {"car_list", "web_search", "missed", "law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
+FOR_ALL = {"paid_claim", "car_list", "web_search", "missed", "law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
            "music_pause", "music_resume", "music_volume", "listen", "listen_stop", "leave", "invite", "forget"}
 INVITE_GAP = 10 * 60  # один человек зовёт кого-то в войс через бота не чаще раза в 10 минут
 # живые отговорки вместо казённых фраз
@@ -73,7 +73,8 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "peopl
          "accept": config.HR, "recruit_stats": config.HR + ["treasurer"], "mute": MOD, "unmute": MOD, "warn": MOD, "purge": MOD, "rank": config.LEAD,
          "promote_newbies": config.HR,  # как accept: кадры и руководство
          **{t: config.TREASURY for t in TREASURY_ACTS}, "dues_set": LEADS, "salary_rate_set": LEADS,
-         "fine_add": config.TREASURY + ["hr_head"], "fine_list": config.TREASURY + ["hr_head"]}
+         "fine_add": config.TREASURY + ["hr_head"], "fine_list": config.TREASURY + ["hr_head"],
+         "paid_claim": config.FAMILY_RANKS}
 LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив", "people": "👥 Кто в семье",
          "warns": "⚖️ Выговоры", "bl_check": "⛔ Проверка ЧС", "market": "🛒 Рынок", "queue": "🎶 Очередь",
          "roll": "🎲 Кубик", "digest": "🗞 Сводка", "music_pause": "⏸ Пауза", "music_resume": "▶️ Продолжить",
@@ -95,7 +96,7 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "dues_set": "⚙️ Настройка взноса", "salary_rates": "💸 Ставки зарплат",
          "salary_rate_set": "💸 Ставка зарплаты", "salary_ranks": "💸 Зарплата по ставкам",
          "salary_role": "💸 Выплата роли", "salary_pay": "💸 Выплата", "fine_add": "🧾 Штраф",
-         "fine_list": "🧾 Неоплаченные штрафы", "fine_paid": "✅ Оплата штрафа"}
+         "fine_list": "🧾 Неоплаченные штрафы", "fine_paid": "✅ Оплата штрафа", "paid_claim": "🧾 Заявка в казну"}
 
 # как каналы называют в разговоре (ключ канала из настроек → слова)
 CHANNEL_HINTS = {
@@ -168,6 +169,8 @@ ACT_ALL = """ДЕЙСТВИЯ, доступные всем (поле "type"):
 - invite: {"user":id,"names":["как назвали"],"text":"что передать, одной фразой"} — позвать человека в войс к автору
   («позови Дашу»): ты тегнешь его в общем чате
 - forget — стереть своё досье на автора («забудь про меня»)
+- paid_claim: {"what":"due"|"fine","amount":"100к" или null} — АВТОР САМ говорит, что сдал взнос / оплатил штраф
+  («я сдал взнос», «скинул в казну 100к», «оплатил штраф»; часто со скрином). Бот отправит заявку казначею
 Для справок (law, market, top, profile, queue, roll) "reply" оставь пустым — ответ придёт из базы.
 """
 ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
@@ -212,7 +215,7 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
 - inactive: {{"days":1..90}} — старый отчёт «кто не появлялся» (вместо него — people); digest — сводка по семье
 - АВТОПАРК: car_list {{"user":id или null}} — чьи машины; car_add {{"model":"Elegy","plate":"А123ВС" или null,
   "user":id у кого или null (общая),"note":"..."}}; car_give {{"plate" или "model","user":id или null (в общий гараж)}};
-  car_status {{"plate" или "model","status":"ok"|"repair","note":"..."}}; car_remove {{"plate" или "model","reason":"..."}}
+  car_status {{"plate" или "model","status":"ok"|"repair","note":"...","cost":"50к" или null — сколько стоил ремонт}}; car_remove {{"plate" или "model","reason":"..."}}
 - recruit_stats: {{"days":7}} — статистика рекрутёров: обзвоны, принятые, отклонённые («как рекрутёры за месяц» → 30)
 «нас», «всех нас», «всех» в разговоре про войс — source "my"; «всех со всего сервера» — source "all"; «меня» — автор.
 КАНАЛЫ понимай по смыслу и с ошибками распознавания речи: «на двоих», «вдвоём» — канал «На двоих», «курилка» —
@@ -670,7 +673,7 @@ class Assistant(commands.Cog):
             self.remember(ctx, request, (text if facts or failed else reply or "Готово")[:300])
             await send(content=(text or "Готово.")[:1900])
             for e in extra[:2]:
-                await send(embed=e)
+                await (send(**e) if isinstance(e, dict) else send(embed=e))
             if facts:  # в голосе зачитываем сам ответ, без разметки и ссылок
                 return re.sub(r"<[^>]+>|[*_`#>]|\[[^\]]*\]\([^)]*\)", "", " ".join(facts))[:380]
             return ("Не вышло. " + " ".join(r.lstrip("❌⛔⚠️ ") for r in acts if r.startswith(("❌", "⛔", "⚠️"))))[:200] \
@@ -686,6 +689,10 @@ class Assistant(commands.Cog):
         view.sent = await send(embed=e, view=view)
         return "Подтверди кнопкой в чате"
 
+    def active_warns(self, g, m):
+        return self.bot.db.one("SELECT COUNT(*) n FROM warns WHERE guild_id=? AND user_id=? AND active=1",
+                               g.id, m.id)["n"]
+
     def describe(self, g, a):
         t = a["type"]
         tr = self.bot.get_cog("Treasury")
@@ -697,10 +704,21 @@ class Assistant(commands.Cog):
             return f"{LABEL[t]} {who or a.get('source', '')} → {to.name if to else '?'}"
         if t in ("mute",):
             return f"{LABEL[t]} {who} на {a.get('minutes', 10)} мин · {a.get('reason', '')}"
+        ms = self.find_members(g, a)
         if t == "warn":
-            return f"{LABEL[t]} {who} · {a.get('reason', '')}" + (f" + штраф {a['fine']}" if a.get("fine") else "")
+            m = ms[0] if ms else None
+            n = self.active_warns(g, m) if m else None
+            lim = self.bot.num(g, "warn_limit")
+            change = f" · выговоров {n} → {n + 1} из {lim}" + (" ⚠️ лимит" if n + 1 >= lim else "") if n is not None else ""
+            return (f"{LABEL[t]} {who} · {a.get('reason', '')}{change}"
+                    + (f" + штраф {a['fine']}" if a.get("fine") else ""))
+        if t == "unwarn" and ms:
+            return f"{LABEL[t]} {who} · активных выговоров {self.active_warns(g, ms[0])} → 0"
         if t == "rank":
-            return f"{LABEL[t]} {who} → {config.BASE_RANKS.get(a.get('rank'), a.get('rank'))}"
+            was = self.bot.rank_name(ms[0]) if ms else None
+            return f"{LABEL[t]} {who}: {was or '—'} → {config.BASE_RANKS.get(a.get('rank'), a.get('rank'))}"
+        if t == "expel" and ms:
+            return f"{LABEL[t]} {who}: {self.bot.rank_name(ms[0]) or '—'} → Гость · {a.get('reason', '')}"
         if t == "people":
             from core import people
             return f"{LABEL[t]}: {people.criteria(people.filters(a))}"
@@ -877,7 +895,11 @@ class Assistant(commands.Cog):
                 f"{i + 1}. {self.name(g, r['user_id'])} — 🎙 {fmt_hours(r['v'])} · 💬 {r['m']}" for i, r in enumerate(rows))
         if t == "people":
             from core import people
-            return people.render(people.query(bot, g, a))
+            res = people.query(bot, g, a)
+            v = people.view_for(bot, me, res)
+            if v is not None and extra is not None:
+                extra.append({"content": "Что с ними сделать?", "view": v})
+            return people.render(res)
         if t == "inactive":
             days = max(1, min(90, int(a.get("days") or 5)))
             from cogs.mentorship import is_inactive  # одна мерка с массовым переводом новичков
@@ -1285,6 +1307,18 @@ class Assistant(commands.Cog):
                 elif t in ("leave", "listen", "listen_stop") and not bot.has(me, USERS) and \
                         (li := getattr(bot.get_cog("Jarvis"), "listeners", {}).get(g.id)) and li.owner != me.id:
                     out.append(f"⛔ Я сейчас занят — меня позвал {self.name(g, li.owner)}.")
+                elif t == "paid_claim":
+                    tr = bot.get_cog("Treasury")
+                    shot = next((x for x in getattr(message, "attachments", []) or []
+                                 if (x.content_type or "").startswith("image/") and x.size <= 8 * 1024 * 1024), None)
+                    image = None
+                    if shot:
+                        try:
+                            image = (shot.filename or "shot.png", shot.content_type, await shot.read())
+                        except discord.HTTPException:
+                            image = None
+                    out.append(await tr.claim(g, me, "fine" if a.get("what") == "fine" else "due",
+                                              a.get("amount"), image) if tr else "Казна не загружена.")
                 elif t == "forget":
                     persona = bot.get_cog("Persona")
                     if persona:

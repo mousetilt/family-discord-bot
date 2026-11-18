@@ -281,6 +281,10 @@ ACTIONS = {
     "exam_try": ("📝", "Тренировка экзамена", "экзамен тренировка", {}),
     "lawyer": ("⚖️", "Спросить юриста", "юрист", {}),
     "help": ("❔", "Помощь", None, {}),
+    "paid": ("🧾", "Сдал взнос / штраф", "сдал", {}),
+    "promote_nb": ("🎓", "Новичков — в члены", "перевести-новичков", {}),
+    "who": ("👥", "Кто… (списки)", "кто", {}),
+    "export": ("📤", "Выгрузить в Excel", "выгрузка", {}),
 }
 SETUP_ROLES = ["leader", "deputy"]
 # раздел: ключ → (эмодзи, название, кому виден (None — всем в семье), [действия])
@@ -288,8 +292,8 @@ LEAD_SECTIONS = {
     "apps": ("📋", "Заявки", config.HR + ["mentor"], ["apps", "manual", "appeals", "m_assign", "m_list", "m_days", "m_top",
                                                      "exam_q", "rec_stats", "rec_rate"]),
     "staff": ("🎖", "Кадры", config.LEAD + ["hr_head", "senior"],
-              ["rank", "post", "warn", "warns", "unwarn", "mute", "expel", "nick_tpl", "nick_check"]),
-    "activity": ("📊", "Активность", STAFF, ["report", "top", "inactive", "digest", "gather", "announce", "draft", "sched",
+              ["rank", "post", "warn", "warns", "unwarn", "mute", "expel", "promote_nb", "who", "nick_tpl", "nick_check"]),
+    "activity": ("📊", "Активность", STAFF, ["report", "top", "inactive", "export", "digest", "gather", "announce", "draft", "sched",
                                          "sched_list", "relay_set", "chron"]),
     "mod": ("🛡", "Модерация", config.LEAD + ["hr_head", "senior"],
             ["sec", "raid_on", "raid_off", "bl_list", "bl_check", "bl_add"]),
@@ -307,7 +311,7 @@ LEAD_SECTIONS = {
     "setup": ("⚙️", "Настройка", SETUP_ROLES, ["wizard", "modules", "ai", "perms"]),
 }
 MEMBER_SECTIONS = {
-    "me": ("👤", "Моё", config.FAMILY_PLUS, ["profile", "missed", "search", "dossier", "my_warns", "forget"]),
+    "me": ("👤", "Моё", config.FAMILY_PLUS, ["profile", "paid", "missed", "search", "dossier", "my_warns", "forget"]),
     "vac": ("🌴", "Отпуск", config.FAMILY_PLUS, ["vac", "back"]),
     "room": ("🔊", "Моя комната", config.FAMILY_PLUS, ["r_open", "r_close", "r_name", "r_limit", "r_kick", "r_give"]),
     "market": ("🛒", "Рынок", config.FAMILY_PLUS, ["mk_search", "mk_mine", "mk_sell", "mk_price"]),
@@ -321,7 +325,7 @@ SECTIONS = {**LEAD_SECTIONS, **MEMBER_SECTIONS}
 # Админ сервера может вернуть любую из них ролям: Настройки сервера → Интеграции → бот.
 HIDDEN_FOR_MEMBERS = {"отпуск", "вернулся", "выговоры", "профиль", "топ", "досье", "забудь_меня", "любимчики",
                       "эфир", "эфиры", "цена", "продать", "юрист", "спросить", "прозвище", "экзамен", "буст",
-                      "комната", "казна", "база", "журнал"}
+                      "комната", "казна", "база", "журнал", "кто", "перевести-новичков", "выгрузка"}
 TEXTY = {"text", "question", "note", "reason", "what"}  # такие поля — многострочные
 
 

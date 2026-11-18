@@ -19,6 +19,10 @@ def plain(s):
     return re.sub(r"[^\w\s\-.,()№/]", "", s or "").strip()
 
 
+YN = [app_commands.Choice(name="да", value="1"), app_commands.Choice(name="нет", value="0")]
+WHO_BY = config.ORGANIZERS + config.HR + ["senior", "treasurer"]  # как справки помощника
+
+
 class Activity(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -225,6 +229,30 @@ class Activity(commands.Cog):
         text = await self.build_report(inter.guild)
         await inter.followup.send(embed=self.bot.embed("📊 Отчёт об активности", text[:4000], config.GOLD, inter.guild),
                                   ephemeral=True)
+
+    @app_commands.default_permissions(manage_messages=True)
+    @app_commands.command(name="кто", description="Список людей по фильтрам: ранг, взнос, экзамен, войс, выговоры…")
+    @app_commands.rename(rank="ранг", dues="взнос", exam="экзамен", voice="в_войсе", warns="выговоры",
+                         term="срок_отбыт", idle="неактив_дней", limit="сколько")
+    @app_commands.choices(rank=[app_commands.Choice(name=config.ROLE_NAMES[k], value=k) for k in config.ROSTER_ORDER][:25],
+                          dues=[app_commands.Choice(name="должны", value="unpaid"),
+                                app_commands.Choice(name="сдали", value="paid")],
+                          exam=YN, voice=YN, warns=YN, term=YN)
+    async def who(self, inter: discord.Interaction, rank: str = None, dues: str = None, exam: str = None,
+                  voice: str = None, warns: str = None, term: str = None,
+                  idle: app_commands.Range[int, 1, 365] = None, limit: app_commands.Range[int, 1, 60] = None):
+        from core import people
+        if not self.bot.has(inter.user, WHO_BY):
+            return await inter.response.send_message("⛔ Это справка для руководства и должностных.", ephemeral=True)
+        yn = {"1": True, "0": False}
+        a = {"rank": rank, "dues": dues, "exam": yn.get(exam), "in_voice": yn.get(voice), "warns": yn.get(warns),
+             "probation_done": yn.get(term), "inactive_days": idle, "limit": limit}
+        res = people.query(self.bot, inter.guild, a)
+        v = people.view_for(self.bot, inter.user, res)
+        await inter.response.send_message(people.render(res)[:1990], ephemeral=True,
+                                          **({"view": v} if v is not None else {}))
+
+
 
 
 async def setup(bot):

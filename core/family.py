@@ -91,9 +91,11 @@ NUMBERS = {
     "exam_retry": ("Пересдача через, минут", config.EXAM_RETRY_MIN, 0, 10080),
     "journal_days": ("Журнал действий хранится, дней", 30, 1, 180),
     "app_ping_hours": ("Пинг кадрам, если заявку не взяли за, часов (0 — выкл)", 2, 0, 72),
+    "auto_idle_days": ("Автоперевод: не переводить, если не появлялся, дней (0 — не смотреть)", 5, 0, 60),
 }
 NUMBER_GROUPS = {"discipline": ("⚖️ Дисциплина и сроки", ["warn_limit", "warn_days", "probation_days", "digest_days",
-                                                          "market_days", "journal_days", "app_ping_hours"]),
+                                                          "market_days", "journal_days", "app_ping_hours",
+                                                          "auto_idle_days"]),
                  "exam": ("🧠 Экзамен", ["exam_questions", "exam_pass", "exam_time", "exam_retry"])}
 # Тексты семьи (/настройки → «📜 Тексты»): ключ text:<имя>. Пусто — текст по умолчанию из config (под семью).
 TEXTS = {
