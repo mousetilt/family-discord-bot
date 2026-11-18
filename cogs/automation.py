@@ -8,6 +8,7 @@
             речь announce {"at": "в 20:00"}.
 • relay   — ретранслятор (по умолчанию выкл): канал-источник (куда приходят анонсы через Discord «Подписаться»)
             → ИИ вытаскивает суть → пост в канал новостей сразу или черновиком на подтверждение (relay:*)."""
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -149,7 +150,39 @@ class DraftView(discord.ui.View):
         await inter.response.send_modal(WhenModal(self.cog, self.title_, self.text))
 
 
-class RelayButton(discord.ui.DynamicItem[discord.ui.Button], template=r"relay:(?P<a>pub|skip):(?P<m>\d+)"):
+def parse_feed(xml_text):
+    """RSS 2.0 / Atom → [(ссылка, заголовок, текст)] (стандартная библиотека, без feedparser)."""
+    import html
+    import re as _re
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+    strip = lambda t: _re.sub(r"\s+", " ", _re.sub(r"<[^>]+>", " ", html.unescape(t or ""))).strip()  # noqa: E731
+    out = []
+    for it in root.iter():
+        tag = it.tag.rsplit("}", 1)[-1]
+        if tag not in ("item", "entry"):
+            continue
+        get = {c.tag.rsplit("}", 1)[-1]: c for c in it}
+        link = get.get("link")
+        href = (link.get("href") or link.text) if link is not None else None
+        title = strip(get["title"].text) if "title" in get else ""
+        body = next((strip(get[k].text) for k in ("description", "summary", "content") if k in get and get[k].text), "")
+        guid = (get["guid"].text if "guid" in get else None) or (get["id"].text if "id" in get else None) or href or title
+        if guid:
+            out.append((guid.strip(), title, body))
+    return out
+
+
+def feed_id(guid):
+    """Стабильный отрицательный номер записи RSS (у сообщений Discord номера положительные — не пересекутся)."""
+    import hashlib
+    return -int(hashlib.md5(guid.encode("utf-8")).hexdigest()[:15], 16)
+
+
+class RelayButton(discord.ui.DynamicItem[discord.ui.Button], template=r"relay:(?P<a>pub|skip):(?P<m>-?\d+)"):
     def __init__(self, a, mid):
         super().__init__(discord.ui.Button(label="Опубликовать" if a == "pub" else "Пропустить",
                                            emoji="📰" if a == "pub" else "✖️",
@@ -195,9 +228,11 @@ class Automation(commands.Cog):
         bot.db.c.commit()
         self._search_last = {}
         self.sched_loop.start()
+        self.rss_loop.start()
 
     def cog_unload(self):
         self.sched_loop.cancel()
+        self.rss_loop.cancel()
 
     def on(self, guild, act):
         return self.bot.feature(guild, f"auto:{act}")
@@ -428,16 +463,20 @@ class Automation(commands.Cog):
         text = message.content or ""
         for e in message.embeds:
             text += f"\n{e.title or ''}\n{e.description or ''}"
-        text = text.strip()
+        await self.relay_process(g, message.id, text.strip(), f"#{message.channel.name}")
+
+    async def relay_process(self, g, mid, text, source):
+        """Общий путь ретранслятора (канал-источник и RSS): фильтр, дедуп, ИИ-выжимка, черновик или публикация.
+        mid — уникальный номер записи (id сообщения; у RSS — отрицательный хэш ссылки)."""
         if len(text) < 40:
             return
         words = [w.strip().lower() for w in (self.bot.db.gget(g, "relay:filter") or "").split(",") if w.strip()]
         if words and not any(w in text.lower() for w in words):
             return
         db = self.bot.db
-        if db.one("SELECT 1 FROM relay_posts WHERE guild_id=? AND message_id=?", g.id, message.id):
+        if db.one("SELECT 1 FROM relay_posts WHERE guild_id=? AND message_id=?", g.id, mid):
             return
-        db.q("INSERT INTO relay_posts(guild_id, message_id, status, ts) VALUES(?,?,'new',?)", g.id, message.id,
+        db.q("INSERT INTO relay_posts(guild_id, message_id, status, ts) VALUES(?,?,'new',?)", g.id, mid,
              int(time.time()))
         ai = self.bot.ai_for(g)
         if not ai.on:
@@ -453,20 +492,20 @@ class Automation(commands.Cog):
             log.warning("Ретранслятор: %s", e)
             return
         if not isinstance(data, dict) or data.get("skip") or not data.get("text"):
-            db.q("UPDATE relay_posts SET status='skip' WHERE guild_id=? AND message_id=?", g.id, message.id)
+            db.q("UPDATE relay_posts SET status='skip' WHERE guild_id=? AND message_id=?", g.id, mid)
             return
         title_, body = str(data.get("title") or "Новости")[:200], str(data["text"])[:3500]
-        db.q("UPDATE relay_posts SET title=?, text=? WHERE guild_id=? AND message_id=?", title_, body, g.id, message.id)
+        db.q("UPDATE relay_posts SET title=?, text=? WHERE guild_id=? AND message_id=?", title_, body, g.id, mid)
         if (db.gget(g, "relay:mode") or "draft") == "auto":
-            await self.relay_publish(g, message.id)
+            await self.relay_publish(g, mid)
             return
         c = self.bot.ch(g, "botcmd")
         if c:
             v = discord.ui.View(timeout=None)
-            v.add_item(RelayButton("pub", message.id))
-            v.add_item(RelayButton("skip", message.id))
+            v.add_item(RelayButton("pub", mid))
+            v.add_item(RelayButton("skip", mid))
             e = self.bot.embed(f"📰 Черновик новости · {title_}", body, config.COLOR, g)
-            e.set_footer(text=f"Из канала #{message.channel.name} · опубликовать в новости?")
+            e.set_footer(text=f"Из {source} · опубликовать в новости?")
             try:
                 await c.send(embed=e, view=v)
             except discord.HTTPException:
@@ -524,6 +563,60 @@ class Automation(commands.Cog):
             "Как подписаться на чужие анонсы: в том сервере открой канал анонсов → «Подписаться» (Follow) → выбери "
             f"этот сервер и канал {src.mention}. Новые анонсы будут приходить туда, а я — пересказывать их коротко.",
             ephemeral=True)
+
+    @relay.command(name="rss", description="Брать анонсы из RSS-ленты (новости сайта или форума игры)")
+    @app_commands.rename(url="ссылка")
+    @app_commands.describe(url="Адрес RSS/Atom-ленты (https://…). Пусто — отключить RSS")
+    @staff_only(config.LEAD)
+    async def relay_rss(self, inter: discord.Interaction, url: str = None):
+        db, g = self.bot.db, inter.guild
+        if not url:
+            db.gdel(g, "relay:rss")
+            return await inter.response.send_message("📰 RSS-источник отключён.", ephemeral=True)
+        url = url.strip()
+        if not url.startswith(("https://", "http://")) or len(url) > 300:
+            return await inter.response.send_message("❌ Нужна ссылка вида https://…/rss", ephemeral=True)
+        await inter.response.defer(ephemeral=True, thinking=True)
+        items = await self.fetch_feed(url)
+        if items is None:
+            return await inter.followup.send("❌ По ссылке нет RSS/Atom-ленты (или сайт не ответил).", ephemeral=True)
+        db.gset(g, "relay:rss", url)
+        for guid, _, _ in items:  # что уже было в ленте — не пересказываем, только новое
+            db.q("INSERT OR IGNORE INTO relay_posts(guild_id, message_id, status, ts) VALUES(?,?,'skip',?)",
+                 g.id, feed_id(guid), int(time.time()))
+        db.gset(g, "mod:auto", "1")
+        db.gset(g, "mod:auto:relay", "1")
+        await inter.followup.send(f"📰 RSS подключён ({len(items)} записей в ленте — их пропускаю). Новые буду "
+                                  "пересказывать коротко раз в 20 минут.", ephemeral=True)
+
+    async def fetch_feed(self, url):
+        """Скачать ленту (до 2 МБ, 20 с). Только адрес, который сам задал руководитель; без обхода защит."""
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20),
+                                             headers={"User-Agent": "family-bot-relay/1.0"}) as s:
+                async with s.get(url) as r:
+                    if r.status != 200:
+                        return None
+                    raw = await r.content.read(2 * 1024 * 1024)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            return None
+        items = parse_feed(raw.decode("utf-8", "replace"))
+        return items if items else None
+
+    @tasks.loop(minutes=20)
+    @guarded
+    async def rss_loop(self):
+        for g in list(self.bot.home_guilds):
+            url = self.bot.db.gget(g, "relay:rss")
+            if not url or not self.on(g, "relay"):
+                continue
+            items = await self.fetch_feed(url) or []
+            for guid, title, body in items[:10]:
+                await self.relay_process(g, feed_id(guid), f"{title}\n{body}".strip(), "RSS-ленты")
+
+    @rss_loop.before_loop
+    async def _rss_before(self):
+        await self.bot.wait_until_ready()
 
     @relay.command(name="выключить", description="Выключить ретранслятор")
     @staff_only(config.LEAD)

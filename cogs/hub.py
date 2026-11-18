@@ -286,6 +286,9 @@ ACTIONS = {
     "who": ("👥", "Кто… (списки)", "кто", {}),
     "export": ("📤", "Выгрузить в Excel", "выгрузка", {}),
     "bday": ("🎂", "Мой день рождения", "др", {}),
+    "levels": ("🏅", "Уровни", "уровни", {}),
+    "shop": ("🛍", "Магазин", "магазин список", {}),
+    "shop_buy": ("🛒", "Купить в магазине", "магазин купить", {}),
 }
 SETUP_ROLES = ["leader", "deputy"]
 # раздел: ключ → (эмодзи, название, кому виден (None — всем в семье), [действия])
@@ -317,6 +320,7 @@ MEMBER_SECTIONS = {
     "room": ("🔊", "Моя комната", config.FAMILY_PLUS, ["r_open", "r_close", "r_name", "r_limit", "r_kick", "r_give"]),
     "market": ("🛒", "Рынок", config.FAMILY_PLUS, ["mk_search", "mk_mine", "mk_sell", "mk_price"]),
     "fun": ("🔴", "Эфиры и бусты", config.FAMILY_PLUS, ["stream", "streams", "boost", "boost_role"]),
+    "lvl": ("🏅", "Уровни и магазин", config.FAMILY_PLUS, ["levels", "shop", "shop_buy"]),
     "learn": ("🎓", "Обучение", config.FAMILY_PLUS, ["exam_try", "exam_pass", "lawyer", "kb_find"]),
     "cars": ("🚗", "Автопарк", config.FAMILY_PLUS, ["car_list", "car_hist"]),
 }
@@ -465,23 +469,78 @@ class ArgModal(discord.ui.Modal):
 
     async def on_submit(self, inter: discord.Interaction):
         kwargs = dict(self.values)
-        T = discord.AppCommandOptionType
         for name, (p, ti) in self.inputs.items():
-            raw = (ti.value or "").strip()
-            if not raw:
-                continue
-            if p.type == T.string:
-                kwargs[name] = raw
-                continue
-            try:
-                num = int(raw.replace(" ", "")) if p.type == T.integer else float(raw.replace(",", "."))
-            except ValueError:
+            ok, val = parse_text(p, ti.value)
+            if not ok:
                 return await inter.response.send_message(f"❌ «{plabel(p)}» — нужно число.", ephemeral=True)
-            if p.min_value is not None:
-                num = max(p.min_value, num)
-            if p.max_value is not None:
-                num = min(p.max_value, num)
-            kwargs[name] = num
+            if val is not None:
+                kwargs[name] = val
+        await execute(self.bot, inter, self.plan.cmd, kwargs)
+
+
+def parse_text(p, raw):
+    """Значение из текстового поля → (ок, значение|None). Числа — с ограничениями команды."""
+    T = discord.AppCommandOptionType
+    raw = (raw or "").strip()
+    if not raw:
+        return True, None
+    if p.type == T.string:
+        return True, raw
+    try:
+        num = int(raw.replace(" ", "")) if p.type == T.integer else float(raw.replace(",", "."))
+    except ValueError:
+        return False, None
+    if p.min_value is not None:
+        num = max(p.min_value, num)
+    if p.max_value is not None:
+        num = min(p.max_value, num)
+    return True, num
+
+
+class OneModal(discord.ui.Modal):
+    """Всё в одном окне: выбор участника, варианты и текст (Discord разрешает выпадающие списки в модалке).
+    До 5 полей; больше — старый путь «выбор → Дальше → модалка» (ArgView)."""
+
+    def __init__(self, bot, plan, title):
+        super().__init__(title=title[:45])
+        self.bot, self.plan, self.fields = bot, plan, {}
+        for p in plan.users:
+            sel = discord.ui.UserSelect(min_values=1 if p.required else 0, max_values=1, required=p.required)
+            self.fields[p.name] = ("user", p, sel)
+            self.add_item(discord.ui.Label(text=plabel(p)[:45], component=sel))
+        for p in plan.choices:
+            opts = ([discord.SelectOption(label=str(c.name)[:100], value=str(c.value)) for c in p.choices[:25]]
+                    if p.choices else [discord.SelectOption(label="Да", value="1"),
+                                       discord.SelectOption(label="Нет", value="0")])
+            sel = discord.ui.Select(options=opts, min_values=1 if p.required else 0, max_values=1, required=p.required)
+            self.fields[p.name] = ("choice", p, sel)
+            self.add_item(discord.ui.Label(text=plabel(p)[:45], component=sel))
+        for p in plan.texts:
+            hint = p.description or ""
+            if p.type != discord.AppCommandOptionType.string:
+                lo, hi = p.min_value, p.max_value
+                hint = f"число{f' от {lo}' if lo is not None else ''}{f' до {hi}' if hi is not None else ''}. " + hint
+            ti = discord.ui.TextInput(required=p.required, placeholder=hint[:100] or None,
+                                      style=discord.TextStyle.paragraph if p.name in TEXTY else discord.TextStyle.short,
+                                      max_length=1500 if p.name in TEXTY else 200)
+            self.fields[p.name] = ("text", p, ti)
+            self.add_item(discord.ui.Label(text=plabel(p)[:45], component=ti))
+
+    async def on_submit(self, inter: discord.Interaction):
+        kwargs = dict(self.plan.fixed)
+        for name, (kind, p, c) in self.fields.items():
+            if kind == "text":
+                ok, val = parse_text(p, c.value)
+                if not ok:
+                    return await inter.response.send_message(f"❌ «{plabel(p)}» — нужно число.", ephemeral=True)
+            elif kind == "user":
+                val = c.values[0] if c.values else None
+            else:
+                val = self.plan.choice_value(p, c.values[0]) if c.values else None
+            if val is None and p.required:
+                return await inter.response.send_message(f"❌ Заполни «{plabel(p)}».", ephemeral=True)
+            if val is not None:
+                kwargs[name] = val
         await execute(self.bot, inter, self.plan.cmd, kwargs)
 
 
@@ -557,6 +616,13 @@ async def start_action(bot, inter: discord.Interaction, key):
     if not await can_run(bot, inter, cmd):
         return
     title = f"{emoji} {label}"
+    if (plan.users or plan.choices) and len(plan.users) + len(plan.choices) + len(plan.texts) <= 5:
+        try:  # одно окно вместо «выбор → Дальше → модалка»
+            return await inter.response.send_modal(OneModal(bot, plan, title))
+        except (discord.HTTPException, TypeError, ValueError) as e:
+            log.info("Панель: одно окно не вышло (%s) — пошагово", e)
+            if inter.response.is_done():
+                return
     if plan.users or plan.choices:
         return await inter.response.send_message(f"**{title}**", view=ArgView(bot, plan, title), ephemeral=True)
     if plan.texts:
@@ -688,13 +754,41 @@ def member_embed(bot, guild):
     return bot.embed("👤 Панель участника", "\n".join(lines), config.GOLD, guild)
 
 
+def emoji_png(path):
+    """Картинка → PNG 128×128 (лимит Discord на эмодзи — 256 КБ, герб в assets весит больше мегабайта)."""
+    import io as _io
+    from PIL import Image
+    im = Image.open(path).convert("RGBA")
+    im.thumbnail((128, 128))
+    buf = _io.BytesIO()
+    im.save(buf, "PNG", optimize=True)
+    return buf.getvalue()
+
+
 class Hub(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.emblem = None  # эмодзи приложения с гербом — работает на всех серверах семей без загрузки на каждый
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Эмодзи приложения (Discord хранит их у бота, а не у сервера): загружаем герб один раз."""
+        if self.emblem:
+            return
+        try:
+            have = {e.name: e for e in await self.bot.fetch_application_emojis()}
+            e = have.get("family_emblem")
+            if e is None:
+                e = await self.bot.create_application_emoji(name="family_emblem", image=emoji_png(config.ASSETS / "emblem.png"))
+            self.emblem = str(e)
+        except (discord.HTTPException, OSError, AttributeError) as ex:
+            log.info("Эмодзи приложения не загружено: %s", ex)
 
     async def send_help(self, inter: discord.Interaction):
-        await inter.response.send_message(embed=help_home(self.bot, inter.user), view=HelpView(self.bot, inter.user),
-                                          ephemeral=True)
+        e = help_home(self.bot, inter.user)
+        if self.emblem and e.title and self.bot.is_home(inter.guild):  # герб — бренд домашней семьи
+            e.title = f"{self.emblem} {e.title}"
+        await inter.response.send_message(embed=e, view=HelpView(self.bot, inter.user), ephemeral=True)
 
     @app_commands.command(name="помощь", description="Что умеет бот: что сказать, куда нажать")
     @app_commands.guild_only()
@@ -730,7 +824,7 @@ class Hub(commands.Cog):
                 except discord.HTTPException:
                     pass
             bot.db.gdel(guild, "panel:hub_member")
-        await bot.panel_once(guild, "hub_member", "panel", repost, member, version=5)  # v2: канал только для семьи, v3: сдать экзамен
+        await bot.panel_once(guild, "hub_member", "panel", repost, member, version=6)  # v2: канал только для семьи, v3: сдать экзамен, v6: уровни и магазин
         await bot.panel_once(guild, "hub_lead", "botcmd", repost, lead, version=5)  # v3: ручной приём, срок
         for key, (_, _, mod) in CHANNEL_PANELS.items():
             if mod and not bot.feature(guild, mod):

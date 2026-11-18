@@ -37,6 +37,18 @@ class ForumView(discord.ui.View):
         await inter.response.send_message(text, file=f, ephemeral=True)
 
 
+def qr_png(url):
+    """QR-код ссылки (PNG) — если стоит необязательная библиотека qrcode, иначе None."""
+    try:
+        import qrcode
+    except ImportError:
+        return None
+    img = qrcode.make(url, border=2, box_size=10)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
 class Promo(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -126,9 +138,13 @@ class Promo(commands.Cog):
                 "family": bot.family(g)["name"], "server": bot.family(g)["server"], "title": bot.family(g)["title"]}
         png = await asyncio.to_thread(images.family_card, data)
         bb = bot.brand(g, self.forum_post(g, n, leader, since_txt, allies, invite, recruiting))
+        files = [discord.File(png, filename="vizitka.png")]
+        qr = await asyncio.to_thread(qr_png, invite) if invite else None
+        if qr:  # QR на приглашение — для скринов, стримов и листовок в игре
+            files.append(discord.File(io.BytesIO(qr), filename="qr-priglashenie.png"))
         await inter.followup.send(
             content=f"🏛 **{bot.family(g)['title']}** — {'набор открыт, ' if recruiting else ''}вступить: {invite}",
-            file=discord.File(png, filename="vizitka.png"), view=ForumView(bb))
+            files=files, view=ForumView(bb))
 
 
 async def setup(bot):

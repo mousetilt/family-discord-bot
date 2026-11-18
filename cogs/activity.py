@@ -150,6 +150,10 @@ class Activity(commands.Cog):
             extra.append(f"📺 Эфиров: {streams}")
         if getattr(member, "premium_since", None):
             extra.append(f"💎 Бустер семьи с {member.premium_since.strftime('%d.%m.%Y')}")
+        lv = bot.get_cog("Levels")
+        line = lv.card_line(member) if lv and bot.in_family(member) else None
+        if line:
+            extra.append(line)
         if extra:
             e.description = "\n".join(extra)
         return e
