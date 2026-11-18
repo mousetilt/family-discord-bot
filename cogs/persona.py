@@ -116,7 +116,6 @@ class Persona(commands.Cog):
 
     def forget(self, gid, uid):
         self.bot.db.q("DELETE FROM persona WHERE guild_id=? AND user_id=?", gid, uid)
-        self.bot.db.gdel(gid, f"bday:{uid}")  # «забудь меня» — и день рождения тоже
 
     def apply(self, gid, uid, mood, remember):
         """Что ИИ вынес из разговора: как человек с ним обошёлся и что о нём стоит запомнить."""

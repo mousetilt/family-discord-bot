@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Красивые карточки: приветствие, «новый член семьи», визитка семьи."""
+"""Красивые карточки: приветствие, «новый член семьи»."""
 import io
 from functools import lru_cache
 
@@ -153,66 +153,3 @@ def welcome_card(avatar_bytes, title, name, subtitle):
     for i, ln in enumerate(wrap(subtitle, f_sub, maxw, 2)):
         draw_text(bg, (x, 256 + i * 36), ln, f_sub, fill=CREAM)
     return _png(bg)
-
-
-def family_card(d):
-    """Визитка семьи 1280×720. d: members, since, months, leader, allies, invite, recruiting, top_rank"""
-    W, H = 1280, 720
-    bg = Image.new("RGBA", (W, H), (8, 6, 7, 255))
-    # бордовое свечение справа
-    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ImageDraw.Draw(glow).ellipse((620, -200, 1500, 760), fill=(122, 16, 34, 120))
-    bg.alpha_composite(glow.filter(ImageFilter.GaussianBlur(120)))
-    # герб слева с растворением вправо
-    em = Image.open(config.ASSETS / "emblem.png").convert("RGBA").resize((H, H), Image.LANCZOS)
-    row = [255 if i < H * 0.55 else max(0, int(255 * (1 - (i - H * 0.55) / (H * 0.45)) ** 1.6)) for i in range(H)]
-    fade = Image.new("L", (H, 1))
-    fade.putdata(row)
-    em.putalpha(ImageChops_multiply(em.getchannel("A"), fade.resize((H, H))))
-    bg.alpha_composite(em, (-30, 0))
-
-    x, maxw = 690, 540
-    # титул семьи из профиля (/семья профиль): «Ульяновская Династия» → «УЛЬЯНОВСКАЯ» + «Династия»
-    head, _, tail = str(d.get("title") or "Ульяновская Династия").strip().partition(" ")
-    if tail:  # титул из одного слова — только крупная строка
-        draw_text(bg, (x, 70), head.upper(), font("Montserrat-Bold.ttf", 26), spacing=9, fill=CREAM)
-    tail = tail or head
-    draw_text(bg, (x - 4, 104), tail, fit_font(tail, "CormorantSC-Bold.ttf", maxw, 104, 60), gold=True)
-    draw_text(bg, (x, 222), f"РОССИЯ ОНЛАЙН · {(d.get('server') or config.GAME_SERVER).upper()}", font("Montserrat-Bold.ttf", 20),
-              spacing=4, fill=WHITE)
-    draw_text(bg, (x, 254), "Честь · Верность · Семья", font("CormorantSC-Bold.ttf", 28), fill=(196, 58, 76))
-
-    line = _gradient(maxw, 2).convert("RGBA")
-    f2 = Image.linear_gradient("L").rotate(90).resize((maxw, 2))
-    line.putalpha(f2)
-    bg.alpha_composite(line, (x, 306))
-
-    lab, val = font("Montserrat-Bold.ttf", 15), "Montserrat-ExtraBold.ttf"
-    cells = [("В СЕМЬЕ", d.get("members", "—")), ("С НАМИ С", d.get("since", "—")),
-             ("ГЛАВА", d.get("leader", "—")), ("СОЮЗНИКИ", d.get("allies", "—"))]
-    for i, (k, v) in enumerate(cells):
-        cx, cy = x + (i % 2) * 280, 332 + (i // 2) * 92
-        draw_text(bg, (cx, cy), k, lab, fill=(196, 58, 76), spacing=3, shadow=False)
-        v = str(v)
-        draw_text(bg, (cx, cy + 22), v, fit_font(v, val, 260, 34, 16))
-
-    # плашка «набор открыт» + ссылка
-    y = 540
-    if d.get("recruiting", True):
-        pill = Image.new("RGBA", (232, 46), (0, 0, 0, 0))
-        ImageDraw.Draw(pill).rounded_rectangle((0, 0, 231, 45), radius=23, fill=(122, 16, 34, 255))
-        bg.alpha_composite(pill, (x, y))
-        draw_text(bg, (x + 116, y + 10), "НАБОР ОТКРЫТ", font("Montserrat-ExtraBold.ttf", 19), spacing=3,
-                  anchor_center=True, shadow=False)
-    else:
-        draw_text(bg, (x, y + 10), "НАБОР ЗАКРЫТ", font("Montserrat-ExtraBold.ttf", 19), spacing=3, fill=CREAM)
-    inv = d.get("invite") or ""
-    if inv:
-        draw_text(bg, (x, y + 70), "ВСТУПИТЬ:", lab, fill=CREAM, spacing=3, shadow=False)
-        draw_text(bg, (x, y + 92), inv, fit_font(inv, "Montserrat-Bold.ttf", maxw, 34, 20), gold=True)
-    return _png(bg)
-
-
-def ImageChops_multiply(a, b):
-    from PIL import ImageChops
-    return ImageChops.multiply(a, b)

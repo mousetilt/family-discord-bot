@@ -344,8 +344,8 @@ EXTENSIONS = [
     "cogs.server_setup", "cogs.applications", "cogs.mentorship", "cogs.blacklist", "cogs.voice_rooms",
     "cogs.gatherings", "cogs.staff", "cogs.activity", "cogs.moderation", "cogs.lawyer", "cogs.chronicle",
     "cogs.diplomacy", "cogs.market", "cogs.security", "cogs.music", "cogs.context_menus",
-    "cogs.streams", "cogs.appeals", "cogs.promo", "cogs.interviews", "cogs.alliance", "cogs.boosts", "cogs.assistant", "cogs.jarvis", "cogs.daily", "cogs.persona",
+    "cogs.streams", "cogs.appeals", "cogs.interviews", "cogs.alliance", "cogs.boosts", "cogs.assistant", "cogs.jarvis", "cogs.daily", "cogs.persona",
     "cogs.maintenance", "cogs.families", "cogs.control", "cogs.hub",
     "cogs.treasury", "cogs.recruit", "cogs.nickcheck",
-    "cogs.automation", "cogs.garage", "cogs.errorwatch", "cogs.journal", "cogs.export", "cogs.birthdays", "cogs.levels",
+    "cogs.automation", "cogs.garage", "cogs.errorwatch", "cogs.journal", "cogs.export",
 ]

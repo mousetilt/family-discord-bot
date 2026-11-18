@@ -285,10 +285,6 @@ ACTIONS = {
     "promote_nb": ("🎓", "Новичков — в члены", "перевести-новичков", {}),
     "who": ("👥", "Кто… (списки)", "кто", {}),
     "export": ("📤", "Выгрузить в Excel", "выгрузка", {}),
-    "bday": ("🎂", "Мой день рождения", "др", {}),
-    "levels": ("🏅", "Уровни", "уровни", {}),
-    "shop": ("🛍", "Магазин", "магазин список", {}),
-    "shop_buy": ("🛒", "Купить в магазине", "магазин купить", {}),
 }
 SETUP_ROLES = ["leader", "deputy"]
 # раздел: ключ → (эмодзи, название, кому виден (None — всем в семье), [действия])
@@ -315,12 +311,11 @@ LEAD_SECTIONS = {
     "setup": ("⚙️", "Настройка", SETUP_ROLES, ["wizard", "modules", "ai", "perms"]),
 }
 MEMBER_SECTIONS = {
-    "me": ("👤", "Моё", config.FAMILY_PLUS, ["profile", "paid", "bday", "missed", "search", "dossier", "my_warns", "forget"]),
+    "me": ("👤", "Моё", config.FAMILY_PLUS, ["profile", "paid", "missed", "search", "dossier", "my_warns", "forget"]),
     "vac": ("🌴", "Отпуск", config.FAMILY_PLUS, ["vac", "back"]),
     "room": ("🔊", "Моя комната", config.FAMILY_PLUS, ["r_open", "r_close", "r_name", "r_limit", "r_kick", "r_give"]),
     "market": ("🛒", "Рынок", config.FAMILY_PLUS, ["mk_search", "mk_mine", "mk_sell", "mk_price"]),
     "fun": ("🔴", "Эфиры и бусты", config.FAMILY_PLUS, ["stream", "streams", "boost", "boost_role"]),
-    "lvl": ("🏅", "Уровни и магазин", config.FAMILY_PLUS, ["levels", "shop", "shop_buy"]),
     "learn": ("🎓", "Обучение", config.FAMILY_PLUS, ["exam_try", "exam_pass", "lawyer", "kb_find"]),
     "cars": ("🚗", "Автопарк", config.FAMILY_PLUS, ["car_list", "car_hist"]),
 }
@@ -824,7 +819,7 @@ class Hub(commands.Cog):
                 except discord.HTTPException:
                     pass
             bot.db.gdel(guild, "panel:hub_member")
-        await bot.panel_once(guild, "hub_member", "panel", repost, member, version=6)  # v2: канал только для семьи, v3: сдать экзамен, v6: уровни и магазин
+        await bot.panel_once(guild, "hub_member", "panel", repost, member, version=7)  # v2: канал только для семьи, v3: сдать экзамен, v7: без уровней/магазина/др
         await bot.panel_once(guild, "hub_lead", "botcmd", repost, lead, version=5)  # v3: ручной приём, срок
         for key, (_, _, mod) in CHANNEL_PANELS.items():
             if mod and not bot.feature(guild, mod):

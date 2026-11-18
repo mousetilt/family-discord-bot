@@ -28,7 +28,7 @@
 - `moderation.py` — ИИ-модерация (пакетами, на младшей модели).
 - `maintenance.py` 🆕 — панель владельца: `/статус`, `/перезапуск` (через `os.execv`), `/обновить` (git pull + рестарт), `/модуль <имя>` (reload). Только Глава/зам.
 - `hub.py` 🆕 — `/помощь`, `/панель`, панель участника, раннер кнопок → команд (Фаза 1).
-- Прочее: `applications` (заявки), `diplomacy`, `alliance`, `market`, `mentorship`, `interviews`, `promo`, `boosts`, `streams`, `appeals`, `server_setup`, `daily`, `lawyer` (законы РО), `context_menus`.
+- Прочее: `applications` (заявки), `diplomacy`, `alliance`, `market`, `mentorship`, `interviews`, `boosts`, `streams`, `appeals`, `server_setup`, `daily`, `lawyer` (законы РО), `context_menus`.
 
 ## Ошибки бота → разработчику → Claude
 - `cogs/errorwatch.py`: `ErrorCollector` (logging ERROR+) → таблица `bot_errors` (подпись «тип+код Discord+место в нашем коде», повторы — `count`), шум сети отсеивается (`NOISE`), секреты/ID вычищаются (`clean`). Раз в 10 мин новые → ЛС разработчику (`dev:user`, по умолчанию владелец домашнего сервера) + файл `errors.txt`; если задан токен (`/разработчик github`, `dev:gh_token`/`dev:gh_repo`) — issue с меткой `bot-error`.
@@ -131,12 +131,12 @@
   - ИИ: `ask(..., json_mode=True, images=[(mime, bytes)])` — строгий JSON и картинки (только Gemini); `AI.embed()` —
     векторы 256; `kb.context_smart()` — гибрид смысл+слова (таблица `kb_vec`), юрист работает через него.
   - Хостинг: `host:*` (глобальные), кнопки `host:ok|cfg`, тумблер `service:hosting`; память — `maintenance.mem_usage()`.
-  - Новые коги: `export` (/выгрузка CSV), `birthdays` (/др), `levels` (уровни, достижения, /магазин; `core/levels.py`).
-  - Новые модули/действия в `MODULES`: `events` (discord, results), `levels`, `moderation:automod|conflicts|raid|nuke`,
-    `hr:ai_mentor`, `assistant:voicemsg`, `persona:birthdays`, `reports:newspaper`. Числа: `app_ping_hours`, `auto_idle_days`.
+  - Новые коги: `export` (/выгрузка CSV). (`birthdays`, `levels`/магазин/достижения и `promo`/визитка — удалены в 2026.11.18.12 по решению владельца, не возвращать.)
+  - Новые модули/действия в `MODULES`: `events` (discord, results), `moderation:automod|conflicts|raid|nuke`,
+    `hr:ai_mentor`, `assistant:voicemsg`, `reports:newspaper`. Числа: `app_ping_hours`, `auto_idle_days`.
   - Речь: `paid_claim`, `undo`, `vacation(_end)`, `room`, `mentor_assign`, `relation_set`, `protocol`, `people.at_risk`.
     Кнопки выбора человека — `WhoView` (`Assistant.ambiguous/name_scores`); откат — `Assistant.undo_push` (10 мин, в памяти).
-  - Необязательные библиотеки (`core/names.py`, jarvis, promo): rapidfuzz, pymorphy3, webrtcvad-wheels, qrcode —
+  - Необязательные библиотеки (`core/names.py`, jarvis): rapidfuzz, pymorphy3, webrtcvad-wheels —
     импорт в try/except, без них всё работает.
   - Общие функции для речи и команд: `Staff.start_vacation`, `VoiceRooms.room_speech`, `Mentorship.set_mentor`,
     `Diplomacy.set_relation`, `Treasury.claim`, `Gatherings.results`, `Automation.relay_process`.
