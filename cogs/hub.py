@@ -285,6 +285,7 @@ ACTIONS = {
     "promote_nb": ("🎓", "Новичков — в члены", "перевести-новичков", {}),
     "who": ("👥", "Кто… (списки)", "кто", {}),
     "export": ("📤", "Выгрузить в Excel", "выгрузка", {}),
+    "bday": ("🎂", "Мой день рождения", "др", {}),
 }
 SETUP_ROLES = ["leader", "deputy"]
 # раздел: ключ → (эмодзи, название, кому виден (None — всем в семье), [действия])
@@ -311,7 +312,7 @@ LEAD_SECTIONS = {
     "setup": ("⚙️", "Настройка", SETUP_ROLES, ["wizard", "modules", "ai", "perms"]),
 }
 MEMBER_SECTIONS = {
-    "me": ("👤", "Моё", config.FAMILY_PLUS, ["profile", "paid", "missed", "search", "dossier", "my_warns", "forget"]),
+    "me": ("👤", "Моё", config.FAMILY_PLUS, ["profile", "paid", "bday", "missed", "search", "dossier", "my_warns", "forget"]),
     "vac": ("🌴", "Отпуск", config.FAMILY_PLUS, ["vac", "back"]),
     "room": ("🔊", "Моя комната", config.FAMILY_PLUS, ["r_open", "r_close", "r_name", "r_limit", "r_kick", "r_give"]),
     "market": ("🛒", "Рынок", config.FAMILY_PLUS, ["mk_search", "mk_mine", "mk_sell", "mk_price"]),

@@ -37,13 +37,13 @@ TREASURY_ACTS = {"treasury_in", "treasury_out", "treasury_due", "treasury_balanc
                  "fine_add", "fine_list", "fine_paid"}
 SAFE = {"move", "disconnect", "say", "ask_voice", "music_play", "music_skip", "music_stop", "music_volume", "listen",
         "listen_stop", "leave", "music_pause", "music_resume", "voice_mute", "voice_unmute", "remind", "invite",
-        "forget", "paid_claim"} | ASK  # paid_claim только создаёт заявку казначею — проводит человек
+        "forget", "paid_claim", "undo", "vacation", "vacation_end", "room"} | ASK  # paid_claim только создаёт заявку казначею — проводит человек
 LEADS = ["leader", "deputy"]
 GARAGE_BY = config.LEAD + ["senior", "treasurer"]  # ведут автопарк (cogs/garage.py)
 CHANNEL_ONLY = {"purge", "slowmode", "poll"}  # работают с текущим каналом — в ЛС их не выполняем
 # болтать со Швейцаром может вся семья и друзья; им доступны только безобидные вещи
 EVERYONE = config.FAMILY_PLUS
-FOR_ALL = {"paid_claim", "car_list", "web_search", "missed", "law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
+FOR_ALL = {"paid_claim", "vacation", "vacation_end", "room", "car_list", "web_search", "missed", "law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
            "music_pause", "music_resume", "music_volume", "listen", "listen_stop", "leave", "invite", "forget"}
 INVITE_GAP = 10 * 60  # один человек зовёт кого-то в войс через бота не чаще раза в 10 минут
 # живые отговорки вместо казённых фраз
@@ -74,7 +74,9 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "peopl
          "promote_newbies": config.HR,  # как accept: кадры и руководство
          **{t: config.TREASURY for t in TREASURY_ACTS}, "dues_set": LEADS, "salary_rate_set": LEADS,
          "fine_add": config.TREASURY + ["hr_head"], "fine_list": config.TREASURY + ["hr_head"],
-         "paid_claim": config.FAMILY_RANKS}
+         "paid_claim": config.FAMILY_RANKS, "undo": USERS, "vacation": config.FAMILY_RANKS,
+         "vacation_end": config.FAMILY_RANKS, "room": config.FAMILY_PLUS, "mentor_assign": config.MENTORS,
+         "relation_set": config.DIPLO}
 LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив", "people": "👥 Кто в семье",
          "warns": "⚖️ Выговоры", "bl_check": "⛔ Проверка ЧС", "market": "🛒 Рынок", "queue": "🎶 Очередь",
          "roll": "🎲 Кубик", "digest": "🗞 Сводка", "music_pause": "⏸ Пауза", "music_resume": "▶️ Продолжить",
@@ -96,7 +98,9 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "dues_set": "⚙️ Настройка взноса", "salary_rates": "💸 Ставки зарплат",
          "salary_rate_set": "💸 Ставка зарплаты", "salary_ranks": "💸 Зарплата по ставкам",
          "salary_role": "💸 Выплата роли", "salary_pay": "💸 Выплата", "fine_add": "🧾 Штраф",
-         "fine_list": "🧾 Неоплаченные штрафы", "fine_paid": "✅ Оплата штрафа", "paid_claim": "🧾 Заявка в казну"}
+         "fine_list": "🧾 Неоплаченные штрафы", "fine_paid": "✅ Оплата штрафа", "paid_claim": "🧾 Заявка в казну", "undo": "↩️ Отменить последнее",
+         "vacation": "🌴 Отпуск", "vacation_end": "👋 Из отпуска", "room": "🔊 Моя комната",
+         "mentor_assign": "🧑‍🏫 Наставник", "relation_set": "🤝 Отношения с семьёй"}
 
 # как каналы называют в разговоре (ключ канала из настроек → слова)
 CHANNEL_HINTS = {
@@ -169,6 +173,9 @@ ACT_ALL = """ДЕЙСТВИЯ, доступные всем (поле "type"):
 - invite: {"user":id,"names":["как назвали"],"text":"что передать, одной фразой"} — позвать человека в войс к автору
   («позови Дашу»): ты тегнешь его в общем чате
 - forget — стереть своё досье на автора («забудь про меня»)
+- vacation: {"days":1..60,"reason":"..."} — АВТОР уходит в отпуск («я в отпуск на неделю»); vacation_end — вернулся
+- room: {"op":"lock"|"unlock"|"limit"|"name","value":число или название} — своя личная комната автора
+  («закрой мою комнату», «лимит 3», «назови комнату Кухня 2»)
 - paid_claim: {"what":"due"|"fine","amount":"100к" или null} — АВТОР САМ говорит, что сдал взнос / оплатил штраф
   («я сдал взнос», «скинул в казну 100к», «оплатил штраф»; часто со скрином). Бот отправит заявку казначею
 Для справок (law, market, top, profile, queue, roll) "reply" оставь пустым — ответ придёт из базы.
@@ -196,6 +203,8 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
   Бот сам отберёт: отбыл срок, не в неактиве, сдал экзамен. Назвали срок («кто 7 дней или более в семье», «кто
   неделю с нами» → 7) — число дней в "min_days"; не назвали — null (срок семьи). «даже неактивных» →
   "only_active":false. Это НЕ inactive
+- mentor_assign: {{"user":id новичка,"names":["как назвал"],"mentor":id наставника или null — подобрать}}
+- relation_set: {{"family":"название семьи","status":"ally"|"pact"|"neutral"|"tension"|"war","note":"..."}}
 - accept: {{"user":id,"names":["как назвал"],"nick":"ник в игре или null","static":"Static ID или null"}} — принять
   человека в семью ВРУЧНУЮ, без экзамена («прими Петю в семью», «возьми Васю без экзамена»)
 - expel: {{"user":id,"reason":"..."}}; kick / ban: {{"user":id,"reason":"..."}}; nick: {{"user":id,"nick":"..."}}
@@ -213,6 +222,8 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
   «кто на грани неактива», «кто скоро отвалится», «кто сдулся» → at_risk:true
   Роли: {", ".join(config.ROSTER_ORDER)}. «кто в войсе и 5+ дней неактив» → in_voice:true + inactive_days:5.
   "reply" оставь пустым — список придёт из базы. Это только справка: переводить новичков — promote_newbies
+- undo — «отмени последнее», «верни как было», «я ошибся» — откатить последнее действие автора через тебя
+  (выговор, мут, ранг, должность, снятие выговоров, ник) за последние 10 минут
 - inactive: {{"days":1..90}} — старый отчёт «кто не появлялся» (вместо него — people); digest — сводка по семье
 - АВТОПАРК: car_list {{"user":id или null}} — чьи машины; car_add {{"model":"Elegy","plate":"А123ВС" или null,
   "user":id у кого или null (общая),"note":"..."}}; car_give {{"plate" или "model","user":id или null (в общий гараж)}};
@@ -246,6 +257,31 @@ ACT_TREASURY += """Сумму пиши как сказал автор («50к»,
 """
 SYSTEM = CORE + ACT_ALL + ACT_MGMT + TAIL        # для тех, у кого есть права
 SYSTEM_LITE = CORE + ACT_ALL + TAIL              # для рядовых: вдвое короче
+
+
+class WhoView(discord.ui.View):
+    """«Дима — это кто?» Кнопка на каждого подходящего; выбор подставляется в действие, и помощник продолжает."""
+
+    def __init__(self, cog, ctx, request, send, plan, reply, action, cands):
+        super().__init__(timeout=180)
+        self.cog, self.ctx, self.request, self.send, self.plan, self.reply, self.action = \
+            cog, ctx, request, send, plan, reply, action
+        for m in cands:
+            b = discord.ui.Button(label=m.display_name[:80], style=discord.ButtonStyle.secondary)
+            b.callback = self.make(m)
+            self.add_item(b)
+
+    def make(self, m):
+        async def pick(inter: discord.Interaction):
+            if inter.user.id != self.ctx.author.id:
+                return await inter.response.send_message("Выбирает тот, кто просил.", ephemeral=True)
+            self.stop()
+            await inter.response.edit_message(content=f"👌 {m.display_name}.", view=None)
+            self.action.pop("names", None)
+            self.action["users"] = [m.id]
+            self.action["user"] = m.id
+            await self.cog.proceed(self.ctx, self.request, self.send, self.plan, self.reply)
+        return pick
 
 
 class Confirm(discord.ui.View):
@@ -288,6 +324,7 @@ class Assistant(commands.Cog):
         self.recent = {}    # канал → последние сообщения (для вопросов «о чём они?»)
         self.talk = {}      # (канал, человек) → {"t": время, "turns": [(просьба, ответ)], "ask": ждём ли ответ}
         self.mine = {}      # id моего ответа → кому он был (чтобы понимать ответы-reply без «Швейцар»)
+        self.undo = {}      # (guild_id, user_id) → [(когда, что, как откатить)] — «отмени последнее»
         self.invited = {}   # кто когда звал людей в войс через бота
 
     # ---------- память разговора ----------
@@ -425,31 +462,57 @@ class Assistant(commands.Cog):
                     best, score = c, s
         return best if score >= 0.6 else None
 
+    def ambiguous(self, g, a):
+        """[(как назвали, [кандидаты])] — имена, под которые одинаково хорошо подходят несколько человек."""
+        if self.ids(a.get("users") or ([a["user"]] if a.get("user") else [])) or not a.get("names"):
+            return []
+        pool = list({m.id: m for m in [m for c in g.voice_channels for m in c.members if not m.bot]
+                     + self.bot.family_members(g)}.values())
+        out = []
+        for raw in a.get("names") if isinstance(a.get("names"), list) else [a.get("names")]:
+            scores = self.name_scores(g, raw, pool)
+            if not scores:
+                continue
+            best = max(scores.values())
+            close = [m for m in pool if scores.get(m.id, 0) >= max(0.8, best - 0.03)]
+            exact = [m for m in pool if scores.get(m.id, 0) >= 0.999]
+            if len(close) > 1 and len(exact) != 1:
+                out.append((str(raw), close[:5]))
+        return out
+
+    def name_scores(self, g, raw, pool):
+        """{id: насколько человек подходит под имя (0..1)}."""
+        if len(lat(raw)) < 3:
+            return {}
+        qs = {lat(f) for w in norm(raw).split() for f in forms(w)} | {lat(raw)}
+        qs = {q for q in qs if len(q) >= 3}
+        out = {}
+        for m in pool:
+            labels = [m.display_name.split("[")[0], m.name] + (self.bot.db.gget(g, f"alias:{m.id}") or "").split(",")
+            best = 0.0
+            for lab in labels:
+                for part in [lat(lab)] + lat(lab).split():
+                    if part:
+                        best = max(best, max(1.0 if part == q else similarity(q, part) for q in qs))
+            out[m.id] = best
+        return out
+
     def find_members(self, g, a):
         """Люди по id от ИИ; кого ИИ не нашёл — ищем сами по прозвищам и именам."""
         ids = self.ids(a.get("users") or ([a["user"]] if a.get("user") else []))
         found = [m for m in (g.get_member(i) for i in ids) if m]
         if found or not a.get("names"):
             return found
-        pool = [m for c in g.voice_channels for m in c.members if not m.bot] + self.bot.family_members(g)
+        pool = list({m.id: m for m in [m for c in g.voice_channels for m in c.members if not m.bot]
+                     + self.bot.family_members(g)}.values())  # в войсе автора — первыми при равенстве
         out = []
         for raw in a.get("names") if isinstance(a.get("names"), list) else [a.get("names")]:
-            if len(lat(raw)) < 3:
+            scores = self.name_scores(g, raw, pool)  # с падежами: «Пете» → «Петя»
+            if not scores:
                 continue
-            # «Пете», «Димону» → ещё и начальные формы «петя», «димон» (pymorphy3 или окончания падежей)
-            qs = {lat(f) for w in norm(raw).split() for f in forms(w)} | {lat(raw)}
-            qs = {q for q in qs if len(q) >= 3}
-            best, score = None, 0.0
-            for m in pool:
-                labels = [m.display_name.split("[")[0], m.name] + (self.bot.db.gget(g, f"alias:{m.id}") or "").split(",")
-                for lab in labels:
-                    for part in [lat(lab)] + lat(lab).split():
-                        if not part:
-                            continue
-                        s = max(1.0 if part == q else similarity(q, part) for q in qs)
-                        if s > score:
-                            best, score = m, s
-            if best and score >= 0.8 and best not in out:
+            mid = max(scores, key=scores.get)
+            best = g.get_member(mid)
+            if best and scores[mid] >= 0.8 and best not in out:
                 out.append(best)
         return out
 
@@ -660,6 +723,17 @@ class Assistant(commands.Cog):
                     a.pop("names", None)
                     a.pop("users", None)
                     a["user"] = ctx.author.id
+        if not getattr(ctx, "voice", False):
+            amb = next(((a, raw, cands) for a in plan for raw, cands in self.ambiguous(ctx.guild, a)), None)
+            if amb:  # «Дима» — а Дим двое: спросить кнопками, потом продолжить с выбранным
+                a, raw, cands = amb
+                view = WhoView(self, ctx, request, send, plan, reply, a, cands)
+                await send(content=f"🤔 «{raw}» — это кто из них?", view=view)
+                return "Уточни кнопкой, кого ты имел в виду"
+        return await self.proceed(ctx, request, send, plan, reply)
+
+    async def proceed(self, ctx, request, send, plan, reply):
+        """Выполнить план (безопасное — сразу, серьёзное — через «Выполнить»)."""
         if all(a["type"] in SAFE for a in plan):
             extra = []
             res = await self.run(ctx, plan, extra)
@@ -691,6 +765,29 @@ class Assistant(commands.Cog):
         view = Confirm(self, ctx.author.id, plan, ctx)
         view.sent = await send(embed=e, view=view)
         return "Подтверди кнопкой в чате"
+
+    # ---------- «отмени последнее» ----------
+    UNDO_SEC = 600
+
+    def undo_push(self, g, me, what, fn):
+        """Запомнить, как откатить только что сделанное (fn — async без аргументов). Живёт 10 минут, в памяти."""
+        st = self.undo.setdefault((g.id, me.id), [])
+        st.append((time.monotonic(), what, fn))
+        del st[:-10]
+
+    async def undo_last(self, g, me):
+        st = self.undo.get((g.id, me.id)) or []
+        while st and time.monotonic() - st[-1][0] > self.UNDO_SEC:
+            st.pop()
+        if not st:
+            return "↩️ Нечего отменять: за последние 10 минут ты через меня ничего такого не делал."
+        _, what, fn = st.pop()
+        try:
+            await fn()
+        except discord.HTTPException as e:
+            return f"⚠️ Отменить «{what}» не вышло: {str(e)[:100]}"
+        await self.bot.log(g, f"↩️ {me.mention} отменил через помощника: {what}", "hrlog", 0x607D8B)
+        return f"↩️ Отменил: {what}."
 
     def active_warns(self, g, m):
         return self.bot.db.one("SELECT COUNT(*) n FROM warns WHERE guild_id=? AND user_id=? AND active=1",
@@ -725,6 +822,15 @@ class Assistant(commands.Cog):
         if t == "people":
             from core import people
             return f"{LABEL[t]}: {people.criteria(people.filters(a))}"
+        if t == "mentor_assign":
+            try:
+                mentor = g.get_member(int(a.get("mentor") or 0))
+            except (TypeError, ValueError):
+                mentor = None
+            return f"{LABEL[t]}: {who or '?'} ← {mentor.display_name if mentor else 'свободный наставник'}"
+        if t == "relation_set":
+            emoji, name, _ = config.RELATIONS.get(a.get("status"), ("❓", "?", 0))
+            return f"{LABEL[t]}: {a.get('family') or '?'} → {emoji} {name}"
         if t == "promote_newbies":
             men = self.bot.get_cog("Mentorship")
             if not men:
@@ -1042,14 +1148,23 @@ class Assistant(commands.Cog):
                         else:
                             add = a.get("add", True) is not False
                             await (m.add_roles(role) if add else m.remove_roles(role))
+                            self.undo_push(g, me, f"{'выдача' if add else 'снятие'} должности {role.name} у {m.display_name}",
+                                           lambda m=m, role=role, add=add: m.remove_roles(role) if add else m.add_roles(role))
                             await bot.log(g, f"🎖 {m.mention} — {'назначен' if add else 'снята должность'} "
                                              f"**{role.name}** ({me.mention})", "hrlog", 0x8E24AA)
                             bot.emit(g, "post", member=m, post=a["post"], added=add, by=me)
                             out.append(f"🎖 {m.display_name}: {role.name} {'выдана' if add else 'снята'}.")
                     elif t == "unwarn":
-                        n = bot.db.one("SELECT COUNT(*) n FROM warns WHERE guild_id=? AND user_id=? AND active=1",
-                                       g.id, m.id)["n"]
+                        ids = [r["id"] for r in bot.db.all("SELECT id FROM warns WHERE guild_id=? AND user_id=? AND "
+                                                          "active=1", g.id, m.id)]
+                        n = len(ids)
                         bot.db.q("UPDATE warns SET active=0 WHERE guild_id=? AND user_id=? AND active=1", g.id, m.id)
+
+                        async def back(ids=ids):
+                            for i in ids:
+                                bot.db.q("UPDATE warns SET active=1 WHERE id=?", i)
+                        if ids:
+                            self.undo_push(g, me, f"снятие выговоров у {m.display_name}", back)
                         if n:
                             await bot.log(g, f"⚪ С {m.mention} сняты выговоры ({n}) — {me.mention}", "warns")
                         out.append(f"⚪ {m.display_name}: снято выговоров — {n}.")
@@ -1057,7 +1172,10 @@ class Assistant(commands.Cog):
                         await bot.expel(m, me, str(a.get("reason") or "Через помощника")[:300])
                         out.append(f"🚪 {m.display_name} исключён из семьи.")
                     elif t == "nick":
+                        old = m.nick
                         await m.edit(nick=str(a.get("nick") or "")[:32] or None, reason=f"Помощник: {me}")
+                        self.undo_push(g, me, f"смена ника {m.name}",
+                                       lambda m=m, old=old: m.edit(nick=old, reason="Отмена через помощника"))
                         out.append(f"✏️ {m.name}: ник изменён.")
                     else:
                         reason = f"{me}: {str(a.get('reason') or 'без причины')[:300]}"
@@ -1267,6 +1385,9 @@ class Assistant(commands.Cog):
                             continue
                         await m.timeout(dt.timedelta(minutes=mins) if t == "mute" else None,
                                         reason=f"{a.get('reason') or 'Помощник'} ({me.display_name})")
+                        if t == "mute":
+                            self.undo_push(g, me, f"мут {m.display_name}",
+                                           lambda m=m: m.timeout(None, reason="Отмена через помощника"))
                         out.append(f"🔇 {m.display_name} — мут {mins} мин." if t == "mute"
                                    else f"🔊 {m.display_name} — мут снят.")
                 elif t == "warn":
@@ -1277,6 +1398,14 @@ class Assistant(commands.Cog):
                         out.append(f"⛔ {m.display_name} — не ниже тебя по иерархии, не трогаю.")
                     else:
                         n = await bot.give_warn(g, m, me, str(a.get("reason") or "без причины")[:300])
+                        wid = (bot.db.one("SELECT id FROM warns WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 1",
+                                          g.id, m.id) or {"id": None})["id"]
+
+                        async def back(wid=wid):
+                            bot.db.q("UPDATE warns SET active=0 WHERE id=?", wid)
+                        if wid:
+                            self.undo_push(g, me, f"выговор {m.display_name}" + (" (штраф отмени в казне)"
+                                                                                 if a.get("fine") else ""), back)
                         out.append(f"⚖️ Выговор {m.display_name} ({n}/{bot.num(g, 'warn_limit')}).")
                         tr = bot.get_cog("Treasury")
                         if a.get("fine") and tr:  # выговор + штраф одной фразой
@@ -1305,11 +1434,37 @@ class Assistant(commands.Cog):
                     elif not bot.in_family(m) and not bot.has(me, ["leader", "deputy"]):
                         out.append(f"⛔ {m.display_name} не в семье — принимают через заявку или «прими в семью».")
                     else:
+                        was = next((k for k in config.BASE_RANKS if (r := bot.role(g, k)) and r in m.roles), None)
                         await bot.set_rank(m, key, me, reason="Через помощника")
+                        if was and was != key:
+                            self.undo_push(g, me, f"ранг {m.display_name} → {config.BASE_RANKS[key]}",
+                                           lambda m=m, was=was: bot.set_rank(m, was, me, reason="Отмена через помощника"))
                         out.append(f"🔁 {m.display_name} → {config.BASE_RANKS[key]}")
                 elif t in ("leave", "listen", "listen_stop") and not bot.has(me, USERS) and \
                         (li := getattr(bot.get_cog("Jarvis"), "listeners", {}).get(g.id)) and li.owner != me.id:
                     out.append(f"⛔ Я сейчас занят — меня позвал {self.name(g, li.owner)}.")
+                elif t in ("vacation", "vacation_end"):
+                    st = bot.get_cog("Staff")
+                    out.append((await st.start_vacation(g, me, a.get("days"), a.get("reason")) if t == "vacation"
+                                else await st.end_vacation(g, me)) if st else "❌ Модуль кадров не загружен.")
+                elif t == "room":
+                    vr = bot.get_cog("VoiceRooms")
+                    out.append(await vr.room_speech(me, str(a.get("op") or ""), a.get("value")) if vr
+                               else "❌ Комнаты не загружены.")
+                elif t == "mentor_assign":
+                    men, newbie = bot.get_cog("Mentorship"), self.one(g, a)
+                    try:
+                        mentor = g.get_member(int(a.get("mentor") or 0))
+                    except (TypeError, ValueError):
+                        mentor = None
+                    out.append(await men.set_mentor(g, newbie, mentor, me) if men and newbie
+                               else "❌ Не понял, какому новичку.")
+                elif t == "relation_set":
+                    dip = bot.get_cog("Diplomacy")
+                    out.append(await dip.set_relation(g, a.get("family"), str(a.get("status") or ""), a.get("note"), me)
+                               if dip else "❌ Дипломатия не загружена.")
+                elif t == "undo":
+                    out.append(await self.undo_last(g, me))
                 elif t == "paid_claim":
                     tr = bot.get_cog("Treasury")
                     shot = next((x for x in getattr(message, "attachments", []) or []

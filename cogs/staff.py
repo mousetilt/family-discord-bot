@@ -312,29 +312,38 @@ class Staff(commands.Cog):
     @app_commands.command(name="отпуск", description="Уйти в отпуск (не будешь считаться неактивным)")
     @app_commands.rename(days="дней", reason="причина")
     async def vacation(self, inter: discord.Interaction, days: app_commands.Range[int, 1, 60], reason: str):
-        if not self.bot.in_family(inter.user):
-            return await inter.response.send_message("Только для членов семьи.", ephemeral=True)
+        await inter.response.send_message(await self.start_vacation(inter.guild, inter.user, days, reason), ephemeral=True)
+
+    async def start_vacation(self, guild, member, days, reason):
+        """Отпуск (команда, кнопка и речь «ухожу в отпуск на неделю»). → текст ответа."""
+        if not self.bot.in_family(member):
+            return "Только для членов семьи."
+        days = max(1, min(60, int(days or 7)))
+        reason = str(reason or "без причины")[:200]
         until = now() + dt.timedelta(days=days)
         self.bot.db.q("INSERT OR REPLACE INTO vacations(guild_id, user_id, until, reason) VALUES(?,?,?,?)",
-                      inter.guild.id, inter.user.id, until.isoformat(), reason)
-        await inter.response.send_message(f"🌙 Отпуск до {discord.utils.format_dt(until, 'D')}. Отдыхай!", ephemeral=True)
-        r = self.bot.role(inter.guild, "vacation")
+                      guild.id, member.id, until.isoformat(), reason)
+        r = self.bot.role(guild, "vacation")
         if r:
             try:
-                await inter.user.add_roles(r)
+                await member.add_roles(r)
             except discord.HTTPException:
                 pass
-        await self.bot.log(inter.guild, f"🌙 {inter.user.mention} в отпуске до {discord.utils.format_dt(until, 'D')}: "
-                                        f"{reason}", "hrlog")
+        await self.bot.log(guild, f"🌙 {member.mention} в отпуске до {discord.utils.format_dt(until, 'D')}: {reason}",
+                           "hrlog")
+        return f"🌙 Отпуск до {discord.utils.format_dt(until, 'D')}. Отдыхай!"
+
+    async def end_vacation(self, guild, member):
+        self.bot.db.q("DELETE FROM vacations WHERE guild_id=? AND user_id=?", guild.id, member.id)
+        r = self.bot.role(guild, "vacation")
+        if r and r in member.roles:
+            await member.remove_roles(r)
+        return "👋 С возвращением!"
 
     @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="вернулся", description="Вернуться из отпуска")
     async def back(self, inter: discord.Interaction):
-        self.bot.db.q("DELETE FROM vacations WHERE guild_id=? AND user_id=?", inter.guild.id, inter.user.id)
-        r = self.bot.role(inter.guild, "vacation")
-        if r and r in inter.user.roles:
-            await inter.user.remove_roles(r)
-        await inter.response.send_message("👋 С возвращением!", ephemeral=True)
+        await inter.response.send_message(await self.end_vacation(inter.guild, inter.user), ephemeral=True)
 
     @tasks.loop(hours=1)
     @guarded

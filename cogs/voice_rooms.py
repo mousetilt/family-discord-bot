@@ -69,6 +69,49 @@ class VoiceRooms(commands.Cog):
         if before.channel:
             await self.maybe_delete(before.channel)  # и когда последним вышел бот (музыка) — тоже удаляем
 
+    async def room_speech(self, member, op, value=None):
+        """Речь: «закрой мою комнату», «лимит 3», «назови комнату Кухня 2». → текст ответа."""
+        from core import config
+        vc = member.voice.channel if member.voice else None
+        row = self.bot.db.one("SELECT owner_id FROM temp_voice WHERE channel_id=?", vc.id) if vc else None
+        if not row:
+            return "❌ Зайди в свою личную комнату — тогда сделаю."
+        if row["owner_id"] != member.id and not self.bot.has(member, config.LEAD):
+            return "⛔ Это не твоя комната."
+        if op == "limit":
+            try:
+                n = max(0, min(99, int(value or 0)))
+            except (TypeError, ValueError):
+                return "❌ Сколько мест? Число от 0 до 99."
+            await vc.edit(user_limit=n)
+            return f"✅ Лимит: {n or 'нет'}"
+        if op == "name":
+            name = str(value or "").strip()[:90]
+            if not name:
+                return "❌ Как назвать?"
+            try:
+                await asyncio.wait_for(vc.edit(name=f"🔊 {name}"), timeout=6)
+            except asyncio.TimeoutError:
+                return "⏳ Discord разрешает менять имя комнаты 2 раза за 10 минут — попробуй позже."
+            return "✅ Переименовал."
+        if op == "lock":
+            ow = dict(vc.overwrites)
+            for target, perm in ow.items():
+                if isinstance(target, discord.Role):
+                    perm.connect = False
+            for m in vc.members:
+                ow.setdefault(m, discord.PermissionOverwrite()).connect = True
+            await vc.edit(overwrites=ow)
+            return "🔒 Комната закрыта."
+        if op == "unlock":
+            ow = dict(vc.category.overwrites)
+            owner = vc.guild.get_member(row["owner_id"])
+            if owner:
+                ow[owner] = discord.PermissionOverwrite(**OWNER_PERMS)
+            await vc.edit(overwrites=ow)
+            return "🔓 Комната открыта."
+        return "❌ Что сделать с комнатой: закрыть, открыть, лимит или имя?"
+
     async def my_room(self, inter):
         vc = inter.user.voice.channel if inter.user.voice else None
         if not vc:

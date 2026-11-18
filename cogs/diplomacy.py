@@ -192,19 +192,25 @@ class Diplomacy(commands.Cog):
     @app_commands.choices(status=STATUS_CHOICES)
     @staff_only(config.DIPLO)
     async def rel_set(self, inter: discord.Interaction, family: str, status: app_commands.Choice[str], note: str = None):
-        db = self.bot.db
-        gid = inter.guild.id
+        await inter.response.send_message(await self.set_relation(inter.guild, family, status.value, note, inter.user),
+                                          ephemeral=True)
+
+    async def set_relation(self, guild, family, status, note, by):
+        """Отношения с семьёй (команда и речь «у нас война с Петровыми»). → текст ответа."""
+        family = " ".join(str(family or "").split())[:60]
+        if not family or status not in config.RELATIONS:
+            return "❌ С какой семьёй и какие отношения: союз, пакт, нейтралитет, напряжённость, война?"
+        db, gid = self.bot.db, guild.id
         old = db.one("SELECT status FROM relations WHERE guild_id=? AND lower(family)=lower(?)", gid, family)
         db.q("DELETE FROM relations WHERE guild_id=? AND lower(family)=lower(?)", gid, family)
         db.q("INSERT INTO relations(guild_id, family, status, note, updated_by, updated_at) VALUES(?,?,?,?,?,?)",
-             gid, family, status.value, note, inter.user.id, now_iso())
-        await self.update_board(inter.guild)
-        emoji, name, color = config.RELATIONS[status.value]
-        await self.bot.log(inter.guild, f"{emoji} Отношения с **{family}**: {name} ({inter.user.mention})"
-                                        f"{' — ' + note if note else ''}", "diplo_archive", color)
-        self.bot.emit(inter.guild, "relation", family=family, status=status.value,
-                      previous=old["status"] if old else None, by=inter.user)
-        await inter.response.send_message(f"✅ {emoji} {family}: {name}", ephemeral=True)
+             gid, family, status, note, by.id, now_iso())
+        await self.update_board(guild)
+        emoji, name, color = config.RELATIONS[status]
+        await self.bot.log(guild, f"{emoji} Отношения с **{family}**: {name} ({by.mention})"
+                                  f"{' — ' + note if note else ''}", "diplo_archive", color)
+        self.bot.emit(guild, "relation", family=family, status=status, previous=old["status"] if old else None, by=by)
+        return f"✅ {emoji} {family}: {name}"
 
     @rel.command(name="удалить", description="Убрать семью с доски отношений")
     @app_commands.autocomplete(family=family_auto)

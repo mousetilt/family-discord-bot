@@ -4,6 +4,7 @@
   (mentor_id=0, без ветки) — тогда напоминания и решение идут в кадровый журнал.
 • /настройки → Кадры: «auto» — по окончании срока бот сам переводит в Члены семьи, если экзамен сдан (или выключен)
   и за срок не было выговоров; иначе спрашивает. «remind» — напоминания на середине срока и за сутки до конца."""
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -325,6 +326,52 @@ class Mentorship(commands.Cog):
             await safe_dm(new, f"🎓 Тебе передан новичок **{newbie.display_name}** ({why}).")
             await bot.log(guild, f"🔁 Наставник {newbie.mention}: <@{mentor_id}> → {new.mention} ({why})", "hrlog",
                           0x26A69A)
+
+    # ---------- ИИ-наставник: наставник не ответил за 10 минут — отвечает бот по базе знаний ----------
+    AI_WAIT = 600
+    QUESTION = ("?", "как ", "что ", "где ", "когда ", "можно", "нужно", "зачем", "почему", "кто ", "сколько")
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        ch = message.channel
+        if message.author.bot or not isinstance(ch, discord.Thread) or not message.guild \
+                or not self.bot.is_family(message.guild) or not self.bot.feature(message.guild, "hr:ai_mentor"):
+            return
+        text = (message.content or "").strip()
+        if len(text) < 8 or not any(q in text.lower() for q in self.QUESTION):
+            return
+        row = self.bot.db.one("SELECT * FROM mentorships WHERE guild_id=? AND thread_id=? AND status='active'",
+                              message.guild.id, ch.id)
+        if not row or row["newbie_id"] != message.author.id:
+            return
+        asyncio.create_task(self.ai_answer_later(message, row))
+
+    async def ai_answer_later(self, message, row):
+        await asyncio.sleep(self.AI_WAIT)
+        ch = message.channel
+        try:
+            async for m in ch.history(after=message, limit=20):
+                if not m.author.bot and m.author.id != row["newbie_id"]:
+                    return  # наставник (или руководство) уже ответил
+        except discord.HTTPException:
+            return
+        law = self.bot.get_cog("Lawyer")
+        if not law or not self.bot.ai_for(message.guild).on:
+            return
+        try:
+            text, _, used_ai = await law.answer(message.guild.id, message.content[:500])
+        except Exception as e:  # noqa: BLE001 — лимит ИИ и т.п.: молчим, наставник ответит сам
+            log.info("ИИ-наставник: %s", str(e)[:120])
+            return
+        if not used_ai or not text:
+            return
+        who = f"<@{row['mentor_id']}>" if row["mentor_id"] else "наставник"
+        try:
+            await message.reply(f"🤖 Пока {who} занят, отвечу по правилам:\n\n{text[:1700]}\n\n-# Это ответ бота по базе "
+                                "знаний. Если что-то не так — наставник поправит.",
+                                allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            pass
 
     @commands.Cog.listener()
     async def on_member_update(self, before, after):
@@ -665,6 +712,30 @@ class Mentorship(commands.Cog):
                 await i.followup.send(report[:1990])
 
         await inter.response.send_message(text, view=Go(timeout=300), ephemeral=True)
+
+    async def set_mentor(self, guild, newbie, mentor, by):
+        """Речь «назначь Пете наставником Дашу» (mentor=None — подобрать свободного). → текст ответа."""
+        db = self.bot.db
+        if mentor is not None and (mentor.bot or not self.bot.has(mentor, config.MENTORS)):
+            return f"❌ {mentor.display_name} — не наставник (нужна роль 🎓 Наставник)."
+        row = db.one("SELECT * FROM mentorships WHERE guild_id=? AND newbie_id=? AND status='active'", guild.id, newbie.id)
+        if not row or not row["thread_id"]:
+            r = await self.assign(guild, newbie, mentor, by=by, keep=row)
+            return (f"✅ {newbie.display_name}: наставник назначен." if r and r["thread_id"]
+                    else "❌ Свободного наставника нет (нужна роль 🎓 Наставник).")
+        if not mentor:
+            return f"У {newbie.display_name} уже есть наставник — скажи, кого назначить вместо."
+        db.q("UPDATE mentorships SET mentor_id=? WHERE id=?", mentor.id, row["id"])
+        th = await self.get_thread(guild, row["thread_id"])
+        if th:
+            try:
+                await th.add_user(mentor)
+                await th.send(f"🔁 Новый наставник: {mentor.mention} (назначил {by.mention})")
+            except discord.HTTPException:
+                pass
+        await safe_dm(mentor, f"🎓 Тебе передан новичок **{newbie.display_name}**.")
+        await self.bot.log(guild, f"🔁 Наставник {newbie.mention} → {mentor.mention} ({by.mention})", "hrlog", 0x26A69A)
+        return f"✅ {newbie.display_name}: новый наставник — {mentor.display_name}."
 
     async def close_card(self, guild, mid):
         row = self.bot.db.one("SELECT * FROM mentorships WHERE id=?", mid)
