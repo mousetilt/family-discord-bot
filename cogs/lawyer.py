@@ -262,7 +262,7 @@ class Lawyer(commands.Cog):
             system += "\n\nК вопросу приложены скриншоты — опирайся и на них (кто, против кого, суть, даты)."
         long = mode in ("doc", "defense")
         # Claude пишет документ целиком (дороже, но это и есть его работа); бесплатным — прежний объём
-        tokens = (3500 if ai.is_claude else 1600) if long else 900
+        tokens = (3500 if getattr(ai, "is_claude", False) else 1600) if long else 900
         reply = await ai.ask(system, question, max_tokens=tokens, smart=True, cache=True, images=images)
         text, missing = verify(reply or "ИИ не дал ответа, попробуй переформулировать.", bot.kb.docs(gid))
         if missing:  # самопроверка: ссылок, которых нет в базе, ИИ мог выдумать
