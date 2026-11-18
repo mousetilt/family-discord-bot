@@ -98,7 +98,9 @@ def find_category(bot, guild, cat):
 
 # Каналы, добавленные после первой сборки сервера: при старте бот создаёт их сам (один раз, без «Собрать сервер»).
 # Значение — модуль, без которого канал не нужен. Удалили канал руками — второй раз не создаём (флаг auto:<key>).
-AUTO_CHANNELS = {"panel": None, "treasury_log": "treasury", "garage": "garage", "audit": "journal", "voice_log": "journal"}
+AUTO_CHANNELS = {"panel": None, "treasury_log": "treasury", "garage": "garage", "audit": "journal", "voice_log": "journal",
+                 "forumwatch": "forum"}
+OPTIONAL_CHANNELS = {"forumwatch": "forum"}  # при сборке сервера — только если модуль включён
 
 
 async def ensure_new_channels(bot, guild):
@@ -210,6 +212,8 @@ async def build_server(bot, guild, progress):
         if cat.get("key"):
             db.gset(guild, f"ch:{cat['key']}", category.id)
         for ctype, key, name, extra in cat["channels"]:
+            if key in OPTIONAL_CHANNELS and not bot.ch(guild, key) and not bot.feature(guild, OPTIONAL_CHANNELS[key]):
+                continue
             c_ow = build_overwrites(guild, R, extra.get("view", cat["view"]), extra.get("send", cat["send"]),
                                    kind=ctype, connect=extra.get("connect"), speak=extra.get("speak"))
             if key in config.FRIEND_HIDDEN_VOICES and R.get("friend"):

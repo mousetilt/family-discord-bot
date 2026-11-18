@@ -374,6 +374,10 @@ def _headers(url):
     }
 
 
+class LoginRequired(ValueError):
+    """Форум отдал страницу входа: раздел только для зарегистрированных (повторы не помогут)."""
+
+
 def _is_login_wall(html):
     """403 от XenForo со страницей входа — это не анти-флуд, повторять бессмысленно."""
     head = html[:5000]
@@ -397,8 +401,8 @@ async def _get(session, url):
             if status not in RETRY_CODES:
                 raise ValueError(f"Сайт ответил кодом {status}")
             if status == 403 and _is_login_wall(await r.text(errors="replace")):
-                raise ValueError("Тема закрыта для гостей (форум просит войти) — скачай текст вручную "
-                                 "и загрузи файлом: /база файл")
+                raise LoginRequired("Тема закрыта для гостей (форум просит войти) — подключи аккаунт форума "
+                                    "(/форум аккаунт) или загрузи текст файлом: /база файл")
             retry_after = r.headers.get("Retry-After", "")
         if retry_after.isdigit() and attempt < len(RETRY_DELAYS):
             await asyncio.sleep(min(int(retry_after), 30))

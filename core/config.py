@@ -170,6 +170,7 @@ STRUCTURE = [
         ("text", "guides", "📚・гайды", {"send": LEAD + ["mentor", "hr_head"]}),
         ("text", "mentoring", "🧑‍🏫・наставничество", {"send": MENTORS, "topic": "Личные ветки наставник ↔ новичок создаёт бот"}),
         ("text", "lawyer", "⚖️・юрист", {"topic": "Пиши вопрос — ИИ-юрист ответит по законам сервера и правилам проекта"}),
+        ("text", "forumwatch", "⚖・суды-и-жалобы", {"send": LEAD, "topic": "Жалобы, иски и обращения против семьи на форуме — бот следит сам (/форум)"}),
         ("text", "newbie_q", "❔・вопросы-новичков", {}),
         ("voice", "training", "🎓 Обучение", {}),
     ]},
@@ -348,4 +349,5 @@ EXTENSIONS = [
     "cogs.maintenance", "cogs.families", "cogs.control", "cogs.hub",
     "cogs.treasury", "cogs.recruit", "cogs.nickcheck",
     "cogs.automation", "cogs.garage", "cogs.errorwatch", "cogs.journal", "cogs.export",
+    "cogs.forumwatch",
 ]

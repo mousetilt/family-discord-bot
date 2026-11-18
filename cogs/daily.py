@@ -48,6 +48,11 @@ def make_backup(path, only_gid=None, home_gid=None):
                     dst.commit()
                 except sqlite3.Error:
                     pass
+            try:  # пароль аккаунта форума не уходит ни в одну копию
+                dst.execute("DELETE FROM guild_settings WHERE key='forum:pass'")
+                dst.commit()
+            except sqlite3.Error:
+                pass
             if only_gid:
                 strip_foreign(dst, only_gid)
             elif home_gid:  # полная копия — но без ИИ-ключей других семей (они их вводили не для нас)
