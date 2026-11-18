@@ -6,6 +6,7 @@
   • Anthropic (Claude) — платно, по желанию (ANTHROPIC_API_KEY)
 Без ключа ИИ выключен, а всё остальное в боте работает."""
 import asyncio
+import base64
 import datetime as dt
 import json
 import logging
@@ -51,6 +52,7 @@ class AI:
         self._claude = None  # клиент Anthropic (имя не совпадает с методом _anthropic)
         self.cool = {}    # (провайдер, модель) -> до какого момента не трогаем: лимит исчерпан
         self.dead = set() # (провайдер, модель), которых у провайдера больше нет
+        self._no_json = set()  # модели Groq без JSON-режима — им шлём обычный запрос
         self._no_search = set()  # модели Gemini без поиска Google (для grounded)
         # второй бесплатный ИИ как подстраховка: кончился лимит у одного — отвечает другой
         self.backup = ("gemini" if self.provider == "groq" and self.keys.get("gemini") else
@@ -121,10 +123,13 @@ class AI:
                 last = type(e).__name__
         return f"ни одна модель не ответила ({last})"
 
-    async def ask(self, system, prompt, max_tokens=800, smart=False, cache=False, light=False):
-        """Запрос к ИИ, возвращает текст ответа. Заодно — здоровье для сторожа (ok_ts / fail_since / fail_reason)."""
+    async def ask(self, system, prompt, max_tokens=800, smart=False, cache=False, light=False, json_mode=False,
+                  images=None):
+        """Запрос к ИИ, возвращает текст ответа. Заодно — здоровье для сторожа (ok_ts / fail_since / fail_reason).
+        json_mode — просить у провайдера строгий JSON (Gemini responseMimeType, Groq response_format).
+        images — [(mime, bytes)]: картинки для разбора (только модели Gemini, они бесплатно видят изображения)."""
         try:
-            text = await self._ask(system, prompt, max_tokens, smart, cache, light)
+            text = await self._ask(system, prompt, max_tokens, smart, cache, light, json_mode, images)
         except AIUnavailable as e:
             if self.on:
                 self.fail_since = getattr(self, "fail_since", None) or time.time()
@@ -133,7 +138,8 @@ class AI:
         self.ok_ts, self.fail_since = time.time(), None
         return text
 
-    async def _ask(self, system, prompt, max_tokens=800, smart=False, cache=False, light=False):
+    async def _ask(self, system, prompt, max_tokens=800, smart=False, cache=False, light=False, json_mode=False,
+                   images=None):
         if not self.on:
             raise AIUnavailable("ИИ не подключён. Руководство может вставить бесплатный ключ Groq или Gemini "
                                 "командой /ии ключ" if self.own_keys else
@@ -144,6 +150,10 @@ class AI:
             chain.sort(key=lambda pm: "120b" in pm[1])
         if self.backup:
             chain += [(self.backup, m) for m in DEFAULTS[self.backup]]
+        if images:  # картинки понимает только Gemini (бесплатно); без ключа Gemini — честный отказ
+            chain = [pm for pm in chain if pm[0] == "gemini"]
+            if not chain:
+                raise AIUnavailable("Картинки разбирает только Gemini — нужен бесплатный ключ Gemini (/ии ключ)")
         last_err, limited, now = None, False, time.monotonic()
         for prov, model in chain:
             key = (prov, model)
@@ -153,7 +163,10 @@ class AI:
                 limited = True
                 continue
             try:
-                text = await getattr(self, f"_{prov}")(model, system, prompt, max_tokens)
+                opts = {"json_mode": json_mode} if prov in ("groq", "gemini") else {}
+                if images:
+                    opts["images"] = images
+                text = await getattr(self, f"_{prov}")(model, system, prompt, max_tokens, **opts)
                 return (text or "").strip()
             except _ModelMissing as e:
                 last_err = e
@@ -176,9 +189,11 @@ class AI:
             raise AIUnavailable("Лимит бесплатного ИИ исчерпан — попробуй через несколько минут или завтра")
         raise AIUnavailable(f"Ни одна модель не ответила: {str(last_err)[:150]}")
 
-    async def ask_json(self, system, prompt, max_tokens=800, smart=False, light=False):
+    async def ask_json(self, system, prompt, max_tokens=800, smart=False, light=False, images=None):
+        """Ответ-JSON. Провайдера просим о строгом JSON (меньше «не понял» из-за битых ответов), а разбор всё равно
+        терпимый (parse_json) — на случай модели без JSON-режима."""
         raw = await self.ask(system + "\nОтвечай ТОЛЬКО валидным JSON, без пояснений и без ```.", prompt,
-                             max_tokens=max_tokens, smart=smart, light=light)
+                             max_tokens=max_tokens, smart=smart, light=light, json_mode=True, images=images)
         return parse_json(raw)
 
     # ---------- провайдеры ----------
@@ -201,7 +216,7 @@ class AI:
                     raise AIUnavailable(f"ИИ ответил ошибкой {r.status}: {text[:200]}")
                 return json.loads(text)
 
-    async def _groq(self, model, system, prompt, max_tokens):
+    async def _groq(self, model, system, prompt, max_tokens, json_mode=False):
         payload = {"model": model, "temperature": 0.3,
                    "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]}
         if "gpt-oss" in model:
@@ -209,15 +224,30 @@ class AI:
             payload["max_completion_tokens"] = max_tokens + 1500
         else:
             payload["max_tokens"] = max_tokens
-        data = await self._post("https://api.groq.com/openai/v1/chat/completions", payload,
-                                {"Authorization": f"Bearer {self.keys.get('groq', '')}"})
+        if json_mode and model not in self._no_json:
+            payload["response_format"] = {"type": "json_object"}
+        headers = {"Authorization": f"Bearer {self.keys.get('groq', '')}"}
+        try:
+            data = await self._post("https://api.groq.com/openai/v1/chat/completions", payload, headers)
+        except AIUnavailable as e:
+            # JSON-режим не поддержан моделью или ответ не прошёл его проверку — повторяем обычным запросом
+            if "response_format" not in payload or not any(w in str(e).lower() for w in ("json", "response_format")):
+                raise
+            if "response_format" in str(e).lower():
+                self._no_json.add(model)
+            payload.pop("response_format")
+            data = await self._post("https://api.groq.com/openai/v1/chat/completions", payload, headers)
         text = data["choices"][0]["message"].get("content") or ""
         return re.sub(r"<think>.*?</think>", "", text, flags=re.S)  # qwen думает вслух — мысли отрезаем
 
-    async def _gemini(self, model, system, prompt, max_tokens):
+    async def _gemini(self, model, system, prompt, max_tokens, json_mode=False, images=None):
+        parts = [{"inline_data": {"mime_type": mime, "data": base64.b64encode(raw).decode("ascii")}}
+                 for mime, raw in (images or [])] + [{"text": prompt}]
         payload = {"systemInstruction": {"parts": [{"text": system}]},
-                   "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                   "contents": [{"role": "user", "parts": parts}],
                    "generationConfig": {"maxOutputTokens": max_tokens + 2048, "temperature": 0.3}}
+        if json_mode:
+            payload["generationConfig"]["responseMimeType"] = "application/json"
         data = await self._post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                                 payload, {"x-goog-api-key": self.keys.get("gemini", "")})
         cands = data.get("candidates") or []

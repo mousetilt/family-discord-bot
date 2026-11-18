@@ -656,6 +656,16 @@ class Jarvis(commands.Cog):
         wav, voiced = await asyncio.to_thread(pcm_to_wav16k, pcm)
         if voiced < MIN_VOICED:
             return None  # тишина или шум — не тратим лимит и не даём распознавателю «додумать» команду
+        return await self._whisper(guild, key, wav, "cmd.wav", "audio/wav", low)
+
+    async def transcribe_file(self, guild, data, filename="voice.ogg", ctype="audio/ogg"):
+        """Голосовое сообщение Discord (ogg/opus) → текст. Те же лимиты и тот же ключ, что у голосового Швейцара."""
+        key = self.whisper_key(guild)
+        if not key or not data:
+            return None
+        return await self._whisper(guild, key, data, filename, ctype, False)
+
+    async def _whisper(self, guild, key, payload, filename, ctype, low):
         counter = self.whisper_counter(guild)
         used = int(self.bot.db.get(counter) or 0)
         if used >= (DAILY_LIMIT * 9 // 10 if low else DAILY_LIMIT):
@@ -668,7 +678,7 @@ class Jarvis(commands.Cog):
             return None
         calls.append(mono)
         form = aiohttp.FormData()
-        form.add_field("file", wav, filename="cmd.wav", content_type="audio/wav")
+        form.add_field("file", payload, filename=filename, content_type=ctype)
         form.add_field("model", WHISPER_MODEL)
         form.add_field("language", "ru")
         form.add_field("response_format", "verbose_json")

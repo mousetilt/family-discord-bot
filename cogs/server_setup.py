@@ -576,6 +576,9 @@ class ServerSetup(commands.Cog):
                         log.info("«%s»: войсов скрыто от друзей семьи — %s", g.name, hidden)
                 if hub and self.bot.db.gget(g, "role:leader"):
                     await hub.post_panels(g, False)  # панели с новой версией сами переставятся
+                    apps = self.bot.get_cog("Applications")
+                    if apps:
+                        await apps.post_panels(g, False)  # панель заявок — тоже по версии
             except Exception:
                 log.exception("Досоздание каналов на %s", g.name)
 

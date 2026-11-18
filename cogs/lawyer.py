@@ -127,12 +127,6 @@ class Lawyer(commands.Cog):
             text, sources = f"❌ Ошибка: {e}", []
         await self.send_answer(inter.followup.send, question, text, sources, mode, inter.guild)
 
-    @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
-    @app_commands.command(name="спросить", description="Спросить бота о правилах семьи, проекта и законах сервера")
-    @app_commands.rename(question="вопрос")
-    async def ask_cmd(self, inter: discord.Interaction, question: str):
-        await self.lawyer_cmd.callback(self, inter, question, None)
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not message.content:

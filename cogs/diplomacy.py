@@ -323,9 +323,67 @@ class Diplomacy(commands.Cog):
         await inter.response.send_message(embed=self.bot.embed("📜 Действующие договоры", text[:4000] or "Нет",
                                                                config.GOLD, inter.guild), ephemeral=True)
 
+    # ---------- скоро истекает: напоминание и продление ----------
+    async def remind_treaties(self):
+        """За 3 дня и за сутки до конца договора — дипломатам в канал договоров, с кнопками продления."""
+        db = self.bot.db
+        soon = (now() + dt.timedelta(days=3)).isoformat()
+        for t in db.all("SELECT * FROM treaties WHERE active=1 AND until IS NOT NULL AND until<?", soon):
+            g = self.bot.get_guild(t["guild_id"])
+            if not g or not self.bot.is_family(g):
+                continue
+            try:
+                left = parse_dt(t["until"]) - now()
+            except (TypeError, ValueError):
+                continue
+            stage = 2 if left <= dt.timedelta(days=1) else 1
+            if int(db.gget(g, f"treaty:rem:{t['id']}") or 0) >= stage:
+                continue
+            db.gset(g, f"treaty:rem:{t['id']}", stage)
+            c = self.bot.ch(g, "treaties")
+            if not c:
+                continue
+            roles = [r for r in (self.bot.role(g, k) for k in ("diplomat",)) if r]
+            v = discord.ui.View(timeout=None)
+            for d in (7, 30):
+                v.add_item(TreatyExtend(t["id"], d))
+            try:
+                await c.send(content=" ".join(r.mention for r in roles) or None,
+                             embed=self.bot.embed(f"⌛ Договор №{t['id']} скоро истекает",
+                                                  f"«{t['title']}» с **{t['family']}** — до "
+                                                  f"{discord.utils.format_dt(parse_dt(t['until']), 'f')} "
+                                                  f"({discord.utils.format_dt(parse_dt(t['until']), 'R')}).\n"
+                                                  "Продлить — кнопкой. Ничего не делать — договор истечёт сам.",
+                                                  0xFB8C00, g),
+                             view=v, allowed_mentions=discord.AllowedMentions(roles=True))
+            except discord.HTTPException:
+                pass
+
+    async def extend(self, inter, tid, days):
+        if not self.bot.has(inter.user, config.DIPLO):
+            return await inter.response.send_message("⛔ Продлевают дипломаты и руководство.", ephemeral=True)
+        t = self.bot.db.one("SELECT * FROM treaties WHERE id=? AND guild_id=? AND active=1", tid, inter.guild.id)
+        if not t:
+            return await inter.response.send_message("Договор уже не действует.", ephemeral=True)
+        try:
+            base = max(parse_dt(t["until"]), now()) if t["until"] else now()
+        except (TypeError, ValueError):
+            base = now()
+        until = base + dt.timedelta(days=days)
+        self.bot.db.q("UPDATE treaties SET until=? WHERE id=?", until.isoformat(), tid)
+        self.bot.db.gdel(inter.guild, f"treaty:rem:{tid}")
+        await inter.response.edit_message(view=None)
+        await inter.followup.send(f"✅ Договор №{tid} продлён до {discord.utils.format_dt(until, 'D')} "
+                                  f"({inter.user.mention}).")
+        await self.update_board(inter.guild)
+
     @tasks.loop(hours=6)
     @guarded
     async def expire(self):
+        try:
+            await self.remind_treaties()
+        except Exception:
+            log.exception("Напоминания о договорах")
         for t in self.bot.db.all("SELECT * FROM treaties WHERE active=1 AND until IS NOT NULL AND until<?", now_iso()):
             self.bot.db.q("UPDATE treaties SET active=0 WHERE id=?", t["id"])
             for g in filter(None, [self.bot.get_guild(t["guild_id"])]):
@@ -343,7 +401,21 @@ class Diplomacy(commands.Cog):
         await self.bot.wait_until_ready()
 
 
+class TreatyExtend(discord.ui.DynamicItem[discord.ui.Button], template=r"tr:ext:(?P<id>\d+):(?P<d>\d+)"):
+    def __init__(self, tid, days):
+        super().__init__(discord.ui.Button(label=f"Продлить на {days} дн.", emoji="🔁",
+                                           style=discord.ButtonStyle.success, custom_id=f"tr:ext:{tid}:{days}"))
+        self.tid, self.days = int(tid), int(days)
+
+    @classmethod
+    async def from_custom_id(cls, inter, item, match):
+        return cls(match["id"], match["d"])
+
+    async def callback(self, inter: discord.Interaction):
+        await inter.client.get_cog("Diplomacy").extend(inter, self.tid, self.days)
+
+
 async def setup(bot):
     bot.add_view(DiploPanel())
-    bot.add_dynamic_items(CloseButton)
+    bot.add_dynamic_items(CloseButton, TreatyExtend)
     await bot.add_cog(Diplomacy(bot))

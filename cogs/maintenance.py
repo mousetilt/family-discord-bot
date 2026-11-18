@@ -8,7 +8,13 @@
   владельцу домашнего сервера (ЛС + канал бот-команд) «что нового» с кнопкой «Обновить бота» (upd:go).
 • После перезапуска на новой версии каждой семье в канал бот-команд — «Бот обновлён: что нового»
   с кнопкой «Опубликовать в объявлениях» (upd:pub:<v>) — текст members для рядовых.
-Выпуск версии: запись в НАЧАЛО data/changelog.json → commit → push."""
+Выпуск версии: запись в НАЧАЛО data/changelog.json → commit → push.
+
+Хостинг (бесплатный тариф надо продлевать вручную раз в host:days дней, по умолчанию 4):
+• host:renewed — когда продлили (unix). Кнопка «✅ Продлил» (host:ok) в ЛС и в /статус ставит «сейчас»,
+  «⚙️ Срок тарифа» (host:cfg) — модалка с числом дней. Напоминания владельцу домашнего сервера: за сутки, за 6 ч и
+  за час до отключения (host:warned — какая ступень уже отправлена). Тумблер service:hosting.
+• Память: из cgroup контейнера (лимит хоста), иначе /proc. Сторож: занято > 85% дольше 10 мин — тревога."""
 import asyncio
 import datetime as dt
 import os
@@ -110,6 +116,97 @@ class UpdateButton(discord.ui.DynamicItem[discord.ui.Button], template=r"upd:(?P
             await cog.publish(inter, self.v)
 
 
+HOST_DAYS = 4
+HOST_STAGES = ((1, 24 * 3600, "через сутки"), (2, 6 * 3600, "через 6 часов"), (3, 3600, "в течение часа"))
+MEM_ALERT = 0.85
+
+
+def _read(path):
+    try:
+        with open(path, encoding="ascii") as f:
+            return f.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def mem_usage():
+    """(занято байт, лимит байт или None). Сначала cgroup контейнера (так считает хостинг), потом /proc."""
+    for cur, lim in (("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max"),
+                     ("/sys/fs/cgroup/memory/memory.usage_in_bytes", "/sys/fs/cgroup/memory/memory.limit_in_bytes")):
+        c, m = _read(cur), _read(lim)
+        if c and c.isdigit():
+            limit = int(m) if m and m.isdigit() and int(m) < 1 << 50 else None  # «max» / огромное — без лимита
+            return int(c), limit
+    st = _read("/proc/self/status") or ""
+    for ln in st.splitlines():
+        if ln.startswith("VmRSS:"):
+            try:
+                return int(ln.split()[1]) * 1024, None
+            except (IndexError, ValueError):
+                break
+    return None, None
+
+
+def mem_line():
+    used, limit = mem_usage()
+    if used is None:
+        return None
+    mb = lambda b: f"{b / 1048576:.0f} МБ"  # noqa: E731
+    if limit:
+        pct = used / limit
+        return f"{'🟥' if pct > MEM_ALERT else '🟩'} Память: {mb(used)} из {mb(limit)} ({pct:.0%})"
+    return f"🟩 Память процесса: {mb(used)}"
+
+
+class HostButton(discord.ui.DynamicItem[discord.ui.Button], template=r"host:(?P<a>ok|cfg)"):
+    def __init__(self, a):
+        label, emoji, style = {"ok": ("Продлил хостинг", "✅", discord.ButtonStyle.success),
+                               "cfg": ("Срок тарифа", "⚙️", discord.ButtonStyle.secondary)}[a]
+        super().__init__(discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=f"host:{a}"))
+        self.a = a
+
+    @classmethod
+    async def from_custom_id(cls, inter, item, match):
+        return cls(match["a"])
+
+    async def callback(self, inter: discord.Interaction):
+        cog = inter.client.get_cog("Maintenance")
+        if not cog.host_admin(inter.user):
+            return await inter.response.send_message("⛔ Только владелец или Глава/зам домашнего сервера бота.",
+                                                     ephemeral=True)
+        if self.a == "ok":
+            cog.host_renewed()
+            return await inter.response.send_message(f"✅ Записал: хостинг продлён. Напомню "
+                                                     f"<t:{int(cog.host_until()) - 24 * 3600}:R>.", ephemeral=True)
+        await inter.response.send_modal(HostDays(cog))
+
+
+class HostDays(discord.ui.Modal, title="Срок бесплатного тарифа"):
+    days = discord.ui.TextInput(label="На сколько дней продлевается хостинг", placeholder="4", max_length=2)
+
+    def __init__(self, cog):
+        super().__init__()
+        self.cog = cog
+        self.days.default = str(cog.host_days())
+
+    async def on_submit(self, inter: discord.Interaction):
+        try:
+            d = max(1, min(60, int(self.days.value.strip())))
+        except ValueError:
+            return await inter.response.send_message("Нужно число дней, например 4.", ephemeral=True)
+        self.cog.bot.db.set("host:days", d)
+        self.cog.bot.db.set("host:warned", 0)
+        await inter.response.send_message(f"⚙️ Срок тарифа: {d} дн. Отключение ≈ <t:{int(self.cog.host_until())}:R>.",
+                                          ephemeral=True)
+
+
+def host_view():
+    v = discord.ui.View(timeout=None)
+    v.add_item(HostButton("ok"))
+    v.add_item(HostButton("cfg"))
+    return v
+
+
 def _restart_in_place(via_launcher=False):
     """Перезапускает текущий процесс бота на месте (не зависит от авто-рестарта хоста).
     via_launcher=True — через launcher.py, который перед стартом подтянет код из GitHub."""
@@ -122,6 +219,7 @@ class Maintenance(commands.Cog):
         self.bot = bot
         self._announced = False
         self._alerted, self._voice_down, self._offline_since, self._probe_ts = set(), None, None, 0.0
+        self._mem_high = None
         self.update_loop.start()
         self.watchdog.start()
 
@@ -149,6 +247,12 @@ class Maintenance(commands.Cog):
             out.append(("voice", "🔊 Голосовой модуль", self._voice_down, "не подключён к Discord"))
         else:
             self._voice_down = None
+        used, limit = mem_usage()
+        if used and limit and used / limit > MEM_ALERT:
+            self._mem_high = self._mem_high or time.time()
+            out.append(("mem", "🧠 Память", self._mem_high, f"занято {used / limit:.0%} лимита хостинга"))
+        else:
+            self._mem_high = None
         return out
 
     def health_line(self):
@@ -158,6 +262,78 @@ class Maintenance(commands.Cog):
             return "🐕 Сторож: всё работает"
         return "🐕 Сторож: " + "; ".join(f"{t} не работает {int((now_ - s) // 60)} мин ({r[:80]})"
                                         for _, t, s, r in bad)
+
+    # ---------- хостинг ----------
+    def host_admin(self, user):
+        home = self.home()
+        if not home:
+            return False
+        m = home.get_member(user.id)
+        return user.id == home.owner_id or (m is not None and self.bot.has(m, ["leader", "deputy"]))
+
+    def host_days(self):
+        try:
+            return max(1, min(60, int(self.bot.db.get("host:days") or HOST_DAYS)))
+        except (TypeError, ValueError):
+            return HOST_DAYS
+
+    def host_renewed(self, ts=None):
+        self.bot.db.set("host:renewed", int(ts or time.time()))
+        self.bot.db.set("host:warned", 0)
+
+    def host_until(self):
+        try:
+            renewed = int(self.bot.db.get("host:renewed") or 0)
+        except (TypeError, ValueError):
+            renewed = 0
+        return (renewed or time.time()) + self.host_days() * 86400
+
+    def host_line(self):
+        if not self.bot.db.get("host:renewed"):
+            return "🖥 Хостинг: дата продления не отмечена — нажми «✅ Продлил хостинг»"
+        return (f"🖥 Хостинг: продлён <t:{int(self.bot.db.get('host:renewed'))}:R>, "
+                f"отключится ≈ <t:{int(self.host_until())}:R>")
+
+    async def host_check(self):
+        """Напомнить владельцу домашнего сервера продлить хостинг (за сутки, 6 ч и час)."""
+        home = self.home()
+        if not home or not self.bot.feature(home, "service:hosting"):
+            return
+        db = self.bot.db
+        if not db.get("host:renewed"):
+            self.host_renewed()  # первый запуск: считаем от него; владелец поправит кнопкой
+            await self.host_dm(home, "🖥 Хостинг бота", "Бесплатный хостинг надо продлевать вручную. Я буду напоминать "
+                               f"за сутки до отключения (тариф — {self.host_days()} дн., считаю от сейчас).\n"
+                               "Продлил — жми «✅ Продлил хостинг», и я начну отсчёт заново.")
+            return
+        left = self.host_until() - time.time()
+        try:
+            warned = int(db.get("host:warned") or 0)
+        except (TypeError, ValueError):
+            warned = 0
+        stage = max((n for n, sec, _ in HOST_STAGES if left <= sec), default=0)
+        if stage <= warned:
+            return
+        when = dict((n, w) for n, _, w in HOST_STAGES)[stage]
+        db.set("host:warned", stage)
+        await self.host_dm(home, "⏰ Продли хостинг бота",
+                           f"Бесплатный тариф закончится **{when}** (≈ <t:{int(self.host_until())}:t>). "
+                           "Не продлишь — бот выключится у всех семей.\nЗайди на хостинг, продли сервер и нажми "
+                           "«✅ Продлил хостинг».")
+
+    async def host_dm(self, home, title, text):
+        if not home.owner:
+            return
+        try:
+            await home.owner.send(embed=self.bot.embed(title, text, config.GOLD, home), view=host_view())
+        except discord.HTTPException:
+            c = self.bot.ch(home, "botcmd")
+            if c:
+                try:
+                    await c.send(content=home.owner.mention, embed=self.bot.embed(title, text, config.GOLD, home),
+                                 view=host_view())
+                except discord.HTTPException:
+                    pass
 
     async def alert(self, text):
         """Главе домашнего сервера (владельцу и роли Главы) в ЛС + в бот-команды."""
@@ -183,6 +359,10 @@ class Maintenance(commands.Cog):
     @guarded
     async def watchdog(self):
         now_ = time.time()
+        try:
+            await self.host_check()
+        except Exception:
+            log.exception("Напоминание о хостинге")
         home = self.home()
         ai = self.bot.ai_for(home) if home else self.bot.ai
         if ai.on and getattr(ai, "fail_since", None) and now_ - self._probe_ts >= 300:
@@ -201,7 +381,7 @@ class Maintenance(commands.Cog):
         for k in list(self._alerted):
             if k not in bad:
                 self._alerted.discard(k)
-                await self.alert(f"✅ {dict(ai='🤖 ИИ', whisper='🎙 Распознавание речи', voice='🔊 Голосовой модуль').get(k, k)}"
+                await self.alert(f"✅ {dict(ai='🤖 ИИ', whisper='🎙 Распознавание речи', voice='🔊 Голосовой модуль', mem='🧠 Память').get(k, k)}"
                                  " снова работает.")
 
     @watchdog.before_loop
@@ -399,8 +579,12 @@ class Maintenance(commands.Cog):
             lines.append("🔊 В голосовых: " + ", ".join(f"«{v.channel.name}»" for v in vcs if v.channel))
         else:
             lines.append("🔇 Не в голосовых каналах")
+        ml = mem_line()
+        if ml:
+            lines.append(ml)
+        lines.append(self.host_line())
         lines.append(self.health_line())
-        await inter.response.send_message("\n".join(lines), ephemeral=True)
+        await inter.response.send_message("\n".join(lines), ephemeral=True, view=host_view())
 
     # ---------- перезапуск ----------
     @app_commands.command(name="перезапуск", description="Перезапустить бота (руководство)")
@@ -478,5 +662,5 @@ class Maintenance(commands.Cog):
 
 
 async def setup(bot):
-    bot.add_dynamic_items(UpdateButton)
+    bot.add_dynamic_items(UpdateButton, HostButton)
     await bot.add_cog(Maintenance(bot))

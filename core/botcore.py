@@ -486,7 +486,13 @@ class FamilyBot(commands.Bot):
         if n >= lim:
             council = self.ch(guild, "council_chat")
             if council:
-                await council.send(f"🚨 У {member.mention} **{n} активных выговора**. Рассмотрите исключение.")
+                try:
+                    from cogs.staff import limit_view  # кнопки решения: исключить · дать шанс · снять выговор
+                    view = limit_view(member.id)
+                except Exception:  # noqa: BLE001 — без кнопок сообщение всё равно нужно
+                    view = discord.utils.MISSING
+                await council.send(f"🚨 У {member.mention} **{n} активных выговора** (лимит {lim}). Решите:",
+                                   view=view)
         return n
 
     def blacklist_find(self, guild, discord_id=None, static=None, nick=None):

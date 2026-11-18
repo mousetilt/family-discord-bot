@@ -11,6 +11,46 @@ from core import config
 from core.botcore import guarded, now, now_iso, safe_dm, staff_only
 
 
+LIMIT_ACTS = {"expel": ("Исключить", "🚪", discord.ButtonStyle.danger),
+              "chance": ("Дать шанс", "🤝", discord.ButtonStyle.secondary),
+              "unwarn": ("Снять один выговор", "⚪", discord.ButtonStyle.secondary)}
+
+
+class WarnLimitButton(discord.ui.DynamicItem[discord.ui.Button], template=r"wl:(?P<a>expel|chance|unwarn):(?P<uid>\d+)"):
+    """Кнопки под сообщением совету «у X лимит выговоров» — решение в один клик (с проверкой прав и иерархии)."""
+    def __init__(self, a, uid):
+        label, emoji, style = LIMIT_ACTS[a]
+        super().__init__(discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=f"wl:{a}:{uid}"))
+        self.a, self.uid = a, int(uid)
+
+    @classmethod
+    async def from_custom_id(cls, inter, item, match):
+        return cls(match["a"], match["uid"])
+
+    async def callback(self, inter: discord.Interaction):
+        await inter.client.get_cog("Staff").limit_decide(inter, self.a, self.uid)
+
+
+class ExpelReason(discord.ui.Modal, title="Исключение из семьи"):
+    reason = discord.ui.TextInput(label="Причина", default="Лимит выговоров", max_length=300)
+
+    def __init__(self, cog, member):
+        super().__init__()
+        self.cog, self.member = cog, member
+
+    async def on_submit(self, inter: discord.Interaction):
+        await inter.response.defer()
+        await self.cog.bot.expel(self.member, inter.user, self.reason.value)
+        await self.cog.limit_close(inter, f"🚪 Исключён ({inter.user.mention}): {self.reason.value}")
+
+
+def limit_view(uid):
+    v = discord.ui.View(timeout=None)
+    for a in LIMIT_ACTS:
+        v.add_item(WarnLimitButton(a, uid))
+    return v
+
+
 class AnnounceModal(discord.ui.Modal, title="Объявление"):
     head = discord.ui.TextInput(label="Заголовок", max_length=200)
     body = discord.ui.TextInput(label="Текст", style=discord.TextStyle.paragraph, max_length=3500)
@@ -157,6 +197,43 @@ class Staff(commands.Cog):
         self.bot.emit(inter.guild, "post", member=member, post=post.value, added=added, by=inter.user)
         await inter.followup.send(f"✅ {member.mention}: {act} {post.name}", ephemeral=True)
 
+    # ---------- лимит выговоров: решение кнопками ----------
+    async def limit_decide(self, inter, action, uid):
+        bot, g = self.bot, inter.guild
+        m = g.get_member(uid) if g else None
+        if not m:
+            return await self.limit_close(inter, "Человека уже нет на сервере.", defer=True)
+        need = ["leader", "deputy"] if action == "expel" else config.LEAD + ["hr_head"]
+        if not bot.has(inter.user, need):
+            return await inter.response.send_message("⛔ " + ("Исключают Глава и заместитель." if action == "expel"
+                                                             else "Решает руководство или начальник отдела кадров."),
+                                                     ephemeral=True)
+        if not bot.outranks(inter.user, m):
+            return await inter.response.send_message("⛔ Он не ниже тебя по иерархии.", ephemeral=True)
+        if action == "expel":
+            return await inter.response.send_modal(ExpelReason(self, m))
+        await inter.response.defer()
+        if action == "unwarn":
+            r = bot.db.one("SELECT id FROM warns WHERE guild_id=? AND user_id=? AND active=1 ORDER BY id DESC LIMIT 1",
+                           g.id, m.id)
+            if r:
+                bot.db.q("UPDATE warns SET active=0 WHERE id=?", r["id"])
+                await bot.log(g, f"⚪ Снят выговор №{r['id']} с {m.mention} ({inter.user.mention}, по лимиту)", "warns")
+            return await self.limit_close(inter, f"⚪ Снят последний выговор ({inter.user.mention}).")
+        await bot.log(g, f"🤝 {m.mention}: лимит выговоров — решили дать шанс ({inter.user.mention})", "hrlog", 0x26A69A)
+        await safe_dm(m, f"🤝 У тебя лимит выговоров, но руководство семьи {config.FAMILY} решило дать тебе шанс. "
+                         "Следующий выговор — разговор будет другой.")
+        await self.limit_close(inter, f"🤝 Дали шанс ({inter.user.mention}).")
+
+    async def limit_close(self, inter, text, defer=False):
+        """Убрать кнопки и дописать решение в сообщение совету."""
+        if defer and not inter.response.is_done():
+            await inter.response.defer()
+        try:
+            await inter.message.edit(content=f"{inter.message.content}\n**Решение:** {text}", view=None)
+        except (discord.HTTPException, AttributeError):
+            pass
+
     @app_commands.default_permissions(kick_members=True)
     @app_commands.command(name="исключить", description="Исключить участника из семьи")
     @app_commands.rename(member="участник", reason="причина")
@@ -280,4 +357,5 @@ class Staff(commands.Cog):
 
 
 async def setup(bot):
+    bot.add_dynamic_items(WarnLimitButton)
     await bot.add_cog(Staff(bot))

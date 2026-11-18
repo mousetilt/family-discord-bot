@@ -57,6 +57,7 @@ NOT_YOURS = ["Не по чину тебе: {what}. Зови старших.", "�
 DAILY_CHAT = 120   # сообщений в сутки на человека без прав помощника — чтобы не выжечь бесплатный лимит ИИ
 NAME_ANYWHERE = re.compile(r"(?<![а-яёa-z])швейцар(?![а-яёa-z])", re.I)  # «…, швейцар» в любом месте фразы
 TALK_SEC = 300     # сколько помним разговор с человеком
+VOICE_MSG_SEC = 120  # голосовые сообщения длиннее не распознаём (лимит Whisper общий с голосовым Швейцаром)
 ANSWER_SEC = 120   # сколько ждём ответ на свой вопрос без обращения «Швейцар»
 PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "people": USERS, "warns": USERS, "bl_check": USERS,
          "market": USERS, "queue": USERS, "roll": USERS, "digest": config.LEAD, "music_pause": USERS,
@@ -477,13 +478,46 @@ class Assistant(commands.Cog):
                 found.append((not self.bot.is_home(g), m))
         return min(found, key=lambda x: x[0])[1] if found else None
 
-    async def on_dm(self, message):
-        """Личка: всё, что пишут боту, — ему. Права и характер — как на сервере семьи человека."""
-        text = (message.content or "").strip()
+    @staticmethod
+    def voice_attachment(message):
+        return next((a for a in getattr(message, "attachments", []) or []
+                     if getattr(a, "is_voice_message", lambda: False)()), None)
+
+    async def voice_text(self, message, guild):
+        """Голосовое сообщение Discord → текст через Whisper (ключ семьи). '' — слишком длинное, None — не вышло."""
+        att = self.voice_attachment(message)
+        jar = self.bot.get_cog("Jarvis")
+        if not att or not jar or not self.bot.feature(guild, "assistant:voicemsg"):
+            return None
+        if (getattr(att, "duration", None) or 0) > VOICE_MSG_SEC or att.size > 4 * 1024 * 1024:
+            return ""
+        try:
+            data = await att.read()
+        except discord.HTTPException:
+            return None
+        return await jar.transcribe_file(guild, data, att.filename or "voice.ogg", att.content_type or "audio/ogg")
+
+    async def heard(self, message, guild, send):
+        """Распознать голосовое и показать, что расслышали. → текст или None (сам ответил, почему нет)."""
+        async with message.channel.typing():
+            text = await self.voice_text(message, guild)
+        if text == "":
+            await send(content=f"🎙 Голосовое длиннее {VOICE_MSG_SEC // 60} мин не слушаю — скажи короче.")
+            return None
         if not text:
+            await send(content="🎙 Не разобрал голосовое (или распознавание сейчас недоступно). Напиши текстом.")
+            return None
+        return text
+
+    async def on_dm(self, message):
+        """Личка: всё, что пишут боту, — ему. Права и характер — как на сервере семьи человека.
+        Голосовое сообщение в ЛС распознаётся (Whisper) и идёт помощнику как текст."""
+        text = (message.content or "").strip()
+        voice = not text and self.voice_attachment(message) is not None
+        if not text and not voice:
             return
         nick = self.bot.get_cog("NickCheck")
-        if nick and nick.waiting(message.author.id) and len(text) <= 40 and "\n" not in text:
+        if text and nick and nick.waiting(message.author.id) and len(text) <= 40 and "\n" not in text:
             return  # это ответ ником на просьбу контроля ника — его разбирает cogs/nickcheck.py
         member = self.dm_home(message.author)
         if not member:
@@ -500,6 +534,11 @@ class Assistant(commands.Cog):
             if self.spend(member.id, warn=True):
                 await message.channel.send("Всё, на сегодня я с тобой наговорился. Завтра приходи.")
             return
+        if voice:
+            text = await self.heard(message, member.guild, lambda **kw: message.channel.send(**kw))
+            if not text:
+                return
+            await message.channel.send(f"🎙 *«{text[:300]}»*")
         self.note(message)
         ctx = types.SimpleNamespace(guild=member.guild, author=member, channel=message.channel, content=text,
                                     mentions=[], id=message.id, reference=message.reference, dm=True,
@@ -529,6 +568,14 @@ class Assistant(commands.Cog):
         m = TRIGGER.match(text)
         request = TRIGGER.sub("", text, count=1) if m else text
         request = request.replace(self.bot.user.mention, "").replace(f"<@!{self.bot.user.id}>", "").strip()
+        if not request and self.voice_attachment(message):
+            # голосовое ответом на сообщение бота (или на его вопрос) — распознаём; просто так голосовые
+            # в каналах не слушаем: это чужие разговоры и лишний расход лимита
+            heard = await self.heard(message, message.guild,
+                                     lambda **kw: message.reply(mention_author=False, **kw))
+            if not heard:
+                return
+            request = TRIGGER.sub("", heard, count=1).strip() or heard
         if not request:
             return await message.reply("Слушаю 🎩 Например: «Швейцар, перенеси нас всех в балкон».",
                                        mention_author=False)

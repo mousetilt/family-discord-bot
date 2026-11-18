@@ -46,6 +46,22 @@ def compile_template(t):
     return re.compile(r"^\s*" + rx + r"\s*$")
 
 
+def build_nick(template, game_nick, static=None):
+    """Ник по шаблону семьи из анкеты: «Ivan_Ivanov» + 123456 + «Имя Фамилия [ID]» → «Ivan Ivanov [123456]».
+    Не хватает частей (нет фамилии, нет Static) или результат не проходит шаблон — None."""
+    words = [w for w in re.split(r"[ _]+", str(game_nick or "").strip()) if w]
+    if not words:
+        return None
+    vals = {"Имя": words[0], "Фамилия": words[1] if len(words) > 1 else None,
+            "ID": str(static).strip() if static and str(static).strip().isdigit() else None}
+    parts = re.split(r"(Имя|Фамилия|ID)", str(template or DEFAULT))
+    if any(p in vals and not vals[p] for p in parts):
+        return None
+    nick = "".join(vals[p] if p in vals else p for p in parts).strip()[:32]
+    rx = compile_template(template)
+    return nick if rx is None or rx.match(nick) else None
+
+
 def example(t):
     return re.sub(r"Имя|Фамилия|ID", lambda m: SAMPLE[m.group(0)], str(t or DEFAULT))
 
@@ -79,6 +95,29 @@ class NickFixButton(discord.ui.DynamicItem[discord.ui.Button], template=r"nick:f
         if not cog or not g:
             return await inter.response.send_message("Сервер семьи недоступен.", ephemeral=True)
         await inter.response.send_modal(NickModal(cog, self.gid, cog.template(g)))
+
+
+class NickUseButton(discord.ui.DynamicItem[discord.ui.Button], template=r"nick:use:(?P<g>\d+)"):
+    """«Поставить готовый ник» — собранный по шаблону из ника и Static, которые человек указал в анкете."""
+    def __init__(self, gid, label="Поставить готовый ник"):
+        super().__init__(discord.ui.Button(label=label[:80], emoji="✅", style=discord.ButtonStyle.success,
+                                           custom_id=f"nick:use:{gid}"))
+        self.gid = gid
+
+    @classmethod
+    async def from_custom_id(cls, inter, item, match):
+        return cls(int(match["g"]))
+
+    async def callback(self, inter: discord.Interaction):
+        cog = inter.client.get_cog("NickCheck")
+        g = inter.client.get_guild(self.gid)
+        m = g.get_member(inter.user.id) if g else None
+        nick = cog.suggest(m) if cog and m else None
+        if not nick:
+            return await inter.response.send_message("Не нашёл ник из анкеты — нажми «Указать ник».",
+                                                     ephemeral=inter.guild is not None)
+        await inter.response.send_message(await cog.apply(m, nick, "готовый ник из анкеты"),
+                                          ephemeral=inter.guild is not None)
 
 
 class AskAllView(discord.ui.View):
@@ -130,6 +169,12 @@ class NickCheck(commands.Cog):
     def exempt(self, m):
         return m.bot or m.id == m.guild.owner_id or m.guild_permissions.administrator or not self.bot.in_family(m)
 
+    def suggest(self, m):
+        """Готовый ник по шаблону из последней принятой анкеты (ник в игре + Static) или None."""
+        a = self.bot.db.one("SELECT nick, static_id FROM applications WHERE guild_id=? AND user_id=? AND "
+                            "status='accepted' ORDER BY id DESC LIMIT 1", m.guild.id, m.id)
+        return build_nick(self.template(m.guild), a["nick"], a["static_id"]) if a else None
+
     def wrong(self, guild):
         return [m for m in self.bot.family_members(guild) if not self.exempt(m) and not self.ok(guild, m.display_name)]
 
@@ -141,13 +186,18 @@ class NickCheck(commands.Cog):
             return False
         t = self.template(g)
         v = discord.ui.View(timeout=None)
+        ready = self.suggest(m)
+        if ready and ready != m.display_name:
+            v.add_item(NickUseButton(g.id, f"Поставить «{ready}»"))
         v.add_item(NickFixButton(g.id))
         fam = self.bot.family(g)["name"]
         try:
             await m.send(embed=self.bot.embed(
                 "✏️ Поправь ник на сервере семьи",
                 f"В семье **{fam}** ник должен быть по форме **`{t}`** — например `{example(t)}`.\n"
-                f"Сейчас у тебя: `{m.display_name}`.\n\n"
+                f"Сейчас у тебя: `{m.display_name}`.\n\n" +
+                ("Нажми «Поставить» — ник из твоей анкеты уже собран по форме. " if ready and ready != m.display_name
+                 else "") +
                 "Нажми кнопку и впиши правильный ник — или просто ответь сюда сообщением с ником. Поставлю сам.",
                 config.GOLD, g), view=v)
         except discord.HTTPException:
@@ -269,5 +319,5 @@ class NickCheck(commands.Cog):
 
 
 async def setup(bot):
-    bot.add_dynamic_items(NickFixButton)
+    bot.add_dynamic_items(NickFixButton, NickUseButton)
     await bot.add_cog(NickCheck(bot))

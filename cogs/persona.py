@@ -85,7 +85,7 @@ class Persona(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         # таблица persona — в core/db.py (досье своё на каждом сервере)
-        self.greeted = {}       # user_id -> monotonic
+        self.greeted = {}       # (guild_id, user_id) -> monotonic
         self.last_greet = {}    # guild_id -> monotonic: паузы у каждой семьи свои
         self.alone = {}         # user_id -> (channel_id, с какого момента один)
         self.visited = {}       # user_id -> monotonic
@@ -172,14 +172,14 @@ class Persona(commands.Cog):
         t = time.monotonic()
         if member.bot or not self.bot.has(member, config.FAMILY_PLUS) or not self.bot.feature(guild, "persona:greet"):
             return
-        if t - self.last_greet.get(guild.id, -1e9) < GREET_GAP or t - self.greeted.get(member.id, -1e9) < GREET_EVERY:
+        if t - self.last_greet.get(guild.id, -1e9) < GREET_GAP or t - self.greeted.get((guild.id, member.id), -1e9) < GREET_EVERY:
             return
         if random.random() > GREET_CHANCE:
             return
         jv = self.bot.get_cog("Jarvis")
         if not jv or guild.id not in jv.listeners:
             return
-        self.last_greet[guild.id], self.greeted[member.id] = t, t
+        self.last_greet[guild.id], self.greeted[(guild.id, member.id)] = t, t
         text = await self.line(f"В твой голосовой канал только что зашёл {member.display_name}. Встреть его вслух одной "
                                "фразой: по имени, в своём стиле, можно припомнить что-то из заметок или спросить, как дела.",
                                member, f"О, {member.display_name} пожаловал. Ну заходи, раз пришёл.")

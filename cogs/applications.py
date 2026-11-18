@@ -9,10 +9,10 @@ import random
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from core import config, images
-from core.botcore import now, now_iso, parse_dt, safe_dm, staff_only
+from core.botcore import guarded, now, now_iso, parse_dt, safe_dm, staff_only
 
 log = logging.getLogger("family-bot.apps")
 LETTERS = ["🇦", "🇧", "🇨", "🇩"]
@@ -152,6 +152,11 @@ class ApplyPanel(discord.ui.View):
     async def open(self, inter: discord.Interaction, _):
         await inter.client.get_cog("Applications").start_apply(inter)
 
+    @discord.ui.button(label="Где моя заявка?", emoji="📄", style=discord.ButtonStyle.secondary, custom_id="apply:status")
+    async def status(self, inter: discord.Interaction, _):
+        await inter.response.send_message(inter.client.get_cog("Applications").status_text(inter.guild, inter.user),
+                                          ephemeral=True)
+
 
 class ApplicationModal(discord.ui.Modal, title="Шаг 1 из 3 · Анкета"):
     nick = discord.ui.TextInput(label="Ник в игре (Имя_Фамилия)", placeholder="Ivan_Ivanov", max_length=32)
@@ -277,6 +282,102 @@ class Applications(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.sessions = {}
+        self.watch_loop.start()
+
+    def cog_unload(self):
+        self.watch_loop.cancel()
+
+    # ---------- «где моя заявка?» ----------
+    def status_text(self, g, user):
+        """Ответ кандидату: что с его последней заявкой и что делать дальше."""
+        a = self.bot.db.one("SELECT * FROM applications WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 1",
+                            g.id, user.id)
+        if not a:
+            return "📄 Заявок от тебя нет. Жми «📨 Подать заявку» — это займёт минут 10."
+
+        def when(iso):
+            try:
+                return discord.utils.format_dt(parse_dt(iso), "R") if iso else "недавно"
+            except (TypeError, ValueError):
+                return "недавно"
+        st, rev = a["status"], f"<@{a['reviewer_id']}>" if a["reviewer_id"] else None
+        head = f"📄 Заявка №{a['id']} · {STATUS.get(st, (st,))[0]}\n"
+        if st == "exam":
+            return head + "Ты начал анкету, но тест не закончил. Жми «📨 Подать заявку» и пройди заново."
+        if st == "exam_failed":
+            retry = self.conf(g)["retry"]
+            return head + (f"Тест не сдан {when(a['created_at'])}. Пересдать можно через {retry} мин после попытки — "
+                           "снова «📨 Подать заявку». Потренируйся: `/экзамен тренировка`.")
+        if st == "new":
+            return head + (f"Подана {when(a['created_at'])} и ждёт рекрутёра. Обычно берут за пару часов. "
+                           "Личку от участников сервера не закрывай — ответ придёт туда.")
+        if st == "taken":
+            return head + f"Её рассматривает {rev or 'рекрутёр'}. Жди сообщения в ЛС или вызова на собеседование."
+        if st == "interview":
+            w = self.bot.ch(g, "waiting")
+            return head + (f"Тебя вызвали на собеседование. Зайди в голосовой {w.mention if w else '«Ожидание собеседования»'}"
+                           f" — тебя заберёт {rev or 'рекрутёр'}.")
+        if st == "accepted":
+            return head + f"Принята {when(a['decided_at'])}. Ты уже в семье — добро пожаловать!"
+        if st == "denied":
+            return head + (f"Отклонена {when(a['decided_at'])}." + (f" Причина: {a['deny_reason']}" if a["deny_reason"] else "")
+                           + " Подать снова можно позже — кнопка «📨 Подать заявку» сама скажет, когда.")
+        if st == "blacklisted":
+            return head + "Заявку принять нельзя."
+        return head + "Эта заявка закрыта. Можно подать новую — «📨 Подать заявку»."
+
+    # ---------- присмотр за заявками ----------
+    @tasks.loop(minutes=10)
+    @guarded
+    async def watch_loop(self):
+        """Невзятая заявка дольше app_ping_hours — пинг отделу кадров (один раз); брошенный тест — напоминание
+        кандидату через сутки, через 3 дня — заявка «брошена»."""
+        db = self.bot.db
+        for g in list(self.bot.home_guilds):
+            hours = self.bot.num(g, "app_ping_hours")
+            if hours:
+                border = (now() - dt.timedelta(hours=hours)).isoformat()
+                for a in db.all("SELECT * FROM applications WHERE guild_id=? AND status='new' AND created_at<?",
+                                g.id, border):
+                    if db.gget(g, f"app:pinged:{a['id']}"):
+                        continue
+                    db.gset(g, f"app:pinged:{a['id']}", 1)
+                    await self.ping_hr(g, a, hours)
+            day = (now() - dt.timedelta(days=1)).isoformat()
+            old = (now() - dt.timedelta(days=3)).isoformat()
+            for a in db.all("SELECT * FROM applications WHERE guild_id=? AND status='exam' AND created_at<?", g.id, day):
+                if (g.id, a["user_id"]) in self.sessions:
+                    continue  # прямо сейчас проходит тест
+                if a["created_at"] < old:
+                    db.q("UPDATE applications SET status='abandoned' WHERE id=?", a["id"])
+                    db.gdel(g, f"app:nudged:{a['id']}")
+                elif not db.gget(g, f"app:nudged:{a['id']}"):
+                    db.gset(g, f"app:nudged:{a['id']}", 1)
+                    m = g.get_member(a["user_id"])
+                    if m:
+                        await safe_dm(m, f"📨 Ты начал заявку в семью {config.FAMILY}, но не прошёл тест до конца. "
+                                         "Вернись на сервер и нажми «📨 Подать заявку» — начнёшь заново, это быстро.")
+
+    async def ping_hr(self, g, a, hours):
+        c = self.bot.ch(g, "hr_chat") or self.bot.ch(g, "review")
+        if not c:
+            return
+        review = self.bot.ch(g, "review")
+        link = f"https://discord.com/channels/{g.id}/{review.id}/{a['message_id']}" if review and a["message_id"] else None
+        roles = [r for r in (self.bot.role(g, "recruiter"), self.bot.role(g, "hr_head")) if r]
+        try:
+            await c.send(content=" ".join(r.mention for r in roles) or None,
+                         embed=self.bot.embed("⏰ Заявку никто не взял",
+                                              f"Заявка №{a['id']} от <@{a['user_id']}> ({a['nick'] or '—'}) ждёт больше "
+                                              f"{hours} ч." + (f"\n[Открыть карточку]({link}) и нажать «✋ Взять»." if link
+                                                               else ""), 0xFB8C00, g),
+                         allowed_mentions=discord.AllowedMentions(roles=True))
+        except discord.HTTPException:
+            pass
+
+    @watch_loop.before_loop
+    async def _watch_before(self):
+        await self.bot.wait_until_ready()
 
     def conf(self, guild):
         """Числа экзамена семьи (/настройки → «🔢 Числа»)."""
@@ -301,7 +402,7 @@ class Applications(commands.Cog):
             e.set_image(url="attachment://banner.png")
             return {"embed": e, "view": ApplyPanel(),
                     "file": discord.File(config.ASSETS / "banner.png", filename="banner.png")}
-        await bot.panel_once(guild, "apply", "apply", repost, make, version=3)
+        await bot.panel_once(guild, "apply", "apply", repost, make, version=4)  # 4: кнопка «Где моя заявка?»
 
     # ---------- шаги заявки ----------
     async def start_apply(self, inter: discord.Interaction):
@@ -563,11 +664,19 @@ class Applications(commands.Cog):
             await bot.set_rank(member, "newbie", by, reason=f"Заявка №{a['id']}", silent=True)
         except discord.HTTPException:
             pass
-        if a["nick"] and a["static_id"]:
-            try:
-                await member.edit(nick=f"{a['nick']} [{a['static_id']}]"[:32])
-            except discord.HTTPException:
-                pass
+        if a["nick"]:
+            # своя форма ника у семьи (/ник шаблон) — ник собираем по ней, чтобы новичку не прилетело «поправь ник»
+            nick = None
+            if bot.db.gget(g, "nick:template"):
+                from cogs.nickcheck import build_nick
+                nick = build_nick(bot.db.gget(g, "nick:template"), a["nick"], a["static_id"])
+            if not nick and a["static_id"]:
+                nick = f"{a['nick']} [{a['static_id']}]"
+            if nick:
+                try:
+                    await member.edit(nick=nick[:32])
+                except discord.HTTPException:
+                    pass
         await safe_dm(member, f"🎉 Поздравляем! Ты принят в семью **{config.FAMILY}**!\n"
                               "Сейчас у тебя ранг 🆕 Новичок — испытательный срок. Скоро за тобой закрепят наставника.")
         chat = bot.ch(g, "chat")
