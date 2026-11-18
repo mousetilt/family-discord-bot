@@ -82,6 +82,31 @@ class MentorDecision(discord.ui.DynamicItem[discord.ui.Button], template=r"mdec:
         await inter.client.get_cog("Mentorship").decide(inter, self.mid, self.action)
 
 
+class MentorSuggest(discord.ui.DynamicItem[discord.ui.Button], template=r"msug:(?P<mid>\d+):(?P<i>\d+)"):
+    """Предложение ИИ-наставника «отметить пункт чек-листа» — решает наставник/руководство (не ИИ)."""
+
+    def __init__(self, mid, i):
+        super().__init__(discord.ui.Button(label=f"Отметить пункт {i + 1}", emoji="✅",
+                                           style=discord.ButtonStyle.secondary, custom_id=f"msug:{mid}:{i}"))
+        self.mid, self.i = mid, i
+
+    @classmethod
+    async def from_custom_id(cls, inter, item, match):
+        return cls(int(match["mid"]), int(match["i"]))
+
+    async def callback(self, inter):
+        await inter.client.get_cog("Mentorship").confirm_item(inter, self.mid, self.i)
+
+
+MENTOR_SYSTEM = """Ты — наставник новичка в RP-семье «{family}» (игра «Россия Онлайн»). Новичок задал вопрос в своей
+ветке, наставник пока молчит. Ответь по-человечески и по делу, опираясь ТОЛЬКО на базу знаний ниже и на РЕАЛЬНЫЙ статус
+новичка; подскажи один следующий шаг по чек-листу. Если из сообщения видно, что новичок УЖЕ выполнил пункт чек-листа,
+перечисли номера в "done" — это лишь предложение, отметит наставник. Важное для наставника (жалоба, конфликт, хочет
+уйти, нарушение) — коротко в "flag", иначе "". Не обещай повышений и решений за руководство.
+Верни JSON: {{"answer":"ответ новичку до 900 знаков","next_step":"следующий шаг одной фразой","done":[номера пунктов],
+"flag":""}}"""
+
+
 class Mentorship(commands.Cog):
     group = app_commands.Group(name="наставник", description="Наставничество для новичков", default_permissions=discord.Permissions(move_members=True))
 
@@ -355,8 +380,14 @@ class Mentorship(commands.Cog):
                     return  # наставник (или руководство) уже ответил
         except discord.HTTPException:
             return
+        ai = self.bot.ai_for(message.guild)
+        if ai.on and getattr(ai, "is_claude", False):  # Claude — адаптивный наставник по статусу новичка
+            row = self.bot.db.one("SELECT * FROM mentorships WHERE id=?", row["id"]) or row
+            if row["status"] == "active":
+                return await self.adaptive_answer(message, row, ai)
+            return
         law = self.bot.get_cog("Lawyer")
-        if not law or not self.bot.ai_for(message.guild).on:
+        if not law or not ai.on:
             return
         try:
             text, _, used_ai = await law.answer(message.guild.id, message.content[:500])
@@ -371,6 +402,89 @@ class Mentorship(commands.Cog):
                                 "знаний. Если что-то не так — наставник поправит.",
                                 allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException:
+            pass
+
+    def status_text(self, guild, row):
+        """Реальный статус новичка для ИИ-наставника: чек-лист (что сделано), срок, войс/сборы/выговоры, экзамен."""
+        items = self.bot.checklist(guild)
+        marks = json.loads(row["checklist"] or "[]")
+        voice, gatherings, warns = self.stats(row)
+        left = (parse_dt(row["due_at"]) - now()).days if row["due_at"] else "?"
+        exam = "" if not self.bot.feature(guild, "hr:exam") else \
+            ("экзамен сдан" if self.exam_ok(guild, row["newbie_id"]) else "экзамен НЕ сдан (/экзамен сдать)")
+        lines = [f"{i + 1}. [{'x' if i < len(marks) and marks[i] else ' '}] {t}" for i, t in enumerate(items)]
+        return (f"СТАТУС НОВИЧКА: до решения ~{left} дн.; войс за срок {fmt_hours(voice)}; сборов {gatherings}; "
+                f"выговоров {warns}; {exam}\nЧЕК-ЛИСТ ([x] — уже отмечено наставником):\n" + "\n".join(lines))
+
+    async def adaptive_answer(self, message, row, ai):
+        """ИИ-наставник на Claude: ответ + следующий шаг; отметки чек-листа — только кнопкой наставнику, важное —
+        в ветку с упоминанием наставника. Ничего не пишет в базу сам."""
+        g = message.guild
+        try:
+            kb_text, _, _ = await self.bot.kb.context_smart(g.id, message.content[:500], ai)
+        except Exception:  # noqa: BLE001 — без базы ответит по статусу
+            kb_text = ""
+        system = (MENTOR_SYSTEM.format(family=self.bot.family(g).get("name")) + "\n\n" + self.status_text(g, row) +
+                  "\n\nБАЗА ЗНАНИЙ:\n" + (kb_text or "пусто")[:12000])
+        try:
+            d = await ai.ask_json(system, f"Вопрос новичка: {message.content[:800]}", max_tokens=700, smart=True)
+        except Exception as e:  # noqa: BLE001 — лимит ИИ: молчим, наставник ответит сам
+            log.info("ИИ-наставник: %s", str(e)[:120])
+            return
+        if not isinstance(d, dict) or not str(d.get("answer") or "").strip():
+            return
+        items = self.bot.checklist(g)
+        marks = json.loads(row["checklist"] or "[]")
+        done = []
+        for n in d.get("done") or []:
+            try:
+                i = int(n) - 1
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < len(items) and not (i < len(marks) and marks[i]) and i not in done:
+                done.append(i)
+        who = f"<@{row['mentor_id']}>" if row["mentor_id"] else "наставник"
+        text = f"🤖 Пока {who} занят:\n\n{str(d['answer']).strip()[:900]}"
+        if str(d.get("next_step") or "").strip():
+            text += f"\n\n👣 **Следующий шаг:** {str(d['next_step']).strip()[:200]}"
+        flag = str(d.get("flag") or "").strip()[:300]
+        if done:
+            text += "\n\n-# Похоже, сделано: " + ", ".join(f"п. {i + 1}" for i in done[:5]) + \
+                    " — наставник, подтверди кнопкой."
+        view = discord.ui.View(timeout=None)
+        for i in done[:5]:
+            view.add_item(MentorSuggest(row["id"], i))
+        try:
+            await message.reply(text[:1950] + "\n-# Ответ бота по базе и твоему статусу. Наставник поправит, если что.",
+                                view=view if done else None, allowed_mentions=discord.AllowedMentions.none())
+            if flag and row["mentor_id"]:  # важное — наставнику (с упоминанием), решение за ним
+                await message.channel.send(f"⚠️ <@{row['mentor_id']}>, обрати внимание: {flag}",
+                                           allowed_mentions=discord.AllowedMentions(users=True))
+        except discord.HTTPException:
+            pass
+
+    async def confirm_item(self, inter, mid, i):
+        """Кнопка из ответа ИИ-наставника: отметить пункт (только наставник/руководство), карточка обновится."""
+        row = self.bot.db.one("SELECT * FROM mentorships WHERE id=?", mid)
+        if not row or row["status"] != "active":
+            return await inter.response.send_message("Испытательный срок уже завершён.", ephemeral=True)
+        if not self.can_manage(inter.user, row):
+            return await inter.response.send_message("Подтверждает наставник или руководство.", ephemeral=True)
+        total = len(self.bot.checklist(inter.guild))
+        if i >= total:
+            return await inter.response.send_message("Чек-лист семьи поменяли — отметь в карточке.", ephemeral=True)
+        marks = json.loads(row["checklist"] or "[]")
+        marks += [False] * (total - len(marks))
+        marks[i] = True
+        self.bot.db.q("UPDATE mentorships SET checklist=? WHERE id=?", json.dumps(marks), mid)
+        await inter.response.send_message(f"✅ Пункт {i + 1} отмечен ({inter.user.display_name}).")
+        row = self.bot.db.one("SELECT * FROM mentorships WHERE id=?", mid)
+        try:  # живая карточка срока — в ветке новичка
+            th = await self.get_thread(inter.guild, row["thread_id"]) if row["thread_id"] else None
+            msg = await th.fetch_message(row["message_id"]) if th and row["message_id"] else None
+            if msg:
+                await msg.edit(embed=self.card(inter.guild, row), view=self.view(row))
+        except (discord.HTTPException, AttributeError):
             pass
 
     @commands.Cog.listener()
@@ -828,5 +942,5 @@ class Mentorship(commands.Cog):
 
 
 async def setup(bot):
-    bot.add_dynamic_items(MentorCheck, MentorStat, MentorDecision)
+    bot.add_dynamic_items(MentorCheck, MentorStat, MentorDecision, MentorSuggest)
     await bot.add_cog(Mentorship(bot))

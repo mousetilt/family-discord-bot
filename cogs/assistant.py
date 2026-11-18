@@ -31,7 +31,7 @@ INFO = "\u200b"   # пометка «это ответ-справка»: пок�
 ASK = {"law", "profile", "top", "inactive", "people", "warns", "bl_check", "market", "digest", "queue", "roll", "recruit_stats",
        "car_list",
        "web_search", "missed", "draft",
-       "treasury_balance", "treasury_debtors", "salary_rates", "fine_list", "forum_check", "law_doc", "brief"}
+       "treasury_balance", "treasury_debtors", "salary_rates", "fine_list", "forum_check", "law_doc", "brief", "insights"}
 # казна (cogs/treasury.py): запись — после «Выполнить», справки — сразу
 TREASURY_ACTS = {"treasury_in", "treasury_out", "treasury_due", "treasury_balance", "treasury_debtors", "dues_set",
                  "salary_rates", "salary_rate_set", "salary_ranks", "salary_role", "salary_pay",
@@ -78,7 +78,7 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "peopl
          "paid_claim": config.FAMILY_RANKS, "undo": USERS, "vacation": config.FAMILY_RANKS,
          "vacation_end": config.FAMILY_RANKS, "room": config.FAMILY_PLUS, "mentor_assign": config.MENTORS,
          "relation_set": config.DIPLO, "protocol": config.LEAD,
-         "law_doc": USERS, "brief": USERS, "case_add": config.LEAD + ["senior"],
+         "law_doc": USERS, "brief": USERS, "insights": USERS, "case_add": config.LEAD + ["senior"],
          "forum_check": config.FAMILY_RANKS}  # себя — любой из семьи; другого — руководство и старший состав (проверка внутри)
 LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив", "people": "👥 Кто в семье",
          "warns": "⚖️ Выговоры", "bl_check": "⛔ Проверка ЧС", "market": "🛒 Рынок", "queue": "🎶 Очередь",
@@ -105,7 +105,7 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "vacation": "🌴 Отпуск", "vacation_end": "👋 Из отпуска", "room": "🔊 Моя комната",
          "mentor_assign": "🧑‍🏫 Наставник", "relation_set": "🤝 Отношения с семьёй", "protocol": "📝 Протокол собрания",
          "forum_check": "🔎 Проверка по форуму", "law_doc": "📄 Черновик документа",
-         "brief": "🧠 Сквозной разбор", "case_add": "⚖️ Завести дело"}
+         "brief": "🧠 Сквозной разбор", "case_add": "⚖️ Завести дело", "insights": "📊 Разбор по цифрам"}
 
 # как каналы называют в разговоре (ключ канала из настроек → слова)
 CHANNEL_HINTS = {
@@ -1191,6 +1191,15 @@ class Assistant(commands.Cog):
         g, me, bot, db, t = message.guild, message.author, self.bot, self.bot.db, a["type"]
         if t == "forum_check":
             return await self.forum_check(message, g, me, a)
+        if t == "insights":
+            if not bot.feature(g, "reports:insights"):
+                return "Разбор по цифрам выключен в /настройки → Отчёты."
+            from core import insights
+            try:
+                days = int(a.get("days") or 7)
+            except (TypeError, ValueError):
+                days = 7
+            return await insights.narrate(bot, g, days, str(a.get("topic") or "all"))
         if t == "brief":
             if not bot.feature(g, "assistant:brief"):
                 return "Сквозной разбор выключен в /настройки → Швейцар."
