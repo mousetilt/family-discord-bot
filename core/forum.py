@@ -9,7 +9,7 @@ import time
 
 from bs4 import BeautifulSoup
 
-from .kb import LoginRequired, _clean_block, _get, _headers, new_session, stem
+from .kb import LoginRequired, _clean_block, _get, _headers, new_session, parse_thread, stem
 
 BASE = "https://forum.russia.online"
 PAUSE = 2.0  # секунд между запросами к форуму — анти-флуд XenForo режет частые обращения кодом 403
@@ -36,6 +36,7 @@ SECTIONS = {
     1486: ("Министерство юстиции / прокуратура", "прокуратура", "pending"),
     1487: ("Министерство юстиции / прокуратура · рассмотренные", "прокуратура", "reviewed"),
 }
+LAW_SECTIONS = {1471: "", 1474: "Указ: "}  # «Законодательная база» и указы → база юриста (раздел laws), приставка к названию
 STATUS = {"pending": "🟡 на рассмотрении", "reviewed": "🟢 рассмотрено", "rejected": "⚫ отклонено",
           "closed": "🔒 закрыто"}
 KIND_ICON = {"жалоба": "📝", "иск": "⚖️", "апелляция": "🔁", "прокуратура": "🏛"}
@@ -81,6 +82,8 @@ def parse_forum_list(html):
             "author": it.get("data-author") or "", "start_ts": _ts(start), "last_ts": _ts(latest) or _ts(start),
             "prefix": " ".join(x.get_text(" ", strip=True) for x in it.select(".structItem-title .label")),
             "locked": bool(it.select_one(".structItem-status--locked")),
+            "sticky": "structItem--sticky" in (it.get("class") or []) or "is-sticky" in (it.get("class") or [])
+            or bool(it.find_parent(class_="structItemContainer-group--sticky")),
         })
     return out
 
@@ -363,3 +366,12 @@ class ForumClient:
 
     async def thread(self, tid, latest=False):
         return parse_thread_page(await self.get(f"{BASE}/threads/{tid}/" + ("latest" if latest else "")))
+
+    async def document(self, tid, max_pages=10):
+        """Тема-документ (закон, указ, форма): все посты автора темы, до max_pages страниц → (название, текст)."""
+        base = f"{BASE}/threads/{tid}/"
+        title, author, posts, pages = parse_thread(await self.get(base))
+        for p in range(2, min(pages, max_pages) + 1):
+            _, _, more, _ = parse_thread(await self.get(f"{base}page-{p}"), author)
+            posts += more
+        return title, "\n\n".join(posts).strip()

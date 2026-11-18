@@ -293,7 +293,7 @@ MENTOR_CHECKLIST = [
 
 # ─────────────────────────────── БАЗА ЗНАНИЙ ───────────────────────────────
 KB_CATEGORIES = {"ooc": "📘 ООС-правила проекта", "laws": "⚖️ Законы сервера (IC)", "family": "🏛 Семья",
-                 "other": "📎 Прочее"}
+                 "practice": "🏛 Судебная практика", "forms": "📋 Формы документов", "other": "📎 Прочее"}
 PROJECT_RULE_URLS = [
     "https://forum.russia.online/threads/osnovnyye-pravila-proyekta.1/",
     "https://forum.russia.online/threads/pravila-dlya-liderov-fraktsii.2/",

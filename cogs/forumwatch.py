@@ -18,9 +18,11 @@ from discord.ext import commands, tasks
 
 from core import config
 from core.family import set_module
-from core.forum import (BASE, HEAD_TITLES, KIND_ICON, ROLE_RANK, SECTIONS, STATUS, ForumClient, LoginError, analyze,
-                        case_number, find_person, norm, status_from, surname_rx, surname_stem, thread_url, titles_rx)
+from core.forum import (BASE, HEAD_TITLES, KIND_ICON, LAW_SECTIONS, ROLE_RANK, SECTIONS, STATUS, ForumClient,
+                        LoginError, analyze, case_number, find_person, norm, status_from, surname_rx, surname_stem,
+                        thread_id, thread_url, titles_rx)
 from core.kb import FetchBlocked, LoginRequired
+from core.legal import SECTION_TEMPLATE, diff_line
 
 log = logging.getLogger("family-bot.forumwatch")
 MANAGERS = ["leader", "deputy"]
@@ -34,7 +36,8 @@ ROLE_RU = {"defendant": "ответчик / обвиняемый", "plaintiff": 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS forum_threads(
     guild_id INTEGER NOT NULL, thread_id INTEGER NOT NULL, forum_id INTEGER, title TEXT, author TEXT,
-    last_ts INTEGER DEFAULT 0, seen_ts INTEGER DEFAULT 0, PRIMARY KEY(guild_id, thread_id));
+    last_ts INTEGER DEFAULT 0, seen_ts INTEGER DEFAULT 0, harvested INTEGER DEFAULT 0,
+    PRIMARY KEY(guild_id, thread_id));
 CREATE TABLE IF NOT EXISTS forum_cases(
     id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, thread_id INTEGER NOT NULL, forum_id INTEGER,
     title TEXT, url TEXT, kind TEXT, role TEXT, defendant TEXT, member_id INTEGER, head INTEGER DEFAULT 0,
@@ -136,6 +139,11 @@ class ForumWatch(commands.Cog):
         self.bot = bot
         bot.db.c.executescript(SCHEMA)
         bot.db.c.commit()
+        try:  # практика для юриста: тема уже взята в базу (столбец добавлен после первого выпуска)
+            bot.db.c.execute("ALTER TABLE forum_threads ADD COLUMN harvested INTEGER DEFAULT 0")
+            bot.db.c.commit()
+        except Exception:  # noqa: BLE001 — уже есть
+            pass
         self.clients = {}           # guild_id -> (логин, пароль, ForumClient)
         self.net_lock = asyncio.Lock()  # к форуму ходим строго по очереди, даже если семей с аккаунтом несколько
         self.backoff = {}           # guild_id -> до какого времени не ходить (анти-флуд)
@@ -381,15 +389,25 @@ class ForumWatch(commands.Cog):
         err = None
         async with self.net_lock:
             try:
-                changes = []
+                changes, sticky, hidden = [], {}, []
                 for fid in SECTIONS:
                     for page in range(1, 3 if first else 2):
-                        items = await client.forum_page(fid, page)
+                        try:
+                            items = await client.forum_page(fid, page)
+                        except LoginRequired:
+                            hidden.append(fid)  # этот раздел аккаунту не виден — остальные смотрим
+                            break
                         st["lists"] += 1
+                        sticky.setdefault(fid, []).extend(it for it in items if it.get("sticky"))
                         for it in items:
-                            changes += self.remember(g, fid, it, now - FIRST_DAYS * 86400)
+                            if not it.get("sticky"):
+                                changes += self.remember(g, fid, it, now - FIRST_DAYS * 86400)
                         if len(items) < 10:
                             break
+                if len(hidden) == len(SECTIONS):
+                    raise LoginRequired("ни один раздел не виден")
+                if hidden:
+                    err = "аккаунту не видны разделы: " + ", ".join(SECTIONS[f][0] for f in hidden[:5])
                 for case_id, status, fid in changes:
                     db.q("UPDATE forum_cases SET status=?, forum_id=?, updated_ts=? WHERE id=?", status, fid, now,
                          case_id)
@@ -397,7 +415,8 @@ class ForumWatch(commands.Cog):
                                                          f"({SECTIONS.get(fid, ('раздел форума',))[0]})")
                 todo = [("thread", r) for r in db.all(
                     "SELECT t.* FROM forum_threads t LEFT JOIN forum_cases c ON c.guild_id=t.guild_id AND "
-                    "c.thread_id=t.thread_id WHERE t.guild_id=? AND t.last_ts>t.seen_ts "
+                    "c.thread_id=t.thread_id WHERE t.guild_id=? AND t.last_ts>t.seen_ts AND t.forum_id NOT IN "
+                    f"({','.join(str(f) for f in LAW_SECTIONS)}) "
                     "ORDER BY (c.id IS NOT NULL) DESC, t.last_ts DESC LIMIT ?", g.id, MAX_READS)]
                 seen = {r["thread_id"] for _, r in todo}
                 for c in db.all("SELECT * FROM forum_cases WHERE guild_id=? AND status='pending' AND checked_ts<? "
@@ -417,6 +436,8 @@ class ForumWatch(commands.Cog):
                         log.warning("forumwatch: тема %s не разобрана", r["thread_id"], exc_info=True)
                         db.q("UPDATE forum_threads SET seen_ts=last_ts WHERE guild_id=? AND thread_id=?", g.id,
                              r["thread_id"])
+                if self.bot.feature(g, "lawyer"):
+                    await self.harvest(g, client, sticky, st)
             except LoginError as e:
                 err = f"не вхожу на форум: {e}"
                 db.gset(g, "forum:auth_fail", str(e)[:200])
@@ -431,8 +452,184 @@ class ForumWatch(commands.Cog):
         db.gset(g, "forum:last_err", err or "")
         await self.post_missing_cards(g)
         res = (f"Просмотрено разделов: {st['lists']}, тем прочитано: {st['read']}, новых дел: {st['new']}, "
-               f"обновлений: {st['upd']}.")
+               f"обновлений: {st['upd']}." + (f" Для юриста: {st['kb']}." if st.get("kb") else ""))
         return res + (f"\n⚠️ {err}" if err else "")
+
+    # ---------- для юриста: судебная практика, формы документов, законы ----------
+    def kb_doc_by_thread(self, g, tid):
+        for r in self.bot.db.all("SELECT id, guild_id, url, title, content FROM kb_docs WHERE guild_id IN (0, ?) "
+                                 "AND url LIKE ?", g.id, f"%{tid}/%"):
+            if thread_id(r["url"]) == tid:
+                return r
+        return None
+
+    def kb_put(self, g, tid, title, category, content):
+        """Тема форума → база юриста. Документ уже есть (свой или общий) — обновляем на месте.
+        → старый текст (None — документа не было)."""
+        old = self.kb_doc_by_thread(g, tid)
+        if old:
+            if (old["content"] or "") != content:
+                self.bot.db.q("UPDATE kb_docs SET title=?, category=?, content=?, updated_at=? WHERE id=?", title[:200],
+                              category, content, discord.utils.utcnow().isoformat(), old["id"])
+                self.bot.kb.invalidate()
+            return old["content"] or ""
+        self.bot.kb.add(g.id, title[:200], thread_url(tid), category, content, 0)
+        return None
+
+    @staticmethod
+    def practice_text(sec, status, url, posts):
+        first = posts[0]
+        ans = [p for p in posts[1:] if p["author"] != first["author"] and p["text"]]
+        out = (f"Раздел: {sec}. Итог: {STATUS.get(status, status)}. Тема: {url}\n"
+               f"Заявление ({first['author'] or 'заявитель'}):\n{first['text'][:2500]}")
+        if ans:
+            out += f"\n\nРешение / ответ ({ans[-1]['author'] or 'ответ'}):\n{ans[-1]['text'][:2500]}"
+        return out
+
+    async def harvest(self, g, client, sticky, st):
+        db, now = self.bot.db, int(time.time())
+        got = {"practice": 0, "forms": 0, "laws": 0}
+        # 1) судебная практика: рассмотренные/отклонённые темы — по 3 за цикл, каждую один раз
+        closed = [f for f, s in SECTIONS.items() if s[2] != "pending"]
+        for r in db.all(f"SELECT * FROM forum_threads WHERE guild_id=? AND harvested=0 AND forum_id IN "
+                        f"({','.join('?' * len(closed))}) ORDER BY last_ts DESC LIMIT 3", g.id, *closed):
+            db.q("UPDATE forum_threads SET harvested=1 WHERE guild_id=? AND thread_id=?", g.id, r["thread_id"])
+            try:
+                meta, posts = await client.thread(r["thread_id"])
+                if meta["pages"] > 1:
+                    posts = posts[:1] + (await client.thread(r["thread_id"], latest=True))[1]
+            except (LoginError, FetchBlocked):
+                raise
+            except Exception:  # noqa: BLE001
+                continue
+            if posts and posts[0]["text"]:
+                fid = meta["forum_id"] or r["forum_id"]
+                self.kb_put(g, r["thread_id"], f"Практика: {meta['title'] or r['title']}", "practice",
+                            self.practice_text(SECTIONS.get(fid, ("",))[0], status_from(fid, meta["prefix"],
+                                               meta["locked"]), thread_url(r["thread_id"]), posts))
+                got["practice"] += 1
+        # дела семьи с решением — тоже практика (без сети)
+        for c in db.all("SELECT * FROM forum_cases WHERE guild_id=? AND status<>'pending' AND decision<>''", g.id):
+            body = (f"Раздел: {SECTIONS.get(c['forum_id'], ('',))[0]}. Итог: {STATUS.get(c['status'])}. "
+                    f"Тема: {c['url']}\nДело против: {c['defendant']}. Подал: {c['applicant']}. Суть: {c['summary']}\n"
+                    f"Заявление:\n{(c['body'] or '')[:2000]}\n\nРешение / ответ:\n{c['decision']}")
+            self.kb_put(g, c["thread_id"], f"Практика: {c['title']}", "practice", body)
+        # 2) формы документов: закреплённые темы судов/прокуратуры — раз в неделю
+        if now - int(db.gget(g, "forum:forms_ts") or 0) > 7 * 86400:
+            for fid in SECTION_TEMPLATE:
+                for it in sticky.get(fid, [])[:3]:
+                    if not re.search(r"форм|образ|шаблон|подач|порядок|правила", it["title"], re.I):
+                        continue
+                    try:
+                        title, content = await client.document(it["id"], max_pages=1)
+                    except (LoginError, FetchBlocked):
+                        raise
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if len(content) > 40:
+                        self.kb_put(g, it["id"], f"Форма: {SECTIONS[fid][0]} — {title}", "forms", content)
+                        got["forms"] += 1
+            db.gset(g, "forum:forms_ts", now)
+        # 3) законы (1471) и указы (1474): список — раз в 3 дня, новые/изменённые темы — до 8 за цикл
+        if now - int(db.gget(g, "forum:laws_ts") or 0) > 3 * 86400:
+            for fid in LAW_SECTIONS:
+                for page in (1, 2):
+                    try:
+                        items = await client.forum_page(fid, page)
+                    except LoginRequired:
+                        break
+                    for it in items:
+                        self.remember(g, fid, it, 0)
+                    if len(items) < 10:
+                        break
+            db.gset(g, "forum:laws_ts", now)
+        init = not db.gget(g, "forum:laws_init")  # первая загрузка — без отчёта «что изменилось»
+        changed, added = [], []
+        rows = db.all(f"SELECT * FROM forum_threads WHERE guild_id=? AND forum_id IN "
+                      f"({','.join(str(f) for f in LAW_SECTIONS)}) AND last_ts>seen_ts ORDER BY last_ts DESC LIMIT 8",
+                      g.id)
+        for r in rows:
+            db.q("UPDATE forum_threads SET seen_ts=last_ts WHERE guild_id=? AND thread_id=?", g.id, r["thread_id"])
+            try:
+                title, content = await client.document(r["thread_id"])
+            except (LoginError, FetchBlocked):
+                raise
+            except Exception:  # noqa: BLE001
+                continue
+            if len(content) < 50:
+                continue
+            prefix = LAW_SECTIONS.get(r["forum_id"], "")
+            title = title if title.startswith(prefix) else prefix + title
+            old = self.kb_put(g, r["thread_id"], title, "laws", content[:300000])
+            got["laws"] += 1
+            if old is None:
+                added.append(title)
+            elif old != content[:300000]:
+                changed.append(diff_line(title, old, content))
+        if init and not db.one(f"SELECT 1 FROM forum_threads WHERE guild_id=? AND forum_id IN "
+                               f"({','.join(str(f) for f in LAW_SECTIONS)}) AND last_ts>seen_ts LIMIT 1", g.id) \
+                and db.gget(g, "forum:laws_ts"):
+            db.gset(g, "forum:laws_init", "1")
+        elif not init and (changed or added):
+            text = "📜 **Обновилась законодательная база** (юрист уже знает):\n" + "\n".join(
+                [f"• {x}" for x in changed] + [f"• новый документ: «{x}»" for x in added])
+            for key in ("botcmd", "lawyer"):
+                ch = self.bot.ch(g, key)
+                if ch:
+                    try:
+                        await ch.send(text[:1900])
+                    except discord.HTTPException:
+                        pass
+        parts = [f"{k} +{v}" for k, v in (("практика", got["practice"]), ("формы", got["forms"]),
+                                          ("законы", got["laws"])) if v]
+        if parts:
+            st["kb"] = ", ".join(parts)
+
+    def cases_context(self, g, question):
+        """Дела против семьи для юриста. → (текст для ИИ, просят ли защиту по конкретному делу)."""
+        db = self.bot.db
+        rows = db.all("SELECT * FROM forum_cases WHERE guild_id=? AND role='defendant' ORDER BY (status='pending') "
+                      "DESC, updated_ts DESC LIMIT 12", g.id)
+        if not rows:
+            return "", False
+        q = norm(question)
+        target = None
+        for c in rows:
+            if c["case_no"] and re.search(rf"(?<!\d){re.escape(c['case_no'])}(?!\d)", q):
+                target = c
+                break
+        if target is None:
+            p = find_person(self.people(g), q)
+            if p:
+                mine = [c for c in rows if (p["user_id"] and c["member_id"] == p["user_id"]) or
+                        norm(p["name"]).lower() in norm(c["defendant"]).lower() or (p["head"] and c["head"])]
+                target = mine[0] if mine else None
+        if target is None and re.search(r"глав|премьер|лидер\w* правительств", q, re.I):
+            target = next((c for c in rows if c["head"]), None)
+        active = [c for c in rows if c["status"] == "pending"] + [c for c in rows if c["status"] != "pending"][:3]
+        lines = [f"• «{c['title']}» — против {c['defendant']}, подал {c['applicant'] or '?'}, "
+                 f"{STATUS.get(c['status'], c['status'])}, {c['url']}" for c in active]
+        text = "ДЕЛА ПРОТИВ СЕМЬИ НА ФОРУМЕ (знай о них; упоминай, только если вопрос о них):\n" + "\n".join(lines)
+        if target:
+            text += (f"\n\nПОДРОБНО ПО ДЕЛУ «{target['title']}» ({target['url']}):\nПротив: {target['defendant']}\n"
+                     f"Подал: {target['applicant']}\nСуть: {target['summary']}\n"
+                     f"Статус: {STATUS.get(target['status'], target['status'])}\n"
+                     f"Текст заявления:\n{(target['body'] or '— не загружен')[:2500]}\n"
+                     f"Последний ответ / решение:\n{(target['decision'] or '—')[:1200]}")
+        wants = bool(target) and bool(re.search(r"дел|защит|что делать|иск|жалоб|суд|прокурат|позици|ответ",
+                                                q, re.I))
+        return text, wants
+
+    async def fetch_doc(self, g, url):
+        """Закрытая тема форума аккаунтом семьи (для /база). → (название, текст, ссылка) или None (нет аккаунта)."""
+        creds, tid = self.creds(g), thread_id(url)
+        if not creds or not tid:
+            return None
+        async with self.net_lock:
+            title, content = await self.client(g, creds).document(tid)
+        if len(content) < 50:
+            raise ValueError("В теме почти нет текста.")
+        return title, content, thread_url(tid)
 
     def remember(self, g, fid, it, cutoff):
         """Кэш темы из списка раздела. → [(case_id, новый статус, раздел)] для дел, у которых статус поменялся."""

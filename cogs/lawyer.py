@@ -12,7 +12,9 @@ from discord.ext import commands
 
 from core import config
 from core.ai import AIUnavailable
-from core.kb import FetchBlocked, fetch_url, new_session, read_file
+from core.kb import FetchBlocked, LoginRequired, fetch_url, new_session, read_file
+from core.forum import SECTIONS
+from core.legal import SECTION_TEMPLATE, TEMPLATES, pick_template, verify
 
 log = logging.getLogger("family-bot.lawyer")
 KB_STAFF = config.LEAD + ["hr_head"]
@@ -25,8 +27,16 @@ BASE_PROMPT = (
     "2) IC-законы сервера (Конституция, кодексы) — внутриигровое законодательство для отыгрыша (штрафы, сроки, суд).\n"
     "Всегда указывай источник: название документа и номер пункта/статьи, коротко цитируй ключевую фразу. "
     "Если ответа в документах нет — прямо скажи, что в базе этого нет, и посоветуй добавить документ. "
-    "Никогда не выдумывай номера статей и наказания."
+    "Никогда не выдумывай номера статей и наказания — каждую ссылку бот сверит с базой и пометит выдуманную. "
+    "Если среди документов есть «Практика: …» (решения судов и ответы прокуратуры) — опирайся на них как на "
+    "прецеденты: «в деле №… суд решил…», со ссылкой на тему."
 )
+CLARIFY = (
+    "Тебе описали ситуацию для юридического разбора на RP-проекте. Хватает ли фактов, чтобы дать конкретный разбор: "
+    "что именно произошло, когда (дата/время), кто участники (ники, должности), есть ли доказательства (видео, "
+    "скриншоты, свидетели), о каком документе/суде речь? Если не хватает ВАЖНОГО — задай 1–3 коротких вопроса "
+    "(по-русски, каждый до 100 знаков). Если фактов достаточно или это общий вопрос о законе — enough=true.\n"
+    "Верни JSON: {\"enough\": true|false, \"questions\": [\"...\"]}")
 MODES = {
     "q": ("Вопрос", "Ответь на вопрос, до 10 предложений, с номерами пунктов."),
     "case": ("Разбор ситуации",
@@ -37,8 +47,18 @@ MODES = {
             "Составь документ по ситуации пользователя (исковое заявление, жалоба, заявление или ходатайство — выбери "
             "подходящее). Структура: шапка (кому / от кого — оставь [поля] для заполнения), суть обращения, ссылки на "
             "нормы с номерами, требования, перечень доказательств, дата и подпись. Официально-деловой стиль. Не "
-            "выдумывай факты — где данных нет, пиши [заполнить]."),
+            "выдумывай факты — где данных нет, пиши [заполнить]. Если ниже дан ОБРАЗЕЦ ФОРМЫ или ШАБЛОН — строго "
+            "соблюдай его структуру и порядок полей, все поля [заполнить] сохрани."),
+    "defense": ("Защита по делу",
+                "Член семьи — ответчик/обвиняемый по делу, оно описано ниже в «ПОДРОБНО ПО ДЕЛУ». Подготовь защиту:\n"
+                "🛡 **Позиция** — линия защиты, слабые места обвинения\n📌 **Нормы** — что применимо (с цитатами)\n"
+                "🏛 **Практика** — похожие решения из базы, если есть\n🧾 **Доказательства** — что собрать (видео с "
+                "таймкодами, скриншоты, свидетели, логи)\n⏰ **Сроки** — что и когда подать (отзыв, ходатайства, "
+                "апелляция); если сроков нет в документах — так и скажи, не выдумывай\n✍️ **Следующий шаг** — "
+                "одно конкретное действие сегодня."),
 }
+ASK_MODES = ("case", "doc", "defense")  # тут сначала проверяем, хватает ли фактов
+DOC_CHOICES = [app_commands.Choice(name=v[0], value=k) for k, v in TEMPLATES.items()]
 
 
 def quote(text, n=700):
@@ -60,12 +80,71 @@ class TextDocModal(discord.ui.Modal, title="Добавить текст в ба�
         await inter.response.send_message(f"✅ Документ №{doc_id} «{self.name.value}» добавлен.", ephemeral=True)
 
 
+class ClarifyModal(discord.ui.Modal, title="Уточнения для юриста"):
+    def __init__(self, view):
+        super().__init__()
+        self.v = view
+        self.fields = []
+        for i, q in enumerate(view.questions[:3], 1):
+            f = discord.ui.TextInput(label=f"{i}. {q}"[:45], placeholder=q[:100], style=discord.TextStyle.paragraph,
+                                     required=False, max_length=600)
+            self.add_item(f)
+            self.fields.append((q, f))
+
+    async def on_submit(self, inter: discord.Interaction):
+        await self.v.run(inter, "\n".join(f"— {q} {f.value.strip()}" for q, f in self.fields if f.value.strip()))
+
+
+class ClarifyView(discord.ui.View):
+    def __init__(self, cog, author_id, gid, question, mode, template, questions):
+        super().__init__(timeout=1800)
+        self.cog, self.author_id, self.gid = cog, author_id, gid
+        self.question, self.mode, self.template, self.questions = question, mode, template, questions
+
+    async def interaction_check(self, inter: discord.Interaction):
+        if inter.user.id != self.author_id:
+            await inter.response.send_message("Это не твой вопрос юристу.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Ответить на вопросы", emoji="✍️", style=discord.ButtonStyle.primary)
+    async def reply(self, inter: discord.Interaction, button: discord.ui.Button):
+        await inter.response.send_modal(ClarifyModal(self))
+
+    @discord.ui.button(label="Разобрать как есть", emoji="▶️", style=discord.ButtonStyle.secondary)
+    async def as_is(self, inter: discord.Interaction, button: discord.ui.Button):
+        await self.run(inter, "")
+
+    async def run(self, inter, extra):
+        self.stop()
+        await inter.response.defer(thinking=True)
+        try:
+            await inter.message.edit(view=None)
+        except (discord.HTTPException, AttributeError):
+            pass
+        q = self.question + (f"\n\nУточнения:\n{extra}" if extra else "\n\nУточнения: нет, разбирай как есть")
+        res = await self.cog.safe_full(self.gid, q, self.mode, member=inter.user, template=self.template)
+        await self.cog.send_answer(inter.followup.send, self.question, res["text"], res["sources"], res["mode"],
+                                   inter.guild)
+
+
 class Lawyer(commands.Cog):
     kb = app_commands.Group(name="база", description="База знаний юриста: правила проекта, законы сервера", default_permissions=discord.Permissions(manage_messages=True))
 
     def __init__(self, bot):
         self.bot = bot
         self.cool = {}
+
+    async def fetch(self, guild, url, session=None):
+        """Документ по ссылке: как гость, а закрытую тему форума — аккаунтом семьи (/форум аккаунт), если он есть."""
+        try:
+            return await fetch_url(url, session=session)
+        except LoginRequired:
+            fw = self.bot.get_cog("ForumWatch")
+            got = await fw.fetch_doc(guild, url) if fw else None
+            if not got:
+                raise
+            return got
 
     def cooldown_left(self, uid, sec=15):
         last = self.cool.get(uid, 0)
@@ -76,21 +155,96 @@ class Lawyer(commands.Cog):
         return 0
 
     async def answer(self, gid, question, mode="q"):
-        """→ (текст, источники, использован_ли_ИИ). gid — сервер семьи (её база знаний)."""
+        """→ (текст, источники, использован_ли_ИИ). gid — сервер семьи (её база знаний). Для других модулей."""
+        res = await self.answer_full(gid, question, mode)
+        return res["text"], res["sources"], res["ai"]
+
+    def template_text(self, gid, question, key=None):
+        """Образец документа: реальная форма из закреплённой темы форума (раздел «forms»), иначе встроенный шаблон."""
+        key = key if key in TEMPLATES else pick_template(question)
+        if not key:
+            return ("ТИПЫ ДОКУМЕНТОВ: " + ", ".join(v[0] for v in TEMPLATES.values()) +
+                    ". Выбери подходящий и соблюдай его обычную структуру.")
+        name, body = TEMPLATES[key]
+        sec = next((SECTIONS[f][0] for f, k in SECTION_TEMPLATE.items() if k == key), None)
+        forms = [d for d in self.bot.kb.docs(gid, ["forms"]) if sec and sec.lower() in d["title"].lower()]
+        if forms:
+            return (f"ОБРАЗЕЦ ФОРМЫ С ФОРУМА ({forms[0]['title']}) — это официальный формат, соблюдай его:\n"
+                    f"{forms[0]['content'][:3000]}")
+        return f"ШАБЛОН «{name}» (структура форума; поля [..] сохрани, где нет данных):\n{body}"
+
+    async def clarify(self, ai, question):
+        """1–3 уточняющих вопроса, если для разбора не хватает фактов (иначе [])."""
+        if "Уточнения:" in question or len(question) > 1500:
+            return []
+        try:
+            data = await ai.ask_json(CLARIFY, question[:1500], max_tokens=250, light=True)
+        except Exception as e:  # noqa: BLE001 — лимит/сеть: разбираем как есть
+            log.info("Юрист: уточнения не получились (%s)", type(e).__name__)
+            return []
+        if not isinstance(data, dict) or data.get("enough", True) is not False:
+            return []
+        return [str(q).strip()[:100] for q in (data.get("questions") or []) if str(q).strip()][:3]
+
+    async def answer_full(self, gid, question, mode="q", member=None, template=None, clarify=False):
+        """→ {text, sources, ai, mode, questions}. questions — не хватает фактов (тогда text пуст, спроси человека).
+        member из семьи — юрист знает о делах против семьи (forumwatch); просят защиту по делу — режим defense."""
         bot = self.bot
         ai = bot.ai_for(gid)
+        res = {"text": "", "sources": [], "ai": False, "mode": mode, "questions": []}
         if not ai.on:
             hits = bot.kb.search(gid, question, k=3)
             if not hits:
-                return ("В базе знаний ничего не нашлось по этому вопросу. Руководство может добавить документы: "
-                        "`/база правила-проекта`, `/база ссылка`."), [], False
-            text = "🔎 Нашёл в правилах и законах (ИИ не подключён — показываю самые подходящие пункты):\n\n" + \
-                   "\n\n".join(f"📄 **{h['title']}**\n{quote(h['text'])}" for h in hits)
-            return text, [(h["title"], h["url"]) for h in hits], False
+                res["text"] = ("В базе знаний ничего не нашлось по этому вопросу. Руководство может добавить документы: "
+                               "`/база правила-проекта`, `/база ссылка`.")
+                return res
+            res["text"] = "🔎 Нашёл в правилах и законах (ИИ не подключён — показываю самые подходящие пункты):\n\n" + \
+                "\n\n".join(f"📄 **{h['title']}**\n{quote(h['text'])}" for h in hits)
+            res["sources"] = [(h["title"], h["url"]) for h in hits]
+            return res
+        fam, defense = "", False
+        fw, guild = bot.get_cog("ForumWatch"), bot.get_guild(gid)
+        if fw and guild and member is not None and bot.in_family(member) and bot.feature(guild, "forum"):
+            try:
+                fam, defense = fw.cases_context(guild, question)
+            except Exception:  # noqa: BLE001 — без контекста дел юрист всё равно ответит
+                log.exception("Юрист: контекст дел")
+        if defense and mode in ("q", "case"):
+            mode = "defense"
+        res["mode"] = mode
+        if clarify and mode in ASK_MODES:
+            res["questions"] = await self.clarify(ai, question)
+            if res["questions"]:
+                return res
+        tmpl = self.template_text(gid, question, template) if mode == "doc" else ""
         context, sources, _ = await bot.kb.context_smart(gid, question, ai)  # смысл + слова; без Gemini — по словам
-        system = f"{bot.brand(gid, BASE_PROMPT)}\n\nЗАДАЧА: {MODES[mode][1]}\n\nДОКУМЕНТЫ:\n{context}"
-        reply = await ai.ask(system, question, max_tokens=1600 if mode == "doc" else 900, smart=True, cache=True)
-        return reply or "ИИ не дал ответа, попробуй переформулировать.", sources, True
+        system = (f"{bot.brand(gid, BASE_PROMPT)}\n\nЗАДАЧА: {MODES[mode][1]}" + (f"\n\n{fam}" if fam else "") +
+                  (f"\n\n{tmpl}" if tmpl else "") + f"\n\nДОКУМЕНТЫ:\n{context}")
+        reply = await ai.ask(system, question, max_tokens=1600 if mode in ("doc", "defense") else 900, smart=True,
+                             cache=True)
+        text, missing = verify(reply or "ИИ не дал ответа, попробуй переформулировать.", bot.kb.docs(gid))
+        if missing:  # самопроверка: ссылок, которых нет в базе, ИИ мог выдумать
+            text += ("\n\n⚠️ Не нашёл в базе: " + ", ".join(missing[:6]) +
+                     " — эти ссылки могут быть неточными, сверь с первоисточником.")
+        res.update(text=text, sources=sources, ai=True)
+        return res
+
+    async def safe_full(self, gid, question, mode="q", **kw):
+        try:
+            return await self.answer_full(gid, question, mode, **kw)
+        except AIUnavailable as e:
+            return {"text": f"⚠️ {e}", "sources": [], "ai": False, "mode": mode, "questions": []}
+        except Exception as e:  # noqa: BLE001
+            log.exception("Юрист")
+            return {"text": f"❌ Ошибка: {e}", "sources": [], "ai": False, "mode": mode, "questions": []}
+
+    async def ask_back(self, send, question, res, author_id, gid, template=None):
+        """Не хватает фактов — вопросы и кнопки «ответить» / «разобрать как есть»."""
+        e = self.bot.embed(f"⚖️ {MODES[res['mode']][0]}: нужно пару уточнений",
+                           "Чтобы разбор был по делу, ответь:\n" + "\n".join(f"**{i}.** {q}" for i, q in
+                                                                          enumerate(res["questions"], 1)),
+                           config.COLOR, self.bot.get_guild(gid))
+        await send(embed=e, view=ClarifyView(self, author_id, gid, question, res["mode"], template, res["questions"]))
 
     async def send_answer(self, send, question, text, sources, mode, guild):
         title = f"⚖️ {MODES[mode][0]}: {question[:200]}"
@@ -111,22 +265,21 @@ class Lawyer(commands.Cog):
     # ---------- команды для всех ----------
     @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="юрист", description="ИИ-юрист: вопрос, разбор ситуации или составление документа")
-    @app_commands.rename(question="вопрос_или_ситуация", mode="режим")
-    @app_commands.choices(mode=[app_commands.Choice(name=v[0], value=k) for k, v in MODES.items()])
-    async def lawyer_cmd(self, inter: discord.Interaction, question: str, mode: app_commands.Choice[str] = None):
-        mode = mode.value if mode else "q"
+    @app_commands.rename(question="вопрос_или_ситуация", mode="режим", doc="документ")
+    @app_commands.describe(doc="Какой документ составить (по формату форума): иск, апелляция, обращение…")
+    @app_commands.choices(mode=[app_commands.Choice(name=v[0], value=k) for k, v in MODES.items()], doc=DOC_CHOICES)
+    async def lawyer_cmd(self, inter: discord.Interaction, question: str, mode: app_commands.Choice[str] = None,
+                         doc: app_commands.Choice[str] = None):
+        mode = "doc" if doc else (mode.value if mode else "q")
+        template = doc.value if doc else None
         left = self.cooldown_left(inter.user.id)
         if left:
             return await inter.response.send_message(f"⏳ Подожди {left} сек.", ephemeral=True)
         await inter.response.defer(thinking=True)
-        try:
-            text, sources, _ = await self.answer(inter.guild.id, question, mode)
-        except AIUnavailable as e:
-            text, sources = f"⚠️ {e}", []
-        except Exception as e:
-            log.exception("Юрист")
-            text, sources = f"❌ Ошибка: {e}", []
-        await self.send_answer(inter.followup.send, question, text, sources, mode, inter.guild)
+        res = await self.safe_full(inter.guild.id, question, mode, member=inter.user, template=template, clarify=True)
+        if res["questions"]:
+            return await self.ask_back(inter.followup.send, question, res, inter.user.id, inter.guild.id, template)
+        await self.send_answer(inter.followup.send, question, res["text"], res["sources"], res["mode"], inter.guild)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -150,18 +303,15 @@ class Lawyer(commands.Cog):
         left = self.cooldown_left(message.author.id)
         if left:
             return await message.reply(f"⏳ Подожди {left} сек.", delete_after=8, mention_author=False)
-        async with message.channel.typing():
-            try:
-                text, sources, _ = await self.answer(message.guild.id, question, "q")
-            except AIUnavailable as e:
-                text, sources = f"⚠️ {e}", []
-            except Exception as e:
-                log.exception("Юрист (канал)")
-                text, sources = f"❌ Ошибка: {e}", []
+        mode = "case" if len(question) >= 150 else "q"  # длинное сообщение — это описание ситуации
 
         async def send(**kw):
             await message.reply(mention_author=False, **kw)
-        await self.send_answer(send, question, text, sources, "q", message.guild)
+        async with message.channel.typing():
+            res = await self.safe_full(message.guild.id, question, mode, member=message.author, clarify=True)
+        if res["questions"]:
+            return await self.ask_back(send, question, res, message.author.id, message.guild.id)
+        await self.send_answer(send, question, res["text"], res["sources"], res["mode"], message.guild)
 
     # ---------- база знаний ----------
     @kb.command(name="найти", description="Найти пункт в правилах и законах (работает без ИИ)")
@@ -205,7 +355,7 @@ class Lawyer(commands.Cog):
             return await inter.response.send_message("⛔ Недостаточно прав.", ephemeral=True)
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
-            t, content, url2 = await fetch_url(url)
+            t, content, url2 = await self.fetch(inter.guild, url)
         except Exception as e:
             return await inter.followup.send(f"❌ Не получилось скачать: {e}\nМожно добавить текстом: `/база текст` "
                                              "или файлом: `/база файл`.", ephemeral=True)
@@ -278,8 +428,11 @@ class Lawyer(commands.Cog):
                 if i > 1:
                     await asyncio.sleep(2)  # вежливо, чтобы форум не включал анти-флуд
                 try:
-                    t, content, url2 = await fetch_url(r["url"], session=s)
-                    self.bot.kb.add(r["guild_id"], r["title"], url2, r["category"], content, inter.user.id)
+                    t, content, url2 = await self.fetch(inter.guild, r["url"], session=s)
+                    # на месте, по номеру: ссылка закрытой темы приходит в коротком виде — по ней был бы дубль
+                    self.bot.db.q("UPDATE kb_docs SET content=?, updated_at=? WHERE id=?", content,
+                                  discord.utils.utcnow().isoformat(), r["id"])
+                    self.bot.kb.invalidate()
                     ok += 1
                 except FetchBlocked:
                     later.append(f"⏳ №{r['id']} {r['title'][:60]} — временно недоступен, попробуй позже")

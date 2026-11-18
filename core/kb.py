@@ -166,7 +166,10 @@ class KnowledgeBase:
         return self._chunks[gid]
 
     def search(self, gid, query, k=10, cats=None):
+        from .legal import asked_refs, exists, expand_query, title_fits
         chunks, df, avg = self._chunks.get(gid) or self._build(gid)
+        refs = asked_refs(query)  # «ст. 12.3 УК» — кусок с этой статьёй должен быть первым
+        query = expand_query(query)  # «УК», «ДМ», «ВС» → слова, которые есть в документах
         q = tokens(query)
         if not q or not chunks:
             return []
@@ -186,6 +189,9 @@ class KnowledgeBase:
             for n in nums:
                 if re.search(rf"(?<![\d.]){re.escape(n)}(?![\d])", ch["text"]):
                     s += 3
+            for r in refs:
+                if title_fits(r["code"], ch["title"]) and exists({**r, "code": ""}, [{"content": ch["text"]}]):
+                    s += 12
             if s > 0:
                 scored.append((s, ch))
         scored.sort(key=lambda x: x[0], reverse=True)
