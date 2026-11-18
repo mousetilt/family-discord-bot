@@ -196,18 +196,81 @@ class PersonCheck(unittest.TestCase):
         self.assertIn("Чисто у всех", r)
         r = self.fw.family_report(self.g, "reviewed")
         self.assertIn("Жалоба на ДМ", r)
-        self.assertIn("🟢 рассмотрено", r)
+        self.assertNotIn("на рассмотрении", r)
 
     def test_family_grouped(self):
         r = self.fw.family_report(self.g, "all")
         self.assertIn("**Ваня**", r)  # иск привязан к Ване (анкета: Vanya Ulyanov, 64524)
         self.assertIn("Иск №58", r)
         self.assertIn("**Петя Петров [55555]**", r)  # свидетель в жалобе
-        self.assertIn("🟡 на рассмотрении", r)
-        self.assertIn("🟢 рассмотрено", r)
+        self.assertIn("⚪ 📝", r)  # на рассмотрении — серый кружок, итога ещё нет
+        self.assertIn("на рассмотрении", r)
         self.assertNotIn("Чисто", r)
         self.db.gdel(5, "forum:last")
         self.assertNotIn("Чисто", self.fw.family_report(self.g, "open"))  # ни разу не проверяли — «чисто» не говорим
+
+
+class Verdict(unittest.TestCase):
+    def test_guess(self):
+        from cogs.forumwatch import guess_verdict as gv
+        self.assertEqual(gv("Жалоба отклонена, нарушений нет.", "reviewed", "defendant", "жалоба"),
+                         ("жалоба отклонена", "good"))
+        self.assertEqual(gv("В удовлетворении иска отказано", "reviewed", "defendant", "иск")[1], "good")
+        self.assertEqual(gv("Жалоба не удовлетворена", "reviewed", "defendant", "жалоба")[1], "good")
+        out, v = gv("Жалоба удовлетворена. Игроку выдан штраф 50 000 и выговор.", "reviewed", "defendant", "жалоба")
+        self.assertEqual(v, "bad")
+        self.assertIn("удовлетворена, штраф", out)
+        self.assertEqual(gv("Иск удовлетворён частично", "reviewed", "defendant", "иск")[1], "neutral")
+        self.assertEqual(gv("Отправлено на доработку", "closed", "defendant", "жалоба")[1], "neutral")
+        self.assertEqual(gv("Подсудимый оправдан", "reviewed", "defendant", "иск"), ("оправдан", "good"))
+        self.assertEqual(gv("что-то", "rejected", "defendant", "жалоба")[1], "good")  # раздел «отклонённые»
+        self.assertEqual(gv("Жалоба отклонена", "reviewed", "plaintiff", "жалоба")[1], "bad")  # сам подал
+        self.assertEqual(gv("Жалоба удовлетворена, штраф", "reviewed", "witness", "жалоба")[1], "neutral")
+
+
+class VerdictCache(unittest.TestCase):
+    def setUp(self):
+        self.db = DB(":memory:")
+        self.vanya = NS(id=11, display_name="Ваня", bot=False, roles=[])
+        self.g = G(5, [self.vanya])
+        self.fw, self.bot = make_fw(self.db, [self.vanya])
+        self.calls = 0
+        test = self
+
+        class AI:
+            on = True
+
+            async def ask_json(self, system, user, **kw):
+                test.calls += 1
+                return {"decided": True, "short": "суд признал виновным, штраф 100к", "verdict": "bad"}
+        self.bot.ai_for = lambda g: AI()
+        self.db.q("INSERT INTO applications(guild_id, user_id, nick, static_id, status, created_at) "
+                  "VALUES(5, 11, 'Vanya_Ulyanov', '64524', 'accepted', '2026-01-01')")
+        self.db.q("INSERT INTO forum_cases(guild_id, thread_id, forum_id, title, url, kind, role, defendant, member_id, "
+                  "applicant, status, decision, updated_ts) VALUES(5, 70, 1491, 'Иск №7', 'u7', 'иск', 'defendant', "
+                  "'Ваня Ульянов', 11, 'Истец', 'reviewed', 'Суд решил: виновен, штраф 100к', 1)")
+        self.db.gset(5, "forum:last", int(time.time()) - 60)
+
+    def test_ai_once_then_cache(self):
+        asyncio.run(self.fw.fill_verdicts(self.g))
+        asyncio.run(self.fw.fill_verdicts(self.g))
+        self.assertEqual(self.calls, 1)  # второй цикл — из кэша, модель не дёргаем
+        r = self.fw.person_report(self.g, self.vanya)
+        self.assertEqual(self.calls, 1)  # вывод — тоже из кэша
+        self.assertIn("🔴 ⚖️ Иск · Верховный суд · подал Истец — **суд признал виновным, штраф 100к**", r)
+        # в теме новый ответ — пересчитываем ровно один раз
+        self.db.q("UPDATE forum_cases SET decision='Апелляция: решение отменено' WHERE thread_id=70")
+        asyncio.run(self.fw.fill_verdicts(self.g))
+        asyncio.run(self.fw.fill_verdicts(self.g))
+        self.assertEqual(self.calls, 2)
+
+    def test_no_ai_heuristic(self):
+        self.bot.ai_for = lambda g: NS(on=False)
+        self.db.q("UPDATE forum_cases SET decision='В удовлетворении иска отказано' WHERE thread_id=70")
+        asyncio.run(self.fw.fill_verdicts(self.g))
+        r = self.fw.person_report(self.g, self.vanya, status="reviewed")
+        self.assertIn("🟢", r)
+        self.assertIn("иск отклонён", r)
 
 
 if __name__ == "__main__":

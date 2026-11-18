@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS forum_cases(
     applicant TEXT, summary TEXT, case_no TEXT, status TEXT DEFAULT 'pending', body TEXT, decision TEXT,
     channel_id INTEGER, message_id INTEGER, dthread_id INTEGER, last_post_ts INTEGER DEFAULT 0,
     checked_ts INTEGER DEFAULT 0, created_ts INTEGER, updated_ts INTEGER, notified_status TEXT, result TEXT,
-    result_post INTEGER DEFAULT 0, UNIQUE(guild_id, thread_id));
+    result_post INTEGER DEFAULT 0, outcome TEXT, verdict TEXT, verdict_for TEXT, UNIQUE(guild_id, thread_id));
 CREATE INDEX IF NOT EXISTS ix_forum_cases_g ON forum_cases(guild_id, role, status);
 CREATE TABLE IF NOT EXISTS forum_people(
     guild_id INTEGER NOT NULL, name TEXT NOT NULL, static_id TEXT, user_id INTEGER, head INTEGER DEFAULT 0,
@@ -90,15 +90,69 @@ CLASSIFY = (
 
 RESULT = (
     "Ты читаешь последние сообщения темы форума RP-проекта «Россия Онлайн» (жалоба / иск в суд / обращение в "
-    "прокуратуру). Ответчик / обвиняемый: {who}. Статус темы: {status}. Найди ИТОГ: что решили суд, прокуратура или "
-    "администрация.\n"
+    "прокуратуру). Наш человек: {who}, его роль в деле: {role}. Статус темы: {status}. Найди ИТОГ: что решили суд, "
+    "прокуратура или администрация.\n"
     "Верни JSON: {{\"decided\":true|false,\"outcome\":\"что решили, 1–2 предложения, до 300 знаков\","
-    "\"penalty\":\"наказание / штраф / отказ / оправдан — или пусто\",\"by\":\"кто решил (суд, прокурор, ник)\"}}.\n"
+    "\"penalty\":\"наказание / штраф / отказ / оправдан — или пусто\",\"by\":\"кто решил (суд, прокурор, ник)\","
+    "\"short\":\"итог ОДНОЙ короткой строкой до 90 знаков: «суд отклонил жалобу», «иск удовлетворён, штраф 50к», "
+    "«оправдан», «отправлено на доработку»\",\"verdict\":\"good|bad|neutral\"}}.\n"
+    "verdict — для НАШЕГО человека. Если он ответчик/обвиняемый: good — жалоба/иск отклонены, отказано, оправдан, "
+    "производство прекращено, решили в его пользу; bad — жалобу/иск удовлетворили против него, признан виновным, "
+    "наказание, штраф, снятие с должности, проиграл; neutral — частично, на доработку, непонятно. Если он заявитель — "
+    "наоборот (удовлетворили — good, отклонили — bad). Свидетель или просто упомянут — neutral.\n"
     "decided=false, если решения пока нет (ходатайства, вопросы, переносы). Только то, что написано в тексте, "
     "ничего не выдумывай.")
 DECISION_RX = re.compile(r"решени|решил|постанов|приговор|удовлетвор|отказ|отклон|штраф|наказан|оправда|виновн|"
                          r"прекра[тщ]", re.I)
 FINAL = ("reviewed", "rejected", "closed")
+VERDICT_DOT = {"good": "🟢", "bad": "🔴", "neutral": "🟡"}
+ROLE_FOR_AI = {"defendant": "ответчик / обвиняемый", "plaintiff": "заявитель (сам подал)", "witness": "свидетель",
+               "mention": "просто упомянут"}
+# эвристика без ИИ: «не удовлетворено» — это отказ, поэтому сначала вырезаем «хорошие» слова, потом ищем «плохие»
+_V_NEUTRAL = re.compile(r"частичн|на\s+доработк|доработ|без\s+движени|перенес[её]н|отложен|приостановл", re.I)
+_V_GOOD = re.compile(r"в\s+удовлетворени\w*(?:\s+[\w-]+){0,3}\s+отказ\w*|отказ\w*\s+в\s+удовлетворени\w*|"
+                     r"не\s*удовлетвор\w*|отказ\w*|отклон\w*|оправда\w*|не\s*виновн\w*|невиновн\w*|прекра[тщ]\w*|"
+                     r"нарушени\w*\s+не\s+(?:выявлен|обнаружен|найден|установлен)\w*|не\s+подтвердил\w*|"
+                     r"состав\w*\s+(?:нарушения\s+|правонарушения\s+|преступления\s+)?(?:нет|отсутству\w*)", re.I)
+_V_BAD = re.compile(r"удовлетвор|виновн|наказан|штраф|сня[тл]|снятие|уволен|увольн|арест|лишени|лишить|выговор|"
+                    r"\bбан\b|заблокир|предупреждени|деморган|тюрьм|выдан\w*\s+(?:срок|наказ)", re.I)
+_NOUN = {"жалоба": ("жалоба", "отклонена", "удовлетворена"), "иск": ("иск", "отклонён", "удовлетворён"),
+         "апелляция": ("апелляция", "отклонена", "удовлетворена"),
+         "прокуратура": ("обращение", "отклонено", "удовлетворено")}
+
+
+def guess_verdict(text, status, role, kind=""):
+    """Итог и вердикт без ИИ (по ключевым словам ответа и разделу). → (короткий итог, good|bad|neutral)."""
+    t = norm(text or "").lower().replace("ё", "е")
+    noun, no, yes = _NOUN.get(kind or "", ("жалоба", "отклонена", "удовлетворена"))
+    if _V_NEUTRAL.search(t):
+        v, out = "neutral", ("частично удовлетворено" if re.search(r"частичн", t) else "отправлено на доработку"
+                             if re.search(r"доработ", t) else "решение отложено")
+    else:
+        good = bool(_V_GOOD.search(t))
+        bad = bool(_V_BAD.search(_V_GOOD.sub(" ", t)))
+        if status == "rejected" or (good and not bad):
+            v = "good"
+            out = "оправдан" if re.search(r"оправда", t) else f"{noun} {no}"
+        elif bad and not good:
+            v = "bad"
+            extra = [w for rx, w in ((r"штраф", "штраф"), (r"сня[тл]|снятие|уволен|увольн", "снятие"),
+                                     (r"выговор", "выговор"), (r"арест|деморган|тюрьм", "арест"),
+                                     (r"\bбан\b|заблокир", "бан")) if re.search(rx, t)]
+            out = f"{noun} {yes}" + (", " + ", ".join(extra[:2]) if extra else "")
+        else:
+            v, out = "neutral", ("закрыто, итог неясен — см. тему" if status == "closed" else "итог неясен — см. тему")
+    if role == "plaintiff" and v != "neutral":
+        v = "bad" if v == "good" else "good"  # сам подал: отказ — плохо для нас
+    elif role in ("witness", "mention"):
+        v = "neutral"
+    return out, v
+
+
+def verdict_sig(text):
+    """Подпись текста решения: поменялся последний ответ в теме — вердикт пересчитываем, нет — берём из кэша."""
+    t = norm(text or "")
+    return f"{len(t)}:{t[:40]}:{t[-40:]}" if t else ""
 
 
 def notified(c):
@@ -190,7 +244,8 @@ class ForumWatch(commands.Cog):
             bot.db.c.commit()
         except Exception:  # noqa: BLE001 — уже есть
             pass
-        for col, typ in (("notified_status", "TEXT"), ("result", "TEXT"), ("result_post", "INTEGER DEFAULT 0")):
+        for col, typ in (("notified_status", "TEXT"), ("result", "TEXT"), ("result_post", "INTEGER DEFAULT 0"),
+                         ("outcome", "TEXT"), ("verdict", "TEXT"), ("verdict_for", "TEXT")):
             try:  # отметки «уже оповестили» (добавлены позже); старым делам — текущий статус, чтобы не заспамить
                 bot.db.c.execute(f"ALTER TABLE forum_cases ADD COLUMN {col} {typ}")
                 if col == "notified_status":
@@ -372,7 +427,8 @@ class ForumWatch(commands.Cog):
             e.add_field(name="Номер", value=f"№{c['case_no']}", inline=True)
         e.add_field(name="Суть", value=(c["summary"] or "—")[:1024], inline=False)
         if c["result"]:
-            e.add_field(name="🏁 Итог", value=c["result"][:1024], inline=False)
+            dot = VERDICT_DOT.get(c["verdict"], "🏁") if c["status"] in FINAL else "🏁"
+            e.add_field(name=f"{dot} Итог", value=c["result"][:1024], inline=False)
         elif c["decision"] and c["status"] in FINAL:
             e.add_field(name="Решение / последний ответ", value=c["decision"][:700], inline=False)
         e.set_footer(text=f"Форум · тема {c['thread_id']} · обновления — в ветке под карточкой · "
@@ -545,6 +601,10 @@ class ForumWatch(commands.Cog):
                     await self.tell_owner(g)
         db.gset(g, "forum:last_err", err or "")
         await self.post_missing_cards(g)
+        try:  # итог и вердикт решённым делам, где их ещё нет (≤3 за цикл, по сохранённому тексту — без сети)
+            await self.fill_verdicts(g)
+        except Exception:  # noqa: BLE001
+            log.warning("forumwatch: вердикты не посчитаны", exc_info=True)
         res = (f"Просмотрено разделов: {st['lists']}, тем прочитано: {st['read']}, новых дел: {st['new']}, "
                f"обновлений: {st['upd']}." + (f" Для юриста: {st['kb']}." if st.get("kb") else ""))
         return res + (f"\n⚠️ {err}" if err else "")
@@ -831,11 +891,24 @@ class ForumWatch(commands.Cog):
         return True
 
     @staticmethod
-    def _case_line(c, role, st):
-        sec = SECTIONS.get(c["forum_id"], ("раздел форума",))[0]
-        return (f"{'🔴' if role == 'defendant' else '⚪'} {KIND_ICON.get(c['kind'], '⚖️')} "
-                f"{(c['kind'] or 'дело').capitalize()} [{c['title'][:70]}]({c['url']}) — "
-                f"{ROLE_RU.get(role, role)} · {sec} · подал {c['applicant'] or '?'} · {STATUS.get(st, st)}")
+    def case_verdict(c, role, st):
+        """(кружок, короткий итог) для строки дела. На рассмотрении — ⚪ без итога. Решено — из кэша forum_cases
+        (outcome/verdict, ИИ уже считал один раз); кэша ещё нет — эвристика по сохранённому ответу, без ИИ."""
+        if st == "pending":
+            return "⚪", STATUS["pending"]
+        v, out = c["verdict"], c["outcome"]
+        if not v or not out:
+            out, v = guess_verdict(c["decision"] or c["result"] or "", st, c["role"], c["kind"])
+        if role != c["role"]:  # роль именно этого человека (свидетель в чужом деле и т.п.)
+            v = "neutral" if role in ("witness", "mention") else v
+        return VERDICT_DOT.get(v, "🟡"), out
+
+    def _case_line(self, c, role, st):
+        sec = SECTIONS.get(c["forum_id"], ("раздел форума",))[0].split(" · ")[0]
+        dot, out = self.case_verdict(c, role, st)
+        return (f"{dot} {KIND_ICON.get(c['kind'], '⚖️')} {(c['kind'] or 'дело').capitalize()} · {sec} · "
+                f"подал {c['applicant'] or '?'} — **{out}**\n"
+                f"   [{c['title'][:70]}]({c['url']}) · {ROLE_RU.get(role, role)}")
 
     def person_report(self, g, member, game_name=None, static=None, self_check=True, status="all"):
         """Ответ на «проверь меня по форуму»: дела с ролью, статусом и ссылкой — или «чисто». Только реальные данные.
@@ -854,7 +927,14 @@ class ForumWatch(commands.Cog):
         ident = ", ".join(names[:2]) + (f", static {statics[0]}" if statics else "")
         head = f"🔎 Форум по **{label}**" + (f" ({ident})" if ident else "") + \
             (f" — только {WANT_RU[status]}" if status != "all" else "") + ":"
-        lines = [self._case_line(c, role, st) for c, role, st in fit[:8]]
+        lines, size = [], 0
+        for i, (c, role, st) in enumerate(fit[:8]):
+            ln = self._case_line(c, role, st)
+            if size + len(ln) > 1350:  # ответ режется на 1900 — не обрываем строку на полуслове
+                lines.append(f"… и ещё {len(fit) - i} — все в канале «суды и жалобы»")
+                break
+            lines.append(ln)
+            size += len(ln) + 1
         titles = []
         known = {c["thread_id"] for c, _, _ in hits}
         for t in db.all("SELECT thread_id, title, forum_id FROM forum_threads WHERE guild_id=? ORDER BY last_ts DESC "
@@ -943,14 +1023,20 @@ class ForumWatch(commands.Cog):
         order = sorted(fit, key=lambda k: (-sum(1 for _, r, s in fit[k] if r == "defendant" and s == "pending"),
                                            -sum(1 for _, r, _ in fit[k] if r == "defendant"), k.lower()))
         out = []
+        size, shown = 0, 0
         for label in order[:12]:
             rows = fit[label]
-            out.append(f"**{label}**")
-            out += ["  " + self._case_line(c, role, st) for c, role, st in rows[:5]]
-            if len(rows) > 5:
-                out.append(f"  … и ещё {len(rows) - 5}")
-        if len(order) > 12:
-            out.append(f"… и ещё {len(order) - 12} чел. — все дела в канале «суды и жалобы»")
+            block = [f"**{label}**"] + ["  " + self._case_line(c, role, st) for c, role, st in rows[:4]]
+            if len(rows) > 4:
+                block.append(f"  … и ещё {len(rows) - 4}")
+            text = "\n".join(block)
+            if out and size + len(text) > 1450:  # ответ режется на 1900 — лучше честное «и ещё», чем обрыв
+                break
+            out.append(text)
+            size += len(text) + 1
+            shown += 1
+        if len(order) > shown:
+            out.append(f"… и ещё {len(order) - shown} чел. — все дела в канале «суды и жалобы»")
         if out:
             body = "\n".join(out)
         else:
@@ -1050,7 +1136,9 @@ class ForumWatch(commands.Cog):
                 notes.append(f"📌 Статус дела: **{STATUS.get(status, status)}** "
                              f"({SECTIONS.get(meta['forum_id'] or c['forum_id'], ('раздел форума',))[0]})")
             if res and (new or fresh_status):
-                notes.append(f"🏁 **Итог:** {res}\n<{BASE}/posts/{dp['id']}/>")
+                v = (db.one("SELECT verdict FROM forum_cases WHERE id=?", c["id"]) or {"verdict": None})["verdict"]
+                dot = VERDICT_DOT.get(v, "🏁") if status in FINAL else "🏁"
+                notes.append(f"{dot} **Итог:** {res}\n<{BASE}/posts/{dp['id']}/>")
             other = [p for p in new if not (res and dp and p["id"] == dp["id"])]
             if other:
                 p = other[-1]
@@ -1107,23 +1195,15 @@ class ForumWatch(commands.Cog):
         """Итог дела из поста с решением: ИИ (строгий JSON) → «что решили · наказание · кто». Без ИИ / решения нет —
         None (при закрытой теме — начало поста как есть)."""
         plain = (dp["text"][:300] + ("…" if len(dp["text"]) > 300 else "")) if status in FINAL else None
-        ai = self.bot.ai_for(g)
-        if not getattr(ai, "on", False):
-            return plain
         tail = [p for p in posts if p["id"] <= dp["id"]][-4:] or [dp]
         text = "\n\n".join(f"[{p['author'] or '?'}]: {p['text'][:1500]}" for p in tail)
-        try:
-            data = await ai.ask_json(RESULT.format(who=c["defendant"] or "член семьи",
-                                                   status=STATUS.get(status, status)),
-                                     f"Тема: {c['title']}\nСуть: {c['summary'] or '—'}\n\nСообщения:\n{text[:5000]}",
-                                     max_tokens=300, light=True)
-        except Exception as e:  # noqa: BLE001 — лимит/сеть: без ИИ
-            log.info("forumwatch: ИИ не вытащил итог (%s)", type(e).__name__)
-            return plain
-        if not isinstance(data, dict):
-            return plain
-        if not data.get("decided"):
-            return plain if status in FINAL else None
+        data = await self.ask_verdict(g, c, text, status)
+        sig = verdict_sig(c["decision"] or dp["text"])
+        if not isinstance(data, dict) or not data.get("decided"):
+            if status in FINAL:  # решение есть по разделу/замку, а ИИ нет или не понял — эвристика по ответу
+                self.save_verdict(c, *guess_verdict(dp["text"], status, c["role"], c["kind"]), sig)
+            return plain if (status in FINAL or not isinstance(data, dict)) else None
+        self.save_verdict(c, *self.verdict_from(data, dp["text"], status, c), sig)
         parts = [str(data.get("outcome") or "").strip()[:300]]
         if str(data.get("penalty") or "").strip():
             parts.append("Наказание / итог: " + str(data["penalty"]).strip()[:150])
@@ -1131,6 +1211,59 @@ class ForumWatch(commands.Cog):
             parts.append("Решил: " + str(data["by"]).strip()[:80])
         out = " · ".join(x for x in parts if x)
         return out or plain
+
+    async def ask_verdict(self, g, c, text, status):
+        """ИИ читает решающие посты → JSON (decided, outcome, short, verdict…) или None (ИИ нет / лимит / сеть)."""
+        ai = self.bot.ai_for(g)
+        if not getattr(ai, "on", False):
+            return None
+        try:
+            return await ai.ask_json(RESULT.format(who=c["defendant"] or "член семьи",
+                                                   role=ROLE_FOR_AI.get(c["role"], "ответчик / обвиняемый"),
+                                                   status=STATUS.get(status, status)),
+                                     f"Тема: {c['title']}\nСуть: {c['summary'] or '—'}\n\nСообщения:\n{text[:5000]}",
+                                     max_tokens=350, light=True)
+        except Exception as e:  # noqa: BLE001 — лимит/сеть: без ИИ
+            log.info("forumwatch: ИИ не вытащил итог (%s)", type(e).__name__)
+            return None
+
+    @staticmethod
+    def verdict_from(data, text, status, c):
+        """Ответ ИИ → (короткий итог, вердикт); кривое поле — добираем эвристикой, роль свидетеля — всегда neutral."""
+        h_out, h_v = guess_verdict(text, status, c["role"], c["kind"])
+        v = str(data.get("verdict") or "").strip().lower()
+        v = v if v in VERDICT_DOT else h_v
+        if c["role"] in ("witness", "mention"):
+            v = "neutral"
+        short = " ".join(str(data.get("short") or "").split())[:90] or \
+            " ".join(str(data.get("outcome") or "").split())[:90] or h_out
+        return short, v
+
+    def save_verdict(self, c, outcome, verdict, sig):
+        self.bot.db.q("UPDATE forum_cases SET outcome=?, verdict=?, verdict_for=? WHERE id=?", (outcome or "")[:120],
+                      verdict if verdict in VERDICT_DOT else "neutral", sig, c["id"])
+
+    async def fill_verdicts(self, g, limit=3):
+        """Итог и вердикт для решённых дел, где их ещё нет (старые записи, свидетели/заявители — их тема не идёт через
+        extract_result) или поменялся последний ответ. По сохранённому тексту решения, без сети; ИИ — один раз на
+        решение, дальше берём из кэша."""
+        db = self.bot.db
+        done = 0
+        for c in db.all("SELECT * FROM forum_cases WHERE guild_id=? AND COALESCE(decision, '')<>'' "
+                        "ORDER BY updated_ts DESC LIMIT 200", g.id):
+            st = self.case_status(g, c)
+            sig = verdict_sig(c["decision"])
+            if st not in FINAL or (c["verdict"] and c["verdict_for"] == sig):
+                continue
+            data = await self.ask_verdict(g, c, f"[ответ]: {c['decision'][:3000]}", st)
+            if isinstance(data, dict) and data.get("decided"):
+                self.save_verdict(c, *self.verdict_from(data, c["decision"], st, c), sig)
+            else:
+                self.save_verdict(c, *guess_verdict(c["decision"], st, c["role"], c["kind"]), sig)
+            done += 1
+            if done >= limit:
+                break
+        return done
 
     async def classify(self, g, title, text, author, section, res, people):
         """Роль члена семьи в теме: ИИ (строгий JSON), без ИИ или при ошибке — эвристика analyze()."""
