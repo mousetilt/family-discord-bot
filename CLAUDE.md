@@ -104,6 +104,12 @@
   …»). Изменяющие действия копятся (`merge`) и в финале идут обычным путём: права → «Выполнить». `law_doc` (справка,
   черновик документа юристом по фактам) и `draft` показываются целиком (`DELIVER`). `agent.multi_step` — многошаговую
   просьбу не перехватывает `forum_intent`. Тесты — `tests/test_agent.py`.
+- **Сквозной разбор `brief` (`core/brief.py`)**: `collect()` собирает дела форума (статус по разделу, роль, стороны,
+  итог; с Claude — суть, текст и решение), ростер (ранг, ник/статик из принятой анкеты, выговоры, `forum_people`),
+  базу (`kb.context_smart`) и числа семьи — по долям бюджета от фокуса (`focus_of`: forum · family · law · all).
+  Бюджет: Claude 60 тыс. знаков, бесплатные — 9 тыс. `answer()` — сильная модель (smart) + `legal.verify`. Действие
+  `brief` (ASK, USERS, тумблер `assistant:brief`), в промпте — только у Claude (`agent.PROMPT`); аналитические просьбы
+  («в целом», «по всем делам») при Claude не перехватывает `forum_intent`. Тесты — `tests/test_brief.py`.
 
 ## ИИ-юрист (`cogs/lawyer.py` + `core/legal.py`)
 - `answer_full(gid, q, mode, member, template, clarify)` → {text, sources, ai, mode, questions}; `answer()` — старая
