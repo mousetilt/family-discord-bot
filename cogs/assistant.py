@@ -17,13 +17,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from core import agent, config, vision
+from core import addressing, agent, config, vision
 from core.forum import forum_intent
 from core.names import forms, similarity
 from core.botcore import fmt_hours, now, now_iso, parse_dt, safe_dm
 
 log = logging.getLogger("family-bot.assistant")
-TRIGGER = re.compile(r"^\s*(швейцар)(?![а-яёa-z])\s*[,!:.\-—]?\s*", re.I)  # «Швейцария…» — не обращение
 USERS = config.ORGANIZERS + config.HR + ["senior", "treasurer"]
 MOD = config.LEAD + ["hr_head"]
 INFO = "\u200b"   # пометка «это ответ-справка»: показываем целиком и зачитываем в голосе
@@ -56,7 +55,6 @@ NO_AI = ["Башка не варит — ИИ молчит. Дай минуту 
 NOT_YOURS = ["Не по чину тебе: {what}. Зови старших.", "Ишь, размахнулся: {what}. Это только старшим, не тебе.",
              "{what}? Погоны сначала получи. Зови старших.", "Ага, щас. {what} — не твой уровень, зови начальство."]
 DAILY_CHAT = 120   # сообщений в сутки на человека без прав помощника — чтобы не выжечь бесплатный лимит ИИ
-NAME_ANYWHERE = re.compile(r"(?<![а-яёa-z])швейцар(?![а-яёa-z])", re.I)  # «…, швейцар» в любом месте фразы
 TALK_SEC = 300     # сколько помним разговор с человеком
 VOICE_MSG_SEC = 120  # голосовые сообщения длиннее не распознаём (лимит Whisper общий с голосовым Швейцаром)
 ANSWER_SEC = 120   # сколько ждём ответ на свой вопрос без обращения «Швейцар»
@@ -596,7 +594,7 @@ class Assistant(commands.Cog):
         text = message.content or ""
         if not self.bot.has(message.author, EVERYONE) or not self.bot.feature(message.guild, "assistant:chat"):
             return False
-        if TRIGGER.match(text) or NAME_ANYWHERE.search(text):
+        if addressing.called(text):  # имя с опечатками и в падежах, «бот, …»
             return True
         ref = message.reference
         if ref and ref.message_id in self.mine:
@@ -612,6 +610,33 @@ class Assistant(commands.Cog):
         if not (f"<@{me}>" in text or f"<@!{me}>" in text) or message.mention_everyone:
             return False
         return not in_lawyer_channel
+
+    async def followup(self, message):
+        """Продолжение разговора без «Швейцар»: человек говорил с ботом в этом канале ≤ FOLLOW_SEC назад — дешёвая
+        модель по смыслу решает, ему ли новая фраза. Не в канале юриста, не ответом другому, не с тегом другого."""
+        g = message.guild
+        text = (message.content or "").strip()
+        if not text or len(text) > 300 or not self.bot.feature(g, "assistant:followup") \
+                or not self.bot.has(message.author, EVERYONE) or not self.bot.feature(g, "assistant:chat"):
+            return False
+        t = self.talk.get((message.channel.id, message.author.id))
+        if not t or not t.get("turns") or time.monotonic() - t["t"] > addressing.FOLLOW_SEC:
+            return False
+        if message.reference or any(not u.bot for u in message.mentions) or message.mention_everyone:
+            return False  # ответ другому человеку или разговор с конкретным человеком
+        law = self.bot.ch(g, "lawyer")
+        if law and message.channel.id == law.id:
+            return False
+        ai = self.bot.ai_for(g)
+        if not ai.on:
+            return False
+        try:
+            d = await ai.ask_json(addressing.FOLLOW_SYSTEM,
+                                  addressing.follow_prompt(t["turns"], self.chat(message), text), max_tokens=60,
+                                  light=True)
+        except Exception:  # noqa: BLE001 — лимит/сеть: не отвечаем, обратятся по имени
+            return False
+        return isinstance(d, dict) and d.get("to_bot") is True
 
     def dm_home(self, user):
         """Сервер семьи, от имени которой отвечаем в ЛС: домашний, если человек там свой, иначе первый."""
@@ -707,10 +732,9 @@ class Assistant(commands.Cog):
         if message.author.bot:
             return
         text = message.content or ""
-        if not self.claims(message):
+        if not self.claims(message) and not await self.followup(message):
             return
-        m = TRIGGER.match(text)
-        request = TRIGGER.sub("", text, count=1) if m else text
+        request = addressing.strip_call(text)
         request = request.replace(self.bot.user.mention, "").replace(f"<@!{self.bot.user.id}>", "").strip()
         if not request and self.voice_attachment(message):
             # голосовое ответом на сообщение бота (или на его вопрос) — распознаём; просто так голосовые
@@ -719,7 +743,7 @@ class Assistant(commands.Cog):
                                      lambda **kw: message.reply(mention_author=False, **kw))
             if not heard:
                 return
-            request = TRIGGER.sub("", heard, count=1).strip() or heard
+            request = addressing.strip_call(heard) or heard
         if not request and vision.has_images(message) and self.bot.ai_for(message.guild).is_claude:
             request = "Что на картинке? Разбери и предложи, что с этим сделать."
         if not request:
