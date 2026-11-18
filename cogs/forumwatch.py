@@ -454,6 +454,50 @@ class ForumWatch(commands.Cog):
             return
         db.q("UPDATE forum_cases SET channel_id=?, message_id=? WHERE id=?", ch.id, msg.id, c["id"])
 
+    async def add_manual_case(self, g, a, actor):
+        """Завести дело вручную (по скрину или словам; только после «Выполнить»). Ссылка на тему видна — реальный
+        thread_id (цикл форума потом сам подтянет статус и итог); нет — отрицательный, форум по нему не читаем.
+        → текст для ответа."""
+        db = self.bot.db
+        defendant = " ".join(str(a.get("defendant") or "").split())[:120]
+        if not defendant:
+            return "❌ Не понял, на кого дело."
+        static = re.sub(r"\D", "", str(a.get("static") or ""))[:10]
+        url = str(a.get("url") or "")
+        m = re.search(r"/threads/(?:[^/]*\.)?(\d+)", url)
+        tid = int(m.group(1)) if m else None
+        if tid and db.one("SELECT id FROM forum_cases WHERE guild_id=? AND thread_id=?", g.id, tid):
+            return "ℹ️ Это дело уже есть в списке."
+        case_no = str(a.get("case_no") or "").strip()[:20]
+        if case_no and db.one("SELECT id FROM forum_cases WHERE guild_id=? AND case_no=? AND defendant LIKE ?", g.id,
+                              case_no, defendant.split()[0] + "%"):
+            return f"ℹ️ Дело №{case_no} на {defendant} уже есть в списке."
+        if tid is None:
+            low = db.one("SELECT MIN(thread_id) m FROM forum_cases WHERE guild_id=?", g.id)
+            tid = min(-1, ((low["m"] if low else 0) or 0) - 1)
+        who = find_person(self.people(g), defendant.lower()) if defendant else None
+        kind = str(a.get("kind") or "жалоба").lower()[:20]
+        title = str(a.get("title") or f"{kind.capitalize()} на {defendant}")[:200]
+        now = int(time.time())
+        cur = db.q("INSERT OR IGNORE INTO forum_cases(guild_id, thread_id, forum_id, title, url, kind, role, defendant, "
+                   "member_id, head, applicant, summary, case_no, status, body, checked_ts, created_ts, updated_ts, "
+                   "notified_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   g.id, tid, None, title, thread_url(tid) if tid > 0 else (url or None), kind, "defendant",
+                   (defendant + (f" ({static})" if static else ""))[:150], who.get("user_id") if who else None,
+                   int(bool(who and who.get("head"))), str(a.get("applicant") or "?")[:100],
+                   str(a.get("summary") or title)[:300], str(a.get("case_no") or "")[:20] or None, "pending",
+                   f"Заведено вручную ({actor.display_name}). {str(a.get('section') or '')}"[:4000], now, now, now,
+                   "pending")
+        if not cur.lastrowid:
+            return "ℹ️ Это дело уже есть в списке."
+        log.info("Форум «%s»: дело #%s заведено вручную (%s)", g.name, cur.lastrowid, actor)
+        try:
+            await self.post_card(g, cur.lastrowid)
+        except Exception:  # noqa: BLE001 — карточка не встала, но дело записано
+            log.exception("Форум: карточка ручного дела")
+        return f"⚖️ Дело заведено: {title}" + (" — тему форума буду отслеживать сам." if tid > 0 else
+                                               " (без ссылки на тему — статус обновляйте сами).")
+
     async def post_missing_cards(self, g):
         for c in self.bot.db.all("SELECT id FROM forum_cases WHERE guild_id=? AND role='defendant' AND message_id IS NULL "
                                  "ORDER BY id", g.id):
@@ -559,7 +603,7 @@ class ForumWatch(commands.Cog):
                     "ORDER BY (c.id IS NOT NULL) DESC, t.last_ts DESC LIMIT ?", g.id, MAX_READS)]
                 seen = {r["thread_id"] for _, r in todo}
                 for c in db.all("SELECT * FROM forum_cases WHERE guild_id=? AND status='pending' AND checked_ts<? "
-                                "ORDER BY checked_ts LIMIT 5", g.id, now - CASE_POLL_H * 3600):
+                                "AND thread_id>0 ORDER BY checked_ts LIMIT 5", g.id, now - CASE_POLL_H * 3600):
                     if c["thread_id"] not in seen:
                         todo.append(("case", c))
                         seen.add(c["thread_id"])

@@ -110,6 +110,12 @@
   Бюджет: Claude 60 тыс. знаков, бесплатные — 9 тыс. `answer()` — сильная модель (smart) + `legal.verify`. Действие
   `brief` (ASK, USERS, тумблер `assistant:brief`), в промпте — только у Claude (`agent.PROMPT`); аналитические просьбы
   («в целом», «по всем делам») при Claude не перехватывает `forum_intent`. Тесты — `tests/test_brief.py`.
+- **Зрение (`core/vision.py`, только Claude)**: картинка к обращению Швейцару → `Assistant.look` → `vision.extract`
+  (JSON: complaint · document · payment · game, `normalize` чистит) → блок «РАСПОЗНАНО НА КАРТИНКЕ» в запросе.
+  Жалоба/иск на скрине → действие `case_add` (LEAD + senior) ТОЛЬКО через «Выполнить» (`ForumWatch.add_manual_case`:
+  ссылка на тему → реальный thread_id, иначе отрицательный — такие `thread_id<0` цикл форума не перечитывает; дубль
+  по номеру дела не заводится). Нет зрения — «перескажи текстом». `vision.read_images` — общий (юрист тоже).
+  Тесты — `tests/test_vision.py`.
 
 ## ИИ-юрист (`cogs/lawyer.py` + `core/legal.py`)
 - `answer_full(gid, q, mode, member, template, clarify)` → {text, sources, ai, mode, questions}; `answer()` — старая

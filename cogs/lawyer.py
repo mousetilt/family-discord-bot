@@ -14,6 +14,7 @@ from core import config
 from core.ai import AIUnavailable
 from core.kb import FetchBlocked, LoginRequired, fetch_url, new_session, read_file
 from core.forum import SECTIONS
+from core.vision import read_images
 from core.legal import SECTION_TEMPLATE, TEMPLATES, pick_template, verify
 
 log = logging.getLogger("family-bot.lawyer")
@@ -67,23 +68,6 @@ def quote(text, n=700):
 
 
 
-IMAGE_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif")
-
-
-async def read_images(message, limit=3, max_bytes=5_000_000):
-    """Картинки из сообщения → [(mime, bytes)] (не больше limit, каждая ≤ max_bytes). Ошибки — пропуск."""
-    out = []
-    for a in getattr(message, "attachments", None) or []:
-        mime = (a.content_type or "").split(";")[0].strip().lower()
-        if mime not in IMAGE_TYPES or (a.size or 0) > max_bytes:
-            continue
-        try:
-            out.append((mime, await a.read()))
-        except Exception:  # noqa: BLE001 — не скачалось: без этой картинки
-            continue
-        if len(out) >= limit:
-            break
-    return out
 
 class TextDocModal(discord.ui.Modal, title="Добавить текст в базу знаний"):
     name = discord.ui.TextInput(label="Название документа", max_length=150)

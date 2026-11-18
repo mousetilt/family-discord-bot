@@ -17,7 +17,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from core import agent, config
+from core import agent, config, vision
 from core.forum import forum_intent
 from core.names import forms, similarity
 from core.botcore import fmt_hours, now, now_iso, parse_dt, safe_dm
@@ -78,7 +78,7 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "peopl
          "paid_claim": config.FAMILY_RANKS, "undo": USERS, "vacation": config.FAMILY_RANKS,
          "vacation_end": config.FAMILY_RANKS, "room": config.FAMILY_PLUS, "mentor_assign": config.MENTORS,
          "relation_set": config.DIPLO, "protocol": config.LEAD,
-         "law_doc": USERS, "brief": USERS,
+         "law_doc": USERS, "brief": USERS, "case_add": config.LEAD + ["senior"],
          "forum_check": config.FAMILY_RANKS}  # себя — любой из семьи; другого — руководство и старший состав (проверка внутри)
 LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив", "people": "👥 Кто в семье",
          "warns": "⚖️ Выговоры", "bl_check": "⛔ Проверка ЧС", "market": "🛒 Рынок", "queue": "🎶 Очередь",
@@ -105,7 +105,7 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "vacation": "🌴 Отпуск", "vacation_end": "👋 Из отпуска", "room": "🔊 Моя комната",
          "mentor_assign": "🧑‍🏫 Наставник", "relation_set": "🤝 Отношения с семьёй", "protocol": "📝 Протокол собрания",
          "forum_check": "🔎 Проверка по форуму", "law_doc": "📄 Черновик документа",
-         "brief": "🧠 Сквозной разбор"}
+         "brief": "🧠 Сквозной разбор", "case_add": "⚖️ Завести дело"}
 
 # как каналы называют в разговоре (ключ канала из настроек → слова)
 CHANNEL_HINTS = {
@@ -720,6 +720,8 @@ class Assistant(commands.Cog):
             if not heard:
                 return
             request = TRIGGER.sub("", heard, count=1).strip() or heard
+        if not request and vision.has_images(message) and self.bot.ai_for(message.guild).is_claude:
+            request = "Что на картинке? Разбери и предложи, что с этим сделать."
         if not request:
             return await message.reply("Слушаю 🎩 Например: «Швейцар, перенеси нас всех в балкон».",
                                        mention_author=False)
@@ -753,6 +755,10 @@ class Assistant(commands.Cog):
                                "`/ии ключ`.")
             return "ИИ не настроен"
         persona = self.bot.get_cog("Persona")
+        seen = None
+        if fi is None and not ai.vision and vision.has_images(ctx) and vision.ABOUT_PICTURE.search(request or ""):
+            await send(content="Картинки мой ИИ сейчас не видит — перескажи суть текстом.")
+            return "Картинки не вижу, перескажи текстом"
         if fi is not None:
             data = {"reply": "", "actions": [{"type": "forum_check", **fi}]}
         else:
@@ -761,10 +767,12 @@ class Assistant(commands.Cog):
                 system = SYSTEM if self.bot.has(ctx.author, USERS) else SYSTEM_LITE
                 if self.bot.feature(ctx.author.guild, "treasury") and self.bot.has(ctx.author, config.TREASURY):
                     system = system[:-len(TAIL)] + ACT_TREASURY + TAIL
-                if ai.is_claude:  # многошаговые цепочки — только на Claude (бесплатным промпт прежний)
-                    system = system[:-len(TAIL)] + agent.PROMPT + TAIL
+                if ai.is_claude:  # многошаговые цепочки и зрение — только на Claude (бесплатным промпт прежний)
+                    system = system[:-len(TAIL)] + agent.PROMPT + vision.PROMPT + TAIL
+                    seen = await self.look(ctx, ai, request, send)
                 system = self.bot.brand(ctx.author.guild, system)
                 prompt = (f"{self.context(ctx)}\n\n{card}{self.chat(ctx)}{self.history(ctx)}"
+                          + (vision.to_prompt(seen) + "\n\n" if seen else "") +
                           f"Сообщение от {ctx.author.display_name}: {request}")
                 data = await ai.ask_json(system, prompt, max_tokens=500, smart=True, cache=True)
             except Exception as e:
@@ -784,6 +792,9 @@ class Assistant(commands.Cog):
         if fi is None and ai.is_claude and data.get("continue"):
             data = await self.agent(ctx, ai, system, prompt, data, send)
         plan = [a for a in (data.get("actions") or []) if isinstance(a, dict) and a.get("type") in PERMS]
+        if seen and not plan and seen.get("complaint") and self.may(ctx.author, "case_add"):
+            plan = [vision.case_action(seen)]  # жалоба на скрине — предложить завести дело (через «Выполнить»)
+            data["reply"] = (str(data.get("reply") or "") + "\nЗавести это дело в список дел семьи?").strip()
         reply = str(data.get("reply") or "")[:agent.REPLY_CHARS if data.get("_agent") else 500]
         if not plan:
             reply = reply or random.choice(HUH)
@@ -866,6 +877,20 @@ class Assistant(commands.Cog):
             for i in range(0, min(len(doc), 5700), 1900):
                 await send(content=doc[i:i + 1900])
         return {**data, "actions": reads + agent.merge(pending, muts), "_agent": True}
+
+    async def look(self, ctx, ai, request, send):
+        """Картинки к обращению (Claude) → распознанное (core.vision) или None. Нет зрения/лимит — без картинки,
+        а если человек явно про картинку — честно просим текстом."""
+        if not vision.has_images(ctx):
+            return None
+        try:
+            images = await vision.read_images(ctx)
+            return await vision.extract(ai, images, request) if images else None
+        except Exception as e:  # noqa: BLE001
+            log.info("Швейцар: картинку не разобрал — %s", str(e)[:150])
+            if vision.ABOUT_PICTURE.search(request or ""):
+                await send(content="Картинку разобрать не вышло — перескажи суть текстом.")
+            return None
 
     @staticmethod
     async def _progress(send, status, text):
@@ -985,6 +1010,11 @@ class Assistant(commands.Cog):
             except (TypeError, ValueError):
                 mentor = None
             return f"{LABEL[t]}: {who or '?'} ← {mentor.display_name if mentor else 'свободный наставник'}"
+        if t == "case_add":
+            return (f"{LABEL[t]}: {a.get('kind') or 'жалоба'} на {a.get('defendant') or '?'}"
+                    + (f" [{a.get('static')}]" if a.get("static") else "") + f" · подал {a.get('applicant') or '?'}"
+                    + (f" · {str(a.get('summary'))[:150]}" if a.get("summary") else "")
+                    + (f" · {a.get('url')}" if a.get("url") else ""))
         if t == "relation_set":
             emoji, name, _ = config.RELATIONS.get(a.get("status"), ("❓", "?", 0))
             return f"{LABEL[t]}: {a.get('family') or '?'} → {emoji} {name}"
@@ -1675,6 +1705,9 @@ class Assistant(commands.Cog):
                         mentor = None
                     out.append(await men.set_mentor(g, newbie, mentor, me) if men and newbie
                                else "❌ Не понял, какому новичку.")
+                elif t == "case_add":
+                    fw = bot.get_cog("ForumWatch")
+                    out.append(await fw.add_manual_case(g, a, me) if fw else "❌ Форум-монитор не загружен.")
                 elif t == "relation_set":
                     dip = bot.get_cog("Diplomacy")
                     out.append(await dip.set_relation(g, a.get("family"), str(a.get("status") or ""), a.get("note"), me)
