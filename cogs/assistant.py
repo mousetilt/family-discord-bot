@@ -6,7 +6,6 @@
 Доступно руководству, отделу кадров, рекрутерам, организаторам и старшему составу."""
 import asyncio
 import datetime as dt
-import difflib
 import logging
 import random
 import collections
@@ -19,6 +18,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from core import config
+from core.names import forms, similarity
 from core.botcore import fmt_hours, now, now_iso, parse_dt, safe_dm
 
 log = logging.getLogger("family-bot.assistant")
@@ -209,7 +209,8 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
   такое словами и не выдумывай имён — верни people с фильтрами (ненужные — null, несколько — все сразу):
   {{"rank":"<роль>"|null,"post":{"|".join(config.STAFF_POSTS)}|null,"exam":true|false|null,
   "inactive_days":N|null,"active":true|false|null,"probation_done":true|false|null,"in_voice":true|false|null,
-  "warns":true|false|null,"dues":"paid"|"unpaid"|null,"in_family":true,"limit":30}}
+  "warns":true|false|null,"dues":"paid"|"unpaid"|null,"at_risk":true|null,"in_family":true,"limit":30}}
+  «кто на грани неактива», «кто скоро отвалится», «кто сдулся» → at_risk:true
   Роли: {", ".join(config.ROSTER_ORDER)}. «кто в войсе и 5+ дней неактив» → in_voice:true + inactive_days:5.
   "reply" оставь пустым — список придёт из базы. Это только справка: переводить новичков — promote_newbies
 - inactive: {{"days":1..90}} — старый отчёт «кто не появлялся» (вместо него — people); digest — сводка по семье
@@ -419,7 +420,7 @@ class Assistant(commands.Cog):
                 n = norm(label)
                 if not n:
                     continue
-                s = 1.0 if (n in q or q in n) and min(len(n), len(q)) >= 4 else difflib.SequenceMatcher(None, q, n).ratio()
+                s = 1.0 if (n in q or q in n) and min(len(n), len(q)) >= 4 else similarity(q, n)
                 if s > score:
                     best, score = c, s
         return best if score >= 0.6 else None
@@ -433,9 +434,11 @@ class Assistant(commands.Cog):
         pool = [m for c in g.voice_channels for m in c.members if not m.bot] + self.bot.family_members(g)
         out = []
         for raw in a.get("names") if isinstance(a.get("names"), list) else [a.get("names")]:
-            q = lat(raw)
-            if len(q) < 3:
+            if len(lat(raw)) < 3:
                 continue
+            # «Пете», «Димону» → ещё и начальные формы «петя», «димон» (pymorphy3 или окончания падежей)
+            qs = {lat(f) for w in norm(raw).split() for f in forms(w)} | {lat(raw)}
+            qs = {q for q in qs if len(q) >= 3}
             best, score = None, 0.0
             for m in pool:
                 labels = [m.display_name.split("[")[0], m.name] + (self.bot.db.gget(g, f"alias:{m.id}") or "").split(",")
@@ -443,7 +446,7 @@ class Assistant(commands.Cog):
                     for part in [lat(lab)] + lat(lab).split():
                         if not part:
                             continue
-                        s = 1.0 if part == q else difflib.SequenceMatcher(None, q, part).ratio()
+                        s = max(1.0 if part == q else similarity(q, part) for q in qs)
                         if s > score:
                             best, score = m, s
             if best and score >= 0.8 and best not in out:

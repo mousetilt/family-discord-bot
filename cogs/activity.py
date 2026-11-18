@@ -3,6 +3,7 @@
 import datetime as dt
 import json
 import logging
+import random
 import re
 
 import discord
@@ -21,6 +22,37 @@ def plain(s):
 
 YN = [app_commands.Choice(name="да", value="1"), app_commands.Choice(name="нет", value="0")]
 WHO_BY = config.ORGANIZERS + config.HR + ["senior", "treasurer"]  # как справки помощника
+
+
+PAPER_BY = config.LEAD + ["events"]  # публикуют газету недели
+
+
+class PaperButton(discord.ui.DynamicItem[discord.ui.Button], template=r"paper:pub"):
+    def __init__(self):
+        super().__init__(discord.ui.Button(label="Опубликовать в объявлениях", emoji="📢",
+                                           style=discord.ButtonStyle.primary, custom_id="paper:pub"))
+
+    @classmethod
+    async def from_custom_id(cls, inter, item, match):
+        return cls()
+
+    async def callback(self, inter: discord.Interaction):
+        bot, g = inter.client, inter.guild
+        if not bot.has(inter.user, PAPER_BY):
+            return await inter.response.send_message("⛔ Публикуют руководство и организаторы.", ephemeral=True)
+        text = bot.db.gget(g, "paper:draft")
+        c = bot.ch(g, "news")
+        if not text or not c:
+            return await inter.response.send_message("Черновика нет или нет канала объявлений.", ephemeral=True)
+        news = bot.role(g, "n_news")
+        try:
+            await c.send(content=news.mention if news else None,
+                         embed=bot.embed("🗞 Газета недели", text[:4000], config.GOLD, g),
+                         allowed_mentions=discord.AllowedMentions(roles=True))
+        except discord.HTTPException:
+            return await inter.response.send_message("❌ Не смог написать в объявления.", ephemeral=True)
+        bot.db.gdel(g, "paper:draft")
+        await inter.response.edit_message(content=f"📢 Опубликовано ({inter.user.mention}).", view=None)
 
 
 class Activity(commands.Cog):
@@ -168,6 +200,54 @@ class Activity(commands.Cog):
                                           ephemeral=True)
 
     # ---------- отчёт ----------
+    def newspaper(self, guild):
+        """Газета недели: только факты из базы (кто в топе, кто пришёл в семью, сборы и явка, летопись)."""
+        bot, db, g = self.bot, self.bot.db, guild
+        week = (now() - dt.timedelta(days=7)).isoformat()
+        parts = [random.choice(["Неделя прошла — вот что было, пока вы спали.", "Свежий выпуск. Читайте, пока горячее.",
+                                "Ваш швейцар всё записал. Итоги недели:"])]
+        top = db.all("SELECT user_id, week_voice v, week_messages m FROM activity WHERE guild_id=? "
+                     "ORDER BY (week_voice/60 + week_messages*2) DESC LIMIT 3", g.id)
+        top = [r for r in top if g.get_member(r["user_id"]) and (r["v"] or r["m"])]
+        if top:
+            medals = ["🥇", "🥈", "🥉"]
+            parts.append("**🏆 Самые живые**\n" + "\n".join(
+                f"{medals[i]} <@{r['user_id']}> — 🎙 {fmt_hours(r['v'])} · 💬 {r['m']}" for i, r in enumerate(top)))
+        new = db.all("SELECT user_id FROM applications WHERE guild_id=? AND status='accepted' AND decided_at>?", g.id, week)
+        if new:
+            parts.append("**👋 Новые в семье**\n" + ", ".join(f"<@{r['user_id']}>" for r in new[:15]))
+        evs = []
+        for r in db.all("SELECT data FROM events WHERE guild_id=? AND created_at>?", g.id, week):
+            try:
+                d = json.loads(r["data"])
+            except (TypeError, ValueError):
+                continue
+            if d.get("checked") is True and d.get("yes"):
+                evs.append(f"• {d['what'][:60]} — пришли {len(d.get('came') or [])} из {len(d['yes'])}")
+        if evs:
+            parts.append("**📣 Сборы**\n" + "\n".join(evs[:8]))
+        chron = db.all("SELECT text FROM chronicle WHERE guild_id=? AND created_at>? ORDER BY id DESC LIMIT 6", g.id, week)
+        if chron:
+            parts.append("**📖 Из летописи**\n" + "\n".join(f"• {str(r['text'])[:120]}" for r in chron))
+        if len(parts) == 1:
+            return None
+        return bot.brand(g, "\n\n".join(parts))
+
+    async def post_paper(self, guild):
+        text = self.newspaper(guild)
+        c = self.bot.ch(guild, "botcmd")
+        if not text or not c:
+            return
+        self.bot.db.gset(guild, "paper:draft", text[:4000])
+        v = discord.ui.View(timeout=None)
+        v.add_item(PaperButton())
+        try:
+            await c.send(content="🗞 Черновик газеты недели — посмотрите и опубликуйте:",
+                         embed=self.bot.embed("🗞 Газета недели", text[:4000], config.GOLD, guild), view=v,
+                         allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            pass
+
     async def build_report(self, guild):
         bot, db = self.bot, self.bot.db
         self.flush_all(guild)
@@ -214,6 +294,11 @@ class Activity(commands.Cog):
             if c and self.bot.feature(g, "reports:weekly"):  # отчёт можно выключить, а неделю обнулять надо всегда
                 text = await self.build_report(g)
                 await c.send(embed=self.bot.embed("📊 Отчёт за неделю", text[:4000], config.GOLD, g))
+            if self.bot.feature(g, "reports:newspaper"):  # газета — до обнуления недели (там топ за неделю)
+                try:
+                    await self.post_paper(g)
+                except Exception:
+                    log.exception("Газета недели")
             self.bot.db.gset(g, key, 1)
             self.bot.db.q("UPDATE activity SET week_voice=0, week_messages=0 WHERE guild_id=?", g.id)
 
@@ -233,20 +318,20 @@ class Activity(commands.Cog):
     @app_commands.default_permissions(manage_messages=True)
     @app_commands.command(name="кто", description="Список людей по фильтрам: ранг, взнос, экзамен, войс, выговоры…")
     @app_commands.rename(rank="ранг", dues="взнос", exam="экзамен", voice="в_войсе", warns="выговоры",
-                         term="срок_отбыт", idle="неактив_дней", limit="сколько")
+                         term="срок_отбыт", risk="на_грани", idle="неактив_дней", limit="сколько")
     @app_commands.choices(rank=[app_commands.Choice(name=config.ROLE_NAMES[k], value=k) for k in config.ROSTER_ORDER][:25],
                           dues=[app_commands.Choice(name="должны", value="unpaid"),
                                 app_commands.Choice(name="сдали", value="paid")],
-                          exam=YN, voice=YN, warns=YN, term=YN)
+                          exam=YN, voice=YN, warns=YN, term=YN, risk=YN)
     async def who(self, inter: discord.Interaction, rank: str = None, dues: str = None, exam: str = None,
-                  voice: str = None, warns: str = None, term: str = None,
+                  voice: str = None, warns: str = None, term: str = None, risk: str = None,
                   idle: app_commands.Range[int, 1, 365] = None, limit: app_commands.Range[int, 1, 60] = None):
         from core import people
         if not self.bot.has(inter.user, WHO_BY):
             return await inter.response.send_message("⛔ Это справка для руководства и должностных.", ephemeral=True)
         yn = {"1": True, "0": False}
         a = {"rank": rank, "dues": dues, "exam": yn.get(exam), "in_voice": yn.get(voice), "warns": yn.get(warns),
-             "probation_done": yn.get(term), "inactive_days": idle, "limit": limit}
+             "probation_done": yn.get(term), "at_risk": yn.get(risk), "inactive_days": idle, "limit": limit}
         res = people.query(self.bot, inter.guild, a)
         v = people.view_for(self.bot, inter.user, res)
         await inter.response.send_message(people.render(res)[:1990], ephemeral=True,
@@ -256,4 +341,5 @@ class Activity(commands.Cog):
 
 
 async def setup(bot):
+    bot.add_dynamic_items(PaperButton)
     await bot.add_cog(Activity(bot))

@@ -4,6 +4,7 @@
 import datetime as dt
 import logging
 import re
+import time
 
 import discord
 from discord.ext import commands, tasks
@@ -24,6 +25,19 @@ RULES = [  # (флаг в /настройки, категория, тяжест�
 ]
 INVITE_RX = re.compile(r"(?:discord\.gg/|discord(?:app)?\.com/invite/)([\w-]+)", re.I)
 SEVERITY_COLOR = {"low": 0xFDD835, "medium": 0xFB8C00, "high": 0xE53935}
+
+# Встроенный AutoMod Discord (moderation:automod, по умолчанию выкл): блокирует ДО публикации, без нагрузки на бота.
+# Правила бота узнаём по префиксу названия; семью (все её роли) правила не трогают — только гостей и чужих.
+AM_PREFIX = "🎩 Швейцар: "
+AM_KEYWORD = {  # название → (тумблер moderation:<…>, regex-шаблоны Rust-синтаксиса, сообщение автору)
+    "реклама серверов": ("invites", [r"discord(app)?\.(gg|com/invite)/[\w-]+"],
+                         "Ссылки на другие серверы здесь запрещены."),
+    "скам-ссылки": ("scam", [r"(?i)(free\s*nitro|бесплатн\w*\s*нитро|steamcommunity\.[a-z]{2,}|dlscord|disc0rd|discorcl)"],
+                    "Похоже на скам-ссылку — сообщение не отправлено."),
+    "сделки за реал": ("realmoney", [r"(?i)(прода[мюё]|куплю|покупаю|обменяю)[^\n]{0,40}(вирт|валют|акк|кк|лям)[^\n]{0,60}"
+                        r"(руб|₽|реал|карт|сбер|тиньк|qiwi|usdt|крипт)"],
+                       "Сделки за реальные деньги запрещены правилами проекта."),
+}
 
 
 class FlagAction(discord.ui.DynamicItem[discord.ui.Button], template=r"flag:(?P<a>[a-z]+):(?P<id>\d+)"):
@@ -81,9 +95,64 @@ class Moderation(commands.Cog):
         self.buffer = {}  # guild_id -> [сообщения]: у каждой семьи своя очередь, свой ключ ИИ и свой лимит
         self.ai_loop.change_interval(seconds=max(60, config.AI_MOD_INTERVAL))
         self.ai_loop.start()
+        self.automod_loop.start()
 
     def cog_unload(self):
         self.ai_loop.cancel()
+        self.automod_loop.cancel()
+
+    # ---------- встроенный AutoMod Discord ----------
+    @tasks.loop(minutes=10)
+    @guarded
+    async def automod_loop(self):
+        """Тумблер moderation:automod: включён — правила бота есть на сервере, выключен — правил бота нет."""
+        for g in list(self.bot.home_guilds):
+            if not g.me.guild_permissions.manage_guild:
+                continue
+            try:
+                await self.sync_automod(g, self.bot.feature(g, "moderation:automod"))
+            except discord.HTTPException as e:
+                log.info("AutoMod «%s»: %s", g.name, e)
+
+    @automod_loop.before_loop
+    async def _am_before(self):
+        await self.bot.wait_until_ready()
+
+    async def sync_automod(self, g, on):
+        rules = [r for r in await g.fetch_automod_rules() if r.name.startswith(AM_PREFIX)]
+        if not on:
+            for r in rules:
+                await r.delete(reason="Встроенный AutoMod выключен в /настройки")
+            return
+        have = {r.name for r in rules}
+        exempt = [r for r in (self.bot.role(g, k) for k in config.FAMILY_PLUS) if r][:20]
+        alert = self.bot.ch(g, "modqueue")
+
+        def actions(msg):
+            out = [discord.AutoModRuleAction(custom_message=msg[:150])]
+            if alert:
+                out.append(discord.AutoModRuleAction(channel_id=alert.id))
+            return out
+
+        E = discord.AutoModRuleEventType.message_send
+        T = discord.AutoModRuleTriggerType
+        for name, (flag, patterns, msg) in AM_KEYWORD.items():
+            if AM_PREFIX + name in have or not self.bot.feature(g, f"moderation:{flag}"):
+                continue
+            await g.create_automod_rule(name=AM_PREFIX + name, event_type=E,
+                                        trigger=discord.AutoModTrigger(type=T.keyword, regex_patterns=patterns),
+                                        actions=actions(msg), enabled=True, exempt_roles=exempt,
+                                        reason="Встроенный AutoMod (Швейцар)")
+        if AM_PREFIX + "массовые упоминания" not in have:
+            await g.create_automod_rule(name=AM_PREFIX + "массовые упоминания", event_type=E,
+                                        trigger=discord.AutoModTrigger(type=T.mention_spam, mention_limit=6),
+                                        actions=actions("Слишком много упоминаний в одном сообщении."), enabled=True,
+                                        exempt_roles=exempt, reason="Встроенный AutoMod (Швейцар)")
+        if AM_PREFIX + "спам" not in have:
+            await g.create_automod_rule(name=AM_PREFIX + "спам", event_type=E,
+                                        trigger=discord.AutoModTrigger(type=T.spam),
+                                        actions=[discord.AutoModRuleAction(custom_message="Похоже на спам.")],
+                                        enabled=True, exempt_roles=exempt, reason="Встроенный AutoMod (Швейцар)")
 
     def skip(self, message):
         if message.author.bot or not message.guild or not isinstance(message.author, discord.Member):
@@ -197,8 +266,12 @@ class Moderation(commands.Cog):
                   "оскорбления и травля участника, оскорбление родных, дискриминация (нация, религия), угрозы в "
                   "реальной жизни, реклама других серверов/семей, слив чужих личных данных, NSFW, скам, призывы к "
                   "читам или сделкам за реальные деньги. Ссылка-приглашение на этот же сервер или в альянс — не реклама. "
+                  "Отдельно — НАКАЛ: двое и больше по-настоящему ругаются между собой и спор разгорается (не шутят "
+                  "и не отыгрывают). Это не нарушение, но руководству надо знать. "
                   'Верни {"violations":[{"i":номер,"severity":"low"|"medium"|"high","category":"кратко",'
-                  '"reason":"1 предложение"}]}; если нарушений нет — {"violations":[]}.')
+                  '"reason":"1 предложение"}],"conflicts":[{"i":номер последнего сообщения спора,'
+                  '"who":["имена"],"summary":"суть спора в 1-2 предложениях"}]}; '
+                  'нет нарушений и споров — {"violations":[],"conflicts":[]}.')
         try:
             data = await ai.ask_json(system, "\n".join(lines), max_tokens=700, light=True)
         except Exception as e:
@@ -211,6 +284,47 @@ class Moderation(commands.Cog):
                 continue
             await self.flag(m, str(v.get("category", "нарушение"))[:60], str(v.get("severity", "low")),
                             str(v.get("reason", ""))[:300], True)
+        if self.bot.feature(g, "moderation:conflicts"):
+            for c in (data or {}).get("conflicts", []) if isinstance(data, dict) else []:
+                try:
+                    m = batch[int(c.get("i"))]
+                except (TypeError, ValueError, IndexError, AttributeError):
+                    continue
+                await self.conflict(g, m, c)
+
+    async def conflict(self, g, m, c):
+        """Разгорается спор — тихо сообщить руководству (без наказаний), кнопка «медленный режим» в том канале."""
+        key = f"conflict:{m.channel.id}"
+        if time.time() - float(self.bot.db.gget(g, key) or 0) < 1800:
+            return  # по одному каналу — не чаще раза в полчаса
+        self.bot.db.gset(g, key, time.time())
+        target = self.bot.ch(g, "modqueue") or self.bot.ch(g, "council_chat")
+        if not target:
+            return
+        who = ", ".join(str(x)[:32] for x in (c.get("who") or [])[:4])
+        v = discord.ui.View(timeout=3600)
+        ch = m.channel
+
+        async def slow(inter: discord.Interaction):
+            if not self.bot.has(inter.user, config.LEAD + ["hr_head"]):
+                return await inter.response.send_message("⛔ Только руководство.", ephemeral=True)
+            try:
+                await ch.edit(slowmode_delay=30, reason=f"Накал в чате — {inter.user}")
+            except discord.HTTPException:
+                return await inter.response.send_message("❌ Нет прав менять канал.", ephemeral=True)
+            await inter.response.edit_message(view=None, content=f"🐢 Медленный режим 30 с в {ch.mention} "
+                                                                 f"({inter.user.mention}). Снять: «Швейцар, медленный режим 0».")
+        b = discord.ui.Button(label="Медленный режим 30 с", emoji="🐢", style=discord.ButtonStyle.secondary)
+        b.callback = slow
+        v.add_item(b)
+        v.add_item(discord.ui.Button(label="К сообщению", url=m.jump_url))
+        try:
+            await target.send(embed=self.bot.embed("🔥 В чате накаляется",
+                                                   f"{ch.mention}: {who or 'несколько человек'}\n"
+                                                   f"{str(c.get('summary') or '')[:400]}\n\nЭто не нарушение — "
+                                                   "просто чтобы вы знали. Решать вам.", 0xFB8C00, g), view=v)
+        except discord.HTTPException:
+            pass
 
     @ai_loop.before_loop
     async def _before(self):

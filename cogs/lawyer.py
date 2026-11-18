@@ -86,7 +86,7 @@ class Lawyer(commands.Cog):
             text = "🔎 Нашёл в правилах и законах (ИИ не подключён — показываю самые подходящие пункты):\n\n" + \
                    "\n\n".join(f"📄 **{h['title']}**\n{quote(h['text'])}" for h in hits)
             return text, [(h["title"], h["url"]) for h in hits], False
-        context, sources, _ = bot.kb.context(gid, question)
+        context, sources, _ = await bot.kb.context_smart(gid, question, ai)  # смысл + слова; без Gemini — по словам
         system = f"{bot.brand(gid, BASE_PROMPT)}\n\nЗАДАЧА: {MODES[mode][1]}\n\nДОКУМЕНТЫ:\n{context}"
         reply = await ai.ask(system, question, max_tokens=1600 if mode == "doc" else 900, smart=True, cache=True)
         return reply or "ИИ не дал ответа, попробуй переформулировать.", sources, True

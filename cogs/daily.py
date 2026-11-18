@@ -226,6 +226,12 @@ class Daily(commands.Cog):
             e.add_field(name=f"💤 Не появлялись {INACTIVE_DAYS}+ дн. ({len(idle)})",
                         value=(", ".join(m.mention for m in idle[:15]) + ("…" if len(idle) > 15 else ""))[:1024]
                         + "\nПодробно: `/неактив`", inline=False)
+        from core.people import at_risk
+        risky = [(m, r) for m in fam if (r := at_risk(bot, guild, m))]
+        if risky:
+            e.add_field(name=f"⚠️ На грани неактива ({len(risky)})",
+                        value="\n".join(f"{m.mention} — {r}" for m, r in risky[:8])[:1000]
+                        + "\nНаписать им: «Швейцар, кто на грани неактива» → кнопка «Написать им в ЛС»", inline=False)
         warns = db.all("SELECT user_id, COUNT(*) n FROM warns WHERE guild_id=? AND active=1 GROUP BY user_id "
                        "ORDER BY n DESC", gid)
         if warns:

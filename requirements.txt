@@ -9,3 +9,5 @@ imageio-ffmpeg>=0.5
 disnake[voice]>=2.12
 edge-tts>=7.2
 gTTS>=2.5
+rapidfuzz>=3.0
+pymorphy3>=2.0

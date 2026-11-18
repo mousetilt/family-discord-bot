@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """База знаний для ИИ-юриста: тексты правил и законов, импорт с форума, поиск по ним."""
+import hashlib
 import io
+import logging
 import math
 import re
+from array import array
 from collections import Counter
 
 import aiohttp
@@ -23,6 +26,34 @@ STOP = set("""и в во не что он на я с со как а то все 
 куда зачем всех никогда можно при наконец два об другой хоть после над больше тот через эти нас про всего них какая
 много разве три эту моя впрочем хорошо свою этой перед иногда лучше чуть том нельзя такой им более всегда конечно
 всю между это ли ах ох эх the a of to is""".split())
+log = logging.getLogger("family-bot.kb")
+VEC_SCHEMA = """
+CREATE TABLE IF NOT EXISTS kb_vec(guild_id INTEGER NOT NULL, hash TEXT NOT NULL, vec BLOB NOT NULL,
+                                  PRIMARY KEY(guild_id, hash));
+"""
+INDEX_BATCH = 300   # за один вопрос доиндексируем не больше стольких кусков (остальное — со следующими вопросами)
+SMART_CHARS = 7000  # смысловой поиск точнее — ИИ хватает в 2–3 раза меньше текста, чем при поиске по словам
+
+
+def chunk_hash(ch):
+    return hashlib.md5((ch["title"] + "\n" + ch["text"]).encode("utf-8")).hexdigest()
+
+
+def unit(v):
+    n = math.sqrt(sum(x * x for x in v)) or 1.0
+    return [x / n for x in v]
+
+
+def pack(v):
+    return array("f", unit(v)).tobytes()
+
+
+def unpack(b):
+    a = array("f")
+    a.frombytes(b)
+    return a
+
+
 HEADING = re.compile(r"^\s*(статья|глава|раздел|часть|пункт|§)\s*[0-9IVXLC]+|^\s*[0-9]{1,2}\.\s+\S|^\s*[0-9]{1,2}\.[0-9]+\.?\s",
                      re.I)
 
@@ -66,6 +97,12 @@ class KnowledgeBase:
     def __init__(self, db):
         self.db = db
         self._chunks = {}  # guild_id -> (chunks, df, avg)
+        self._vec = {}     # (guild_id куска, hash) -> вектор (array): кэш смыслового поиска
+        try:
+            db.c.executescript(VEC_SCHEMA)
+            db.c.commit()
+        except Exception:  # noqa: BLE001 — база только для чтения в тестах и т.п.: просто без векторов
+            log.exception("kb_vec: таблица не создана")
 
     # ---------- документы ----------
     def family_doc(self, gid):
@@ -79,7 +116,7 @@ class KnowledgeBase:
     def docs(self, gid, cats=None):
         """Документы семьи + общие для всех (guild_id=0, правила проекта)."""
         rows = [dict(r) for r in self.db.all("SELECT * FROM kb_docs WHERE guild_id IN (0, ?) ORDER BY id", gid)]
-        rows.append(self.family_doc(gid))
+        rows.append({**self.family_doc(gid), "guild_id": gid})
         if cats:
             rows = [r for r in rows if r["category"] in cats]
         return rows
@@ -114,8 +151,10 @@ class KnowledgeBase:
         for d in self.docs(gid):
             for i, c in enumerate(chunk_text(d["content"])):
                 toks = tokens(d["title"] + " " + c)
-                chunks.append({"doc_id": d["id"], "title": d["title"], "url": d["url"], "category": d["category"],
-                               "text": c, "tf": Counter(toks), "len": len(toks) or 1, "n": i})
+                ch = {"doc_id": d["id"], "title": d["title"], "url": d["url"], "category": d["category"],
+                      "text": c, "tf": Counter(toks), "len": len(toks) or 1, "n": i, "gid": d.get("guild_id", gid)}
+                ch["hash"] = chunk_hash(ch)
+                chunks.append(ch)
         df = Counter()
         for ch in chunks:
             df.update(set(ch["tf"]))
@@ -164,6 +203,77 @@ class KnowledgeBase:
         for ch in self.search(gid, query, k=40, cats=cats):
             block = f"=== {ch['title']} [{config.KB_CATEGORIES.get(ch['category'], ch['category'])}] ===\n{ch['text']}"
             if used + len(block) > max_chars:
+                break
+            parts.append(block)
+            used += len(block)
+            if (ch["title"], ch["url"]) not in sources:
+                sources.append((ch["title"], ch["url"]))
+        return "\n\n".join(parts), sources, False
+
+    # ---------- смысловой поиск (эмбеддинги Gemini) ----------
+    def _load_vecs(self, chunks):
+        need = [c for c in chunks if (c["gid"], c["hash"]) not in self._vec]
+        for gid in {c["gid"] for c in need}:
+            for r in self.db.all("SELECT hash, vec FROM kb_vec WHERE guild_id=?", gid):
+                self._vec[(gid, r["hash"])] = unpack(r["vec"])
+
+    async def _index(self, chunks, ai):
+        """Досчитать векторы кускам, у которых их ещё нет (порциями, чтобы не встать надолго)."""
+        self._load_vecs(chunks)
+        todo = [c for c in chunks if (c["gid"], c["hash"]) not in self._vec][:INDEX_BATCH]
+        if not todo:
+            return
+        vecs = await ai.embed([f"{c['title']}\n{c['text']}" for c in todo])
+        for c, v in zip(todo, vecs):
+            if not v:
+                continue
+            b = pack(v)
+            self.db.q("INSERT OR REPLACE INTO kb_vec(guild_id, hash, vec) VALUES(?,?,?)", c["gid"], c["hash"], b)
+            self._vec[(c["gid"], c["hash"])] = unpack(b)
+
+    async def semantic(self, gid, query, ai, k=12, cats=None):
+        """Ближайшие по смыслу куски. Нет ключа Gemini / ошибка — None (тогда работает поиск по словам)."""
+        if ai is None or not getattr(ai, "keys", {}).get("gemini"):
+            return None
+        chunks = (self._chunks.get(gid) or self._build(gid))[0]
+        if cats:
+            chunks = [c for c in chunks if c["category"] in cats]
+        if not chunks:
+            return None
+        try:
+            await self._index(chunks, ai)
+            q = unit((await ai.embed([query], query=True))[0])
+        except Exception as e:  # noqa: BLE001 — лимит, сеть: молча откатываемся на поиск по словам
+            log.info("Смысловой поиск недоступен: %s", str(e)[:150])
+            return None
+        scored = []
+        for c in chunks:
+            v = self._vec.get((c["gid"], c["hash"]))
+            if v is not None and len(v) == len(q):
+                scored.append((sum(a * b for a, b in zip(q, v)), c))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [c for _, c in scored[:k]] or None
+
+    async def context_smart(self, gid, query, ai, cats=None):
+        """Как context(), но большая база — гибридом: смысл (эмбеддинги) + слова, объединённые по рангу (RRF).
+        Текста ИИ уходит меньше (SMART_CHARS), а нужный пункт находится, даже если сказано другими словами."""
+        docs = self.docs(gid, cats)
+        if sum(len(d["content"] or "") for d in docs) <= self.FULL_LIMIT:
+            return self.context(gid, query, cats)
+        sem = await self.semantic(gid, query, ai, k=12, cats=cats)
+        if not sem:
+            return self.context(gid, query, cats)
+        words = self.search(gid, query, k=12, cats=cats)
+        rank = {}
+        for lst in (sem, words):
+            for i, c in enumerate(lst):
+                key = (c["doc_id"], c["n"])
+                rank.setdefault(key, [c, 0.0])[1] += 1.0 / (60 + i)
+        merged = [c for c, _ in sorted(rank.values(), key=lambda x: x[1], reverse=True)]
+        parts, sources, used = [], [], 0
+        for ch in merged:
+            block = f"=== {ch['title']} [{config.KB_CATEGORIES.get(ch['category'], ch['category'])}] ===\n{ch['text']}"
+            if used + len(block) > SMART_CHARS:
                 break
             parts.append(block)
             used += len(block)

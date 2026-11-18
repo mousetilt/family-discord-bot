@@ -254,6 +254,27 @@ class AI:
         parts = (cands[0].get("content") or {}).get("parts", []) if cands else []
         return "".join(p.get("text", "") for p in parts if not p.get("thought"))
 
+    EMBED_MODEL = "gemini-embedding-001"
+    EMBED_DIM = 256  # укороченные векторы: в 3 раза меньше памяти и счёта, точность для поиска по правилам та же
+
+    async def embed(self, texts, query=False):
+        """Смысловые векторы (бесплатно на ключе Gemini) → [[float]*EMBED_DIM] в том же порядке. Нет ключа — AIUnavailable.
+        query=True — вектор вопроса (у Gemini разные режимы для вопроса и для документа)."""
+        key = self.keys.get("gemini")
+        if not key:
+            raise AIUnavailable("Смысловой поиск работает на бесплатном ключе Gemini (/ии ключ)")
+        out = []
+        task = "RETRIEVAL_QUERY" if query else "RETRIEVAL_DOCUMENT"
+        for i in range(0, len(texts), 100):  # не больше 100 текстов за запрос
+            reqs = [{"model": f"models/{self.EMBED_MODEL}", "content": {"parts": [{"text": t[:6000]}]},
+                     "taskType": task, "outputDimensionality": self.EMBED_DIM} for t in texts[i:i + 100]]
+            data = await self._post(f"https://generativelanguage.googleapis.com/v1beta/models/{self.EMBED_MODEL}"
+                                    ":batchEmbedContents", {"requests": reqs}, {"x-goog-api-key": key})
+            out += [e.get("values") or [] for e in data.get("embeddings") or []]
+        if len(out) != len(texts):
+            raise AIUnavailable("Эмбеддинги вернулись не полностью")
+        return out
+
     async def grounded(self, system, prompt, max_tokens=600):
         """Ответ Gemini с поиском Google (бесплатно на ключе Gemini) → (текст, [(название, ссылка)]).
         Нет ключа Gemini или поиск не ответил — AIUnavailable."""

@@ -5,6 +5,7 @@
 ИИ их не пишет, поэтому выдумать человека не может."""
 import asyncio
 import datetime as dt
+import json
 import random
 
 import discord
@@ -41,6 +42,49 @@ def last_seen(bot, guild, member):
     return d
 
 
+def week_elapsed_days(t=None):
+    """Сколько дней прошло текущей «недели активности» (она обнуляется в воскресенье 18:00 UTC, cogs/activity.py)."""
+    t = t or now()
+    start = (t - dt.timedelta(days=(t.weekday() + 1) % 7)).replace(hour=18, minute=0, second=0, microsecond=0)
+    if start > t:
+        start -= dt.timedelta(days=7)
+    return (t - start).total_seconds() / 86400
+
+
+def at_risk(bot, guild, member):
+    """«На грани неактива» → причина строкой или None. Ещё не неактив, но гаснет: давно не заходил, в войсе намного
+    реже своего обычного, пропустил два последних сбора, на которые записывался. Без ИИ — только по данным."""
+    vac = bot.role(guild, "vacation")
+    if (vac and vac in member.roles) or is_inactive(bot, guild, member):
+        return None
+    why = []
+    last = last_seen(bot, guild, member)
+    if last and not member.voice and (now() - last).days >= 3:
+        why.append(f"не заходил {(now() - last).days} дн.")
+    r = bot.db.one("SELECT voice_seconds, week_voice FROM activity WHERE guild_id=? AND user_id=?", guild.id, member.id)
+    joined = getattr(member, "joined_at", None)
+    if r and joined:
+        weeks = max(1.0, min(52.0, (now() - joined).days / 7))
+        avg = (r["voice_seconds"] or 0) / weeks
+        elapsed = week_elapsed_days()
+        if avg >= 3600 and elapsed >= 2 and (r["week_voice"] or 0) < 0.3 * avg * elapsed / 7:
+            why.append("в войсе втрое реже обычного")
+    seen = 0
+    for e in bot.db.all("SELECT data FROM events WHERE guild_id=? ORDER BY created_at DESC LIMIT 15", guild.id):
+        try:
+            d = json.loads(e["data"])
+        except (TypeError, ValueError):
+            continue
+        if d.get("checked") is True and member.id in (d.get("yes") or []):
+            seen += 1
+            if member.id in (d.get("came") or []):
+                break
+            if seen == 2:
+                why.append("не пришёл на 2 последних сбора, хотя записался")
+                break
+    return "; ".join(why) or None
+
+
 def _bool(v):
     """true/false/«да»/«нет» от ИИ → True/False, иначе None (фильтр не задан)."""
     if isinstance(v, bool):
@@ -67,7 +111,7 @@ def filters(a):
          "exam": _bool(a.get("exam")), "inactive_days": _int(a.get("inactive_days"), 1, 365),
          "active": _bool(a.get("active")), "probation_done": _bool(a.get("probation_done")),
          "in_voice": _bool(a.get("in_voice")), "warns": _bool(a.get("warns")),
-         "dues": _key(a.get("dues"), ("paid", "unpaid")),
+         "dues": _key(a.get("dues"), ("paid", "unpaid")), "at_risk": _bool(a.get("at_risk")),
          "in_family": _bool(a.get("in_family")) is not False,
          "limit": _int(a.get("limit"), 1, LIMIT_MAX) or LIMIT}
     return f
@@ -94,6 +138,8 @@ def criteria(f):
         out.append("с выговорами" if f["warns"] else "без выговоров")
     if f["dues"]:
         out.append("сдали взнос" if f["dues"] == "paid" else "должны взнос")
+    if f["at_risk"] is not None:
+        out.append("на грани неактива" if f["at_risk"] else "не на грани")
     if not f["in_family"]:
         out.append("весь сервер")
     return ", ".join(out) or "вся семья"
@@ -181,6 +227,12 @@ def query(bot, guild, a):
                 keep(lambda m: m.id not in owe and not any(r in m.roles for r in free))
             if any(any(r in m.roles for r in free) for m in bot.family_members(guild)):
                 notes.append("новички и отпускники взнос не платят")
+    if f["at_risk"] is not None:
+        risk = {m.id: at_risk(bot, guild, m) for m in pool}
+        keep(lambda m: bool(risk[m.id]) == f["at_risk"])
+        if f["at_risk"]:
+            for m in pool:
+                info[m.id].append(risk[m.id])
     pool.sort(key=lambda m: (bot.rank_index(m), m.display_name.lower()))
     return {"rows": [(m, "; ".join(info.get(m.id, []))) for m in pool], "total": len(pool), "notes": notes,
             "filters": f}

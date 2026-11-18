@@ -576,6 +576,35 @@ class Applications(commands.Cog):
         if bot.ai_for(inter.guild).on:
             asyncio.create_task(self.ai_review(inter.guild, app_id, msg, inter.user))
 
+    def history_facts(self, guild, a, user):
+        """Проверенные факты о кандидате из НАШЕЙ базы (только этот сервер): прошлые заявки, отказы и причины, был ли
+        в семье и когда ушёл, тот же Static у другого Discord-аккаунта, возраст аккаунта."""
+        db, out, gid = self.bot.db, [], guild.id
+        prev = db.all("SELECT status, deny_reason, created_at FROM applications WHERE guild_id=? AND user_id=? AND id<>? "
+                      "ORDER BY id DESC LIMIT 5", gid, a["user_id"], a["id"])
+        denied = [p for p in prev if p["status"] == "denied"]
+        if denied:
+            out.append(f"раньше отказывали {len(denied)} раз" + (f" (последний: {str(denied[0]['deny_reason'])[:80]})"
+                                                                  if denied[0]["deny_reason"] else ""))
+        if any(p["status"] == "accepted" for p in prev):
+            out.append("уже был принят в семью раньше")
+        try:
+            left = db.one("SELECT text, ts FROM member_log WHERE guild_id=? AND user_id=? AND kind='members' AND "
+                          "text LIKE '%покинул сервер%' ORDER BY id DESC LIMIT 1", gid, a["user_id"])
+        except Exception:  # noqa: BLE001 — журнала нет
+            left = None
+        if left:
+            out.append(f"уходил с сервера <t:{left['ts']}:R>")
+        if a["static_id"]:
+            other = db.one("SELECT user_id FROM applications WHERE guild_id=? AND static_id=? AND user_id<>? LIMIT 1",
+                           gid, a["static_id"], a["user_id"])
+            if other:
+                out.append(f"этот Static ID уже указывал другой аккаунт (<@{other['user_id']}>)")
+        created = getattr(user, "created_at", None)
+        if created and (now() - created).days < 30:
+            out.append(f"аккаунту Discord всего {(now() - created).days} дн.")
+        return out
+
     async def ai_review(self, guild, app_id, msg, user):
         bot = self.bot
         a = bot.db.one("SELECT * FROM applications WHERE id=?", app_id)
@@ -584,9 +613,13 @@ class Applications(commands.Cog):
                   "вопросы. Будь объективен и краток. Мат и сленг в ответах — не повод для отказа, а грубость, "
                   "желание обманывать, готовность нарушать правила или сливать информацию — повод.\n"
                   f"Правила семьи:\n{bot.rules_text(guild)}\n\n"
+                  "«история_по_нашей_базе» — проверенные факты бота (прошлые заявки, отказы, уходы, совпадения Static). "
+                  "Учитывай их; ничего сверх них о прошлом кандидата не придумывай.\n"
                   'Формат: {"answers":[{"score":0-10,"comment":"кратко"}], '
                   '"verdict":"принять"|"собеседование"|"отказать", "summary":"2-3 предложения", "red_flags":["..."]}')
+        history = self.history_facts(guild, a, user)
         prompt = json.dumps({
+            "история_по_нашей_базе": history,
             "анкета": {"ник": a["nick"], "static": a["static_id"], "возраст_и_стаж": a["age_exp"],
                        "почему_мы": a["reason"], "онлайн": a["online"]},
             "тест": f"{a['exam_score']}/{a['exam_total']}, попытка {a['exam_attempt']}",
@@ -609,6 +642,8 @@ class Applications(commands.Cog):
         flags = [str(f) for f in data.get("red_flags", []) if f]
         if flags:
             text += "\n⚠️ " + "; ".join(flags[:4])
+        if history:  # факты бота — рекрутёру как есть, отдельно от мнения ИИ
+            text += "\n📂 " + "; ".join(history[:4])
         bot.db.q("UPDATE applications SET ai_review=? WHERE id=?", text[:1000], app_id)
         a = bot.db.one("SELECT * FROM applications WHERE id=?", app_id)
         try:
