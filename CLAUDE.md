@@ -127,6 +127,19 @@
 - SQLite в режиме WAL (`core/db.py`), файлы `*.db-wal`/`*.db-shm` в `.gitignore`.
 - В копиях базы (`daily.make_backup`) автор анонимных обращений стирается; `bot_errors` в копию чужой семье не попадает.
 
+- **Разбор 2026.11.18 выполнен** (версии .6–.11, статус — в конце `docs/ИДЕИ_И_ДОРАБОТКИ.md`). Новое, что важно помнить:
+  - ИИ: `ask(..., json_mode=True, images=[(mime, bytes)])` — строгий JSON и картинки (только Gemini); `AI.embed()` —
+    векторы 256; `kb.context_smart()` — гибрид смысл+слова (таблица `kb_vec`), юрист работает через него.
+  - Хостинг: `host:*` (глобальные), кнопки `host:ok|cfg`, тумблер `service:hosting`; память — `maintenance.mem_usage()`.
+  - Новые коги: `export` (/выгрузка CSV), `birthdays` (/др), `levels` (уровни, достижения, /магазин; `core/levels.py`).
+  - Новые модули/действия в `MODULES`: `events` (discord, results), `levels`, `moderation:automod|conflicts|raid|nuke`,
+    `hr:ai_mentor`, `assistant:voicemsg`, `persona:birthdays`, `reports:newspaper`. Числа: `app_ping_hours`, `auto_idle_days`.
+  - Речь: `paid_claim`, `undo`, `vacation(_end)`, `room`, `mentor_assign`, `relation_set`, `protocol`, `people.at_risk`.
+    Кнопки выбора человека — `WhoView` (`Assistant.ambiguous/name_scores`); откат — `Assistant.undo_push` (10 мин, в памяти).
+  - Необязательные библиотеки (`core/names.py`, jarvis, promo): rapidfuzz, pymorphy3, webrtcvad-wheels, qrcode —
+    импорт в try/except, без них всё работает.
+  - Общие функции для речи и команд: `Staff.start_vacation`, `VoiceRooms.room_speech`, `Mentorship.set_mentor`,
+    `Diplomacy.set_relation`, `Treasury.claim`, `Gatherings.results`, `Automation.relay_process`.
 - **Журнал действий** — `cogs/journal.py`, модуль `journal` (voice · mic · members · messages · server). Каналы
   `voice_log` «🎙・журнал-войса» и `audit` «📜・журнал-действий» (AUTO_CHANNELS, иначе `logs`); строки копятся в `buf` и
   уходят пачкой раз в 3 с. Таблица `member_log` (guild_id, user_id, actor_id, kind), чистится по `set:journal_days`.
