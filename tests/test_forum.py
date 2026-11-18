@@ -151,5 +151,70 @@ class Cog(unittest.TestCase):
         self.assertEqual(db.one("SELECT COUNT(*) n FROM forum_cases WHERE guild_id=6")["n"], 0)
 
 
+class NoSpam(unittest.TestCase):
+    """Дело: оповещения только при реальных изменениях, итог и статус — по одному разу."""
+
+    def setUp(self):
+        import asyncio
+        from types import SimpleNamespace as NS
+
+        from cogs.forumwatch import SCHEMA, ForumWatch
+        from core.db import DB
+        self.run = lambda c: asyncio.run(c)
+        self.db = DB(":memory:")
+        self.db.c.executescript(SCHEMA)
+        self.db.q("INSERT INTO forum_cases(guild_id, thread_id, forum_id, title, url, kind, role, defendant, applicant, "
+                  "status, notified_status, message_id, last_post_ts) VALUES(5, 100, 1490, 'Иск №1', 'u', 'иск', "
+                  "'defendant', 'Ваня Ульянов', 'Истец', 'pending', 'pending', 1, 1000)")
+        self.fw = ForumWatch.__new__(ForumWatch)
+        self.fw.bot = NS(db=self.db, ai_for=lambda g: NS(on=False))
+        self.sent = []
+
+        async def refresh(g, cid, note=None):
+            if note:
+                self.sent.append(note)
+        self.fw.refresh_card = refresh
+        self.g = NS(id=5)
+        self.meta = {"title": "Иск №1", "prefix": "", "forum_id": 1490, "locked": False, "pages": 1}
+        self.posts = [{"id": 1, "author": "Истец", "ts": 1000, "text": "Прошу наказать"}]
+
+    def cycle(self):
+        fw, meta, posts = self.fw, dict(self.meta), list(self.posts)
+
+        class C:
+            async def thread(self, tid, latest=False):
+                return meta, posts
+        st = {"read": 0, "upd": 0, "new": 0}
+        self.run(fw.read(self.g, C(), 100, None, None, None, [], [], st))
+
+    def test_flow(self):
+        self.cycle()
+        self.assertEqual(self.sent, [])  # ничего не изменилось — тишина
+        self.posts.append({"id": 2, "author": "Судья", "ts": 2000, "text": "Принято к рассмотрению"})
+        self.cycle()
+        self.cycle()
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("Новый ответ", self.sent[0])
+        self.meta["prefix"] = "Рассмотрено"
+        self.posts.append({"id": 3, "author": "Судья", "ts": 3000, "text": "Решение: штраф 50к ответчику"})
+        self.cycle()
+        self.assertEqual(len(self.sent), 2)
+        self.assertIn("Итог", self.sent[1])
+        self.assertIn("Статус", self.sent[1])
+        self.assertNotIn("Новый ответ", self.sent[1])  # пост с решением не дублируется «новым ответом»
+        self.cycle()
+        self.cycle()
+        self.assertEqual(len(self.sent), 2)
+        c = self.db.one("SELECT * FROM forum_cases WHERE thread_id=100")
+        self.assertEqual(c["result_post"], 3)
+        self.assertEqual(c["status"], "reviewed")
+        # статус «мигнул» обратно и снова «рассмотрено» — повторно не оповещаем
+        self.meta["prefix"] = ""
+        self.cycle()
+        self.meta["prefix"] = "Рассмотрено"
+        self.cycle()
+        self.assertEqual(len(self.sent), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,10 @@
   темы — читаем (не больше MAX_READS за цикл, паузы 2 с, одна сессия). Кэш тем — forum_threads(thread_id, last_ts).
 • Фамилия семьи во всех формах + Глава по имени/статику/должности (core.forum.analyze), роль — ИИ (ask_json),
   без ИИ — эвристика. Ответчик/обвиняемый → карточка в «⚖・суды-и-жалобы» + пинг; остальное — тихий лог (forum_cases).
-• Дело: новые ответы — ветка под карточкой, переезд в «рассмотренные/отклонённые» или замок — статус в карточке."""
+• Дело: новые ответы — ветка под карточкой, переезд в «рассмотренные/отклонённые» или замок — статус в карточке.
+• Без повторов: forum_cases.notified_status — статусы, о которых уже сказали; result_post — id поста, из которого уже
+  взят итог (ИИ разбирает решение один раз на пост). Новое дело — одна карточка, новые ответы — одно короткое
+  сообщение в ветке, новый статус/решение — один раз. Ничего не изменилось — молчим."""
 import asyncio
 import json
 import logging
@@ -45,7 +48,8 @@ CREATE TABLE IF NOT EXISTS forum_cases(
     title TEXT, url TEXT, kind TEXT, role TEXT, defendant TEXT, member_id INTEGER, head INTEGER DEFAULT 0,
     applicant TEXT, summary TEXT, case_no TEXT, status TEXT DEFAULT 'pending', body TEXT, decision TEXT,
     channel_id INTEGER, message_id INTEGER, dthread_id INTEGER, last_post_ts INTEGER DEFAULT 0,
-    checked_ts INTEGER DEFAULT 0, created_ts INTEGER, updated_ts INTEGER, UNIQUE(guild_id, thread_id));
+    checked_ts INTEGER DEFAULT 0, created_ts INTEGER, updated_ts INTEGER, notified_status TEXT, result TEXT,
+    result_post INTEGER DEFAULT 0, UNIQUE(guild_id, thread_id));
 CREATE INDEX IF NOT EXISTS ix_forum_cases_g ON forum_cases(guild_id, role, status);
 CREATE TABLE IF NOT EXISTS forum_people(
     guild_id INTEGER NOT NULL, name TEXT NOT NULL, static_id TEXT, user_id INTEGER, head INTEGER DEFAULT 0,
@@ -74,11 +78,42 @@ CLASSIFY = (
     "Нужно понять, в какой роли там член семьи {family} (фамилия {stem} в любой форме и латиницей) или Глава семьи "
     "({head}; должности: {titles}). Известные члены семьи: {people}.\n"
     "Верни JSON: {{\"role\":\"defendant|plaintiff|witness|mention\",\"who\":\"член семьи, как он назван\","
-    "\"head\":true|false,\"applicant\":\"кто подал (ник)\",\"summary\":\"суть одной строкой, до 150 знаков\","
+    "\"head\":true|false,\"applicant\":\"кто подал (ник)\",\"summary\":\"о чём дело: что вменяют и при каких "
+    "обстоятельствах, 1–2 предложения до 300 знаков\","
     "\"case_no\":\"номер иска/жалобы/обращения или пусто\"}}.\n"
     "defendant — на него жалуются, он ответчик/обвиняемый/нарушитель, обжалуют его действия; plaintiff — он сам подал; "
     "witness — свидетель; mention — просто упомянут. head=true, если дело против Главы (по имени или должности). "
     "Ничего не выдумывай.")
+
+RESULT = (
+    "Ты читаешь последние сообщения темы форума RP-проекта «Россия Онлайн» (жалоба / иск в суд / обращение в "
+    "прокуратуру). Ответчик / обвиняемый: {who}. Статус темы: {status}. Найди ИТОГ: что решили суд, прокуратура или "
+    "администрация.\n"
+    "Верни JSON: {{\"decided\":true|false,\"outcome\":\"что решили, 1–2 предложения, до 300 знаков\","
+    "\"penalty\":\"наказание / штраф / отказ / оправдан — или пусто\",\"by\":\"кто решил (суд, прокурор, ник)\"}}.\n"
+    "decided=false, если решения пока нет (ходатайства, вопросы, переносы). Только то, что написано в тексте, "
+    "ничего не выдумывай.")
+DECISION_RX = re.compile(r"решени|решил|постанов|приговор|удовлетвор|отказ|отклон|штраф|наказан|оправда|виновн|"
+                         r"прекра[тщ]", re.I)
+FINAL = ("reviewed", "rejected", "closed")
+
+
+def notified(c):
+    """Статусы дела, о которых уже оповестили (старые записи без отметки — текущий статус считаем сказанным)."""
+    raw = c["notified_status"]
+    if raw is None:
+        return {c["status"] or "pending"}
+    return {x for x in raw.split(",") if x}
+
+
+def decision_post(posts, applicant, after_id=0, final=False):
+    """Пост с решением новее after_id: последний не от заявителя, где есть слова решения; если тема закрыта
+    (рассмотрена/отклонена) — просто последний ответ не от заявителя."""
+    cand = [p for p in posts if p["id"] > (after_id or 0) and p["author"] != (applicant or "") and p["text"].strip()]
+    hit = [p for p in cand if DECISION_RX.search(p["text"])]
+    if hit:
+        return hit[-1]
+    return cand[-1] if final and cand else None
 
 
 def is_manager(bot, inter):
@@ -152,6 +187,14 @@ class ForumWatch(commands.Cog):
             bot.db.c.commit()
         except Exception:  # noqa: BLE001 — уже есть
             pass
+        for col, typ in (("notified_status", "TEXT"), ("result", "TEXT"), ("result_post", "INTEGER DEFAULT 0")):
+            try:  # отметки «уже оповестили» (добавлены позже); старым делам — текущий статус, чтобы не заспамить
+                bot.db.c.execute(f"ALTER TABLE forum_cases ADD COLUMN {col} {typ}")
+                if col == "notified_status":
+                    bot.db.c.execute("UPDATE forum_cases SET notified_status=status")
+                bot.db.c.commit()
+            except Exception:  # noqa: BLE001 — уже есть
+                pass
         self.clients = {}           # guild_id -> (логин, пароль, ForumClient)
         self.net_lock = asyncio.Lock()  # к форуму ходим строго по очереди, даже если семей с аккаунтом несколько
         self.backoff = {}           # guild_id -> до какого времени не ходить (анти-флуд)
@@ -276,10 +319,10 @@ class ForumWatch(commands.Cog):
         now = int(time.time())
         for c in KNOWN_CASES:
             db.q("INSERT OR IGNORE INTO forum_cases(guild_id, thread_id, forum_id, title, url, kind, role, defendant, "
-                 "head, applicant, summary, case_no, status, created_ts, updated_ts) "
-                 "VALUES(?,?,?,?,?,?,'defendant',?,?,?,?,?,?,?,?)", g.id, c["thread_id"], c["forum_id"], c["title"],
+                 "head, applicant, summary, case_no, status, notified_status, created_ts, updated_ts) "
+                 "VALUES(?,?,?,?,?,?,'defendant',?,?,?,?,?,?,?,?,?)", g.id, c["thread_id"], c["forum_id"], c["title"],
                  thread_url(c["thread_id"]), c["kind"], c["defendant"], c.get("head", 0), c["applicant"], c["summary"],
-                 c["case_no"], c["status"], now, now)
+                 c["case_no"], c["status"], c["status"], now, now)
         db.gset(g, "forum:seeded", "1")
 
     # ---------- канал и карточки ----------
@@ -325,7 +368,9 @@ class ForumWatch(commands.Cog):
         if c["case_no"]:
             e.add_field(name="Номер", value=f"№{c['case_no']}", inline=True)
         e.add_field(name="Суть", value=(c["summary"] or "—")[:1024], inline=False)
-        if c["decision"] and c["status"] in ("reviewed", "rejected", "closed"):
+        if c["result"]:
+            e.add_field(name="🏁 Итог", value=c["result"][:1024], inline=False)
+        elif c["decision"] and c["status"] in FINAL:
             e.add_field(name="Решение / последний ответ", value=c["decision"][:700], inline=False)
         e.set_footer(text=f"Форум · тема {c['thread_id']} · обновления — в ветке под карточкой · "
                           f"{self.bot.brand(g, config.FOOTER)}")
@@ -441,11 +486,13 @@ class ForumWatch(commands.Cog):
                     raise LoginRequired("ни один раздел не виден")
                 if hidden:
                     err = "аккаунту не видны разделы: " + ", ".join(SECTIONS[f][0] for f in hidden[:5])
+                moved = set()
                 for case_id, status, fid in changes:
-                    db.q("UPDATE forum_cases SET status=?, forum_id=?, updated_ts=? WHERE id=?", status, fid, now,
-                         case_id)
-                    await self.refresh_card(g, case_id, f"📌 Статус дела: **{STATUS.get(status, status)}** "
-                                                         f"({SECTIONS.get(fid, ('раздел форума',))[0]})")
+                    # статус в карточке правим молча; оповещение (один раз) и итог — при чтении темы ниже
+                    db.q("UPDATE forum_cases SET notified_status=COALESCE(notified_status, status), status=?, "
+                         "forum_id=?, updated_ts=? WHERE id=?", status, fid, now, case_id)
+                    await self.refresh_card(g, case_id)
+                    moved.add(case_id)
                 todo = [("thread", r) for r in db.all(
                     "SELECT t.* FROM forum_threads t LEFT JOIN forum_cases c ON c.guild_id=t.guild_id AND "
                     "c.thread_id=t.thread_id WHERE t.guild_id=? AND t.last_ts>t.seen_ts AND t.forum_id NOT IN "
@@ -456,6 +503,12 @@ class ForumWatch(commands.Cog):
                                 "ORDER BY checked_ts LIMIT 5", g.id, now - CASE_POLL_H * 3600):
                     if c["thread_id"] not in seen:
                         todo.append(("case", c))
+                        seen.add(c["thread_id"])
+                for cid in moved:  # дело переехало / сменило статус — читаем тему сразу, чтобы взять итог
+                    c = db.one("SELECT * FROM forum_cases WHERE id=?", cid)
+                    if c and c["thread_id"] not in seen:
+                        todo.insert(0, ("case", c))
+                        seen.add(c["thread_id"])
                 for kind, r in todo[:MAX_READS + 5]:
                     try:
                         await self.read(g, client, r["thread_id"], r if kind == "thread" else None,
@@ -844,27 +897,47 @@ class ForumWatch(commands.Cog):
                 ans = [p for p in posts if p["author"] != (c["applicant"] or "")] or posts
                 decision = ans[-1]["text"][:1500]
             top = max([p["ts"] for p in posts] + [last])
+            was = c["status"]
+            told = notified(c)
+            fresh_status = status not in told  # о таком статусе ещё не говорили (смена туда-обратно — молча)
+            told.add(status)
             db.q("UPDATE forum_cases SET last_post_ts=?, status=?, forum_id=COALESCE(?, forum_id), decision=?, "
-                 "checked_ts=?, updated_ts=? WHERE id=?", top, status, meta["forum_id"], decision, now, now, c["id"])
+                 "notified_status=?, checked_ts=?, updated_ts=? WHERE id=?", top, status, meta["forum_id"], decision,
+                 ",".join(sorted(told)), now, now, c["id"])
             db.q("UPDATE forum_threads SET seen_ts=last_ts WHERE guild_id=? AND thread_id=?", g.id, tid)
             if c["role"] != "defendant":
                 return
             if not c["message_id"]:
                 await self.post_card(g, c["id"])
-                c = db.one("SELECT * FROM forum_cases WHERE id=?", c["id"])
+            c = db.one("SELECT * FROM forum_cases WHERE id=?", c["id"])
+            # итог: новый пост с решением (или тема закрыта) — ИИ разбирает его один раз (result_post = id поста)
+            res = None
+            dp = decision_post(new if new else posts, c["applicant"], c["result_post"] or 0,
+                               final=status in FINAL and (fresh_status or not c["result"]))
+            if dp and (new or status in FINAL):
+                res = await self.extract_result(g, c, posts, dp, status)
+                db.q("UPDATE forum_cases SET result_post=?, result=COALESCE(?, result) WHERE id=?", dp["id"],
+                     res, c["id"])
+            loud = bool(new or fresh_status or (res and new))
+            if not loud and not res:
+                if status != was:
+                    await self.refresh_card(g, c["id"])  # статус вернулся к уже сказанному — только карточка
+                return  # ничего нового — молчим
             notes = []
-            for p in new[-3:]:
-                mark = "⚖️" if re.search(r"решени|постанов|приговор|удовлетвор|отказ|ходатайств|прокурор", p["text"],
-                                         re.I) else "💬"
-                notes.append(f"{mark} **{p['author'] or 'кто-то'}** · <t:{p['ts']}:f>\n{p['text'][:500]}\n"
-                             f"<{BASE}/posts/{p['id']}/>")
-            if len(new) > 3:
-                notes.insert(0, f"…и ещё {len(new) - 3} сообщ. раньше — всё в теме: <{c['url']}>")
-            if status != c["status"]:
-                notes.append(f"📌 Статус дела: **{STATUS.get(status, status)}**")
+            if fresh_status and status != "pending":
+                notes.append(f"📌 Статус дела: **{STATUS.get(status, status)}** "
+                             f"({SECTIONS.get(meta['forum_id'] or c['forum_id'], ('раздел форума',))[0]})")
+            if res and (new or fresh_status):
+                notes.append(f"🏁 **Итог:** {res}\n<{BASE}/posts/{dp['id']}/>")
+            other = [p for p in new if not (res and dp and p["id"] == dp["id"])]
+            if other:
+                p = other[-1]
+                more = f" (+ ещё {len(other) - 1})" if len(other) > 1 else ""
+                notes.append(f"💬 Новый ответ{more}: **{p['author'] or 'кто-то'}** · <t:{p['ts']}:R>\n"
+                             f"{p['text'][:300]}{'…' if len(p['text']) > 300 else ''}\n<{BASE}/posts/{p['id']}/>")
             if notes:
                 st["upd"] += 1
-                await self.refresh_card(g, c["id"], "\n\n".join(notes))
+            await self.refresh_card(g, c["id"], "\n\n".join(notes) if notes else None)
             return
         again = bool(trow and trow["seen_ts"])
         meta, posts = await client.thread(tid, latest=again)
@@ -896,7 +969,46 @@ class ForumWatch(commands.Cog):
                    max([p["ts"] for p in posts] or [now]), now, now, now)
         if info["role"] == "defendant" and cur.lastrowid:
             st["new"] += 1
+            status = status_from(fid, meta["prefix"], meta["locked"])
+            db.q("UPDATE forum_cases SET notified_status=? WHERE id=?", status, cur.lastrowid)
+            if status in FINAL:  # дело уже решено — итог сразу в карточку (одно сообщение, без отдельного поста)
+                c = db.one("SELECT * FROM forum_cases WHERE id=?", cur.lastrowid)
+                dp = decision_post(posts, c["applicant"], final=True)
+                if dp:
+                    res = await self.extract_result(g, c, posts, dp, status)
+                    db.q("UPDATE forum_cases SET result_post=?, result=? WHERE id=?", dp["id"], res, c["id"])
             await self.post_card(g, cur.lastrowid, ping=True)
+        elif cur.lastrowid:
+            db.q("UPDATE forum_cases SET notified_status=status WHERE id=?", cur.lastrowid)
+
+    async def extract_result(self, g, c, posts, dp, status):
+        """Итог дела из поста с решением: ИИ (строгий JSON) → «что решили · наказание · кто». Без ИИ / решения нет —
+        None (при закрытой теме — начало поста как есть)."""
+        plain = (dp["text"][:300] + ("…" if len(dp["text"]) > 300 else "")) if status in FINAL else None
+        ai = self.bot.ai_for(g)
+        if not getattr(ai, "on", False):
+            return plain
+        tail = [p for p in posts if p["id"] <= dp["id"]][-4:] or [dp]
+        text = "\n\n".join(f"[{p['author'] or '?'}]: {p['text'][:1500]}" for p in tail)
+        try:
+            data = await ai.ask_json(RESULT.format(who=c["defendant"] or "член семьи",
+                                                   status=STATUS.get(status, status)),
+                                     f"Тема: {c['title']}\nСуть: {c['summary'] or '—'}\n\nСообщения:\n{text[:5000]}",
+                                     max_tokens=300, light=True)
+        except Exception as e:  # noqa: BLE001 — лимит/сеть: без ИИ
+            log.info("forumwatch: ИИ не вытащил итог (%s)", type(e).__name__)
+            return plain
+        if not isinstance(data, dict):
+            return plain
+        if not data.get("decided"):
+            return plain if status in FINAL else None
+        parts = [str(data.get("outcome") or "").strip()[:300]]
+        if str(data.get("penalty") or "").strip():
+            parts.append("Наказание / итог: " + str(data["penalty"]).strip()[:150])
+        if str(data.get("by") or "").strip():
+            parts.append("Решил: " + str(data["by"]).strip()[:80])
+        out = " · ".join(x for x in parts if x)
+        return out or plain
 
     async def classify(self, g, title, text, author, section, res, people):
         """Роль члена семьи в теме: ИИ (строгий JSON), без ИИ или при ошибке — эвристика analyze()."""
