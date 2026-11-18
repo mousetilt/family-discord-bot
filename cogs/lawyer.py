@@ -8,7 +8,7 @@ import time
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from core import config
 from core.ai import AIUnavailable
@@ -137,6 +137,28 @@ class Lawyer(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.cool = {}
+
+    async def cog_load(self):
+        self.warm_loop.start()
+
+    async def cog_unload(self):
+        self.warm_loop.cancel()
+
+    @tasks.loop(minutes=20)
+    async def warm_loop(self):
+        """Смысловой индекс базы (эмбеддинги Gemini, бесплатно) — заранее, а не на вопросе: первый вопрос не ждёт,
+        и смысловой поиск идёт по всей базе. Векторы исчезнувших кусков чистятся. Без ключа Gemini — поиск по словам."""
+        for g in list(self.bot.home_guilds):
+            if not self.bot.feature(g, "lawyer"):
+                continue
+            try:
+                await self.bot.kb.warm(g.id, self.bot.ai_for(g))
+            except Exception as e:  # noqa: BLE001 — лимит/сеть: дозаполним в следующий раз
+                log.info("Юрист: индекс базы «%s» не досчитан — %s", g.name, str(e)[:120])
+
+    @warm_loop.before_loop
+    async def _warm_wait(self):
+        await self.bot.wait_until_ready()
 
     async def fetch(self, guild, url, session=None):
         """Документ по ссылке: как гость, а закрытую тему форума — аккаунтом семьи (/форум вход), если он есть."""

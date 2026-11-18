@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS kb_vec(guild_id INTEGER NOT NULL, hash TEXT NOT NULL,
 """
 INDEX_BATCH = 300   # за один вопрос доиндексируем не больше стольких кусков (остальное — со следующими вопросами)
 SMART_CHARS = 7000  # смысловой поиск точнее — ИИ хватает в 2–3 раза меньше текста, чем при поиске по словам
+SMART_CHARS_CLAUDE = 18000  # у Claude длинный контекст: больше найденных фрагментов — полнее ответ юриста
+WARM_BATCH = 400    # фоновая доиндексация за один заход (эмбеддинги Gemini бесплатны, но с лимитом в минуту)
 
 
 def chunk_hash(ch):
@@ -101,6 +103,7 @@ class KnowledgeBase:
         self.db = db
         self._chunks = {}  # guild_id -> (chunks, df, avg)
         self._vec = {}     # (guild_id куска, hash) -> вектор (array): кэш смыслового поиска
+        self._pruned = set()  # guild_id, у которых после пересборки уже почищены векторы удалённых кусков
         try:
             db.c.executescript(VEC_SCHEMA)
             db.c.commit()
@@ -144,6 +147,7 @@ class KnowledgeBase:
 
     def invalidate(self):
         self._chunks = {}  # guild_id -> (chunks, df, avg)
+        self._pruned = set()  # база поменялась — при следующем индексе почистить векторы исчезнувших кусков
 
     def total_chars(self, gid, cats=None):
         return sum(len(d["content"] or "") for d in self.docs(gid, cats))
@@ -226,12 +230,52 @@ class KnowledgeBase:
             for r in self.db.all("SELECT hash, vec FROM kb_vec WHERE guild_id=?", gid):
                 self._vec[(gid, r["hash"])] = unpack(r["vec"])
 
-    async def _index(self, chunks, ai):
-        """Досчитать векторы кускам, у которых их ещё нет (порциями, чтобы не встать надолго)."""
+    def prune(self, gid):
+        """Удалить векторы кусков, которых больше нет (документ обновили/удалили). Вектор привязан к хэшу текста
+        куска, так что изменённый кусок просто получит новый вектор, а старый тут уйдёт. → сколько удалено."""
+        chunks = (self._chunks.get(gid) or self._build(gid))[0]
+        removed = 0
+        for g in {gid, 0}:  # общие документы (guild_id=0) входят в базу любой семьи целиком
+            alive = {c["hash"] for c in chunks if c["gid"] == g}
+            for r in self.db.all("SELECT hash FROM kb_vec WHERE guild_id=?", g):
+                if r["hash"] not in alive:
+                    self.db.q("DELETE FROM kb_vec WHERE guild_id=? AND hash=?", g, r["hash"])
+                    self._vec.pop((g, r["hash"]), None)
+                    removed += 1
+        self._pruned.add(gid)
+        return removed
+
+    def missing(self, gid):
+        """Сколько кусков базы семьи ещё без вектора."""
+        chunks = (self._chunks.get(gid) or self._build(gid))[0]
         self._load_vecs(chunks)
-        todo = [c for c in chunks if (c["gid"], c["hash"]) not in self._vec][:INDEX_BATCH]
+        return sum(1 for c in chunks if (c["gid"], c["hash"]) not in self._vec)
+
+    async def warm(self, gid, ai, limit=WARM_BATCH):
+        """Фоновая доиндексация (цикл юриста): почистить старое, досчитать до limit новых векторов.
+        Без ключа Gemini — ничего (поиск по словам). → сколько кусков проиндексировано."""
+        if ai is None or not getattr(ai, "keys", {}).get("gemini"):
+            return 0
+        if gid not in self._pruned:
+            self.prune(gid)
+        chunks = (self._chunks.get(gid) or self._build(gid))[0]
+        before = self.missing(gid)
+        done = 0
+        while done < limit:
+            n = await self._index(chunks, ai, batch=min(INDEX_BATCH, limit - done))
+            if not n:
+                break
+            done += n
+        if before and done:
+            log.info("База знаний %s: проиндексировано %d из %d кусков", gid, done, before)
+        return done
+
+    async def _index(self, chunks, ai, batch=INDEX_BATCH):
+        """Досчитать векторы кускам, у которых их ещё нет (порциями, чтобы не встать надолго). → сколько посчитано."""
+        self._load_vecs(chunks)
+        todo = [c for c in chunks if (c["gid"], c["hash"]) not in self._vec][:batch]
         if not todo:
-            return
+            return 0
         vecs = await ai.embed([f"{c['title']}\n{c['text']}" for c in todo])
         for c, v in zip(todo, vecs):
             if not v:
@@ -239,6 +283,7 @@ class KnowledgeBase:
             b = pack(v)
             self.db.q("INSERT OR REPLACE INTO kb_vec(guild_id, hash, vec) VALUES(?,?,?)", c["gid"], c["hash"], b)
             self._vec[(c["gid"], c["hash"])] = unpack(b)
+        return len(todo)
 
     async def semantic(self, gid, query, ai, k=12, cats=None):
         """Ближайшие по смыслу куски. Нет ключа Gemini / ошибка — None (тогда работает поиск по словам)."""
@@ -269,10 +314,11 @@ class KnowledgeBase:
         docs = self.docs(gid, cats)
         if sum(len(d["content"] or "") for d in docs) <= self.FULL_LIMIT:
             return self.context(gid, query, cats)
-        sem = await self.semantic(gid, query, ai, k=12, cats=cats)
+        big = getattr(ai, "is_claude", False)
+        sem = await self.semantic(gid, query, ai, k=24 if big else 12, cats=cats)
         if not sem:
             return self.context(gid, query, cats)
-        words = self.search(gid, query, k=12, cats=cats)
+        words = self.search(gid, query, k=24 if big else 12, cats=cats)
         rank = {}
         for lst in (sem, words):
             for i, c in enumerate(lst):
@@ -280,9 +326,10 @@ class KnowledgeBase:
                 rank.setdefault(key, [c, 0.0])[1] += 1.0 / (60 + i)
         merged = [c for c, _ in sorted(rank.values(), key=lambda x: x[1], reverse=True)]
         parts, sources, used = [], [], 0
+        cap = SMART_CHARS_CLAUDE if getattr(ai, "is_claude", False) else SMART_CHARS
         for ch in merged:
             block = f"=== {ch['title']} [{config.KB_CATEGORIES.get(ch['category'], ch['category'])}] ===\n{ch['text']}"
-            if used + len(block) > SMART_CHARS:
+            if used + len(block) > cap:
                 break
             parts.append(block)
             used += len(block)
