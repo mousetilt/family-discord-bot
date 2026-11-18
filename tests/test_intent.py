@@ -21,7 +21,23 @@ class Intent(unittest.TestCase):
     def test_self(self):
         for t in ("Швейцар, проверь меня по форуму", "пробей меня", "есть на меня жалобы?", "есть ли на меня иски",
                   "жалобы на меня есть?", "глянь по форуму меня", "проверь меня на форуме"):
-            self.assertEqual(forum_intent(t), {"target_name": None, "fresh": False}, t)
+            self.assertEqual(forum_intent(t), {"target_name": None, "fresh": False, "scope": "self", "status": "all"},
+                             t)
+
+    def test_scope_and_status(self):
+        def sc(t):
+            r = forum_intent(t)
+            return r and (r["scope"], r["status"])
+        self.assertEqual(sc("на кого-то из семьи есть не рассмотренные жалобы?"), ("family", "open"))
+        self.assertEqual(sc("есть жалобы на наших?"), ("family", "all"))
+        self.assertEqual(sc("чем кончились жалобы на нас"), ("family", "reviewed"))
+        self.assertEqual(sc("проверь всю семью по форуму"), ("family", "all"))
+        self.assertEqual(sc("у кого-нибудь из наших есть дела на форуме?"), ("family", "all"))
+        self.assertEqual(sc("на меня есть открытые?"), ("self", "open"))
+        self.assertEqual(sc("есть ли на меня не рассмотренные жалобы"), ("self", "open"))
+        self.assertEqual(sc("есть ли на меня рассмотренные жалобы"), ("self", "reviewed"))
+        self.assertEqual(sc("пробей Петю"), ("member", "all"))
+        self.assertIsNone(forum_intent("у нас есть жалобы на ДМ?"))
 
     def test_other_and_fresh(self):
         self.assertEqual(forum_intent("пробей Петю")["target_name"], "петю")
@@ -155,6 +171,43 @@ class PersonCheck(unittest.TestCase):
         self.assertIn("Иск №58", ask(self.vanya, {"target_name": "меня"}))
         lead = NS(id=99, display_name="Глава", bot=False, roles=[])
         self.assertIn("Жалоба на ДМ", ask(lead, {"target_name": "петю"}))
+        # сводка по семье — любому из семьи; фильтр статуса доходит до отчёта
+        r = ask(self.vanya, {"scope": "family", "status": "open"})
+        self.assertIn("Жалоба на ДМ", r)
+        self.assertNotIn("Иск №58", r)
+        r = ask(self.vanya, {"scope": "self", "target_name": "Ваня", "status": "open"})
+        self.assertNotIn("Иск №58", r)
+        self.assertIn("Рассмотренных и закрытых — 1", r)
+
+    def test_open_never_shows_reviewed(self):
+        """Баг: на «не рассмотренные» бот выдал рассмотренные. Рассмотренный иск — только в reviewed/all."""
+        r = self.fw.person_report(self.g, self.vanya, status="open")
+        self.assertNotIn("Иск №58", r)
+        self.assertIn("Чисто: не рассмотренные", r)
+        self.assertIn("Иск №58", self.fw.person_report(self.g, self.vanya, status="reviewed"))
+        self.assertIn("Иск №58", self.fw.person_report(self.g, self.vanya, status="all"))
+
+    def test_moved_to_reviewed_section(self):
+        """В записи дела ещё «на рассмотрении», но тему уже перенесли в «рассмотренные» — это НЕ open."""
+        self.db.q("INSERT INTO forum_threads(guild_id, thread_id, forum_id, title, author, last_ts, seen_ts) "
+                  "VALUES(5, 600, 1514, 'Жалоба на ДМ', 'Кто-то', 10, 0)")
+        r = self.fw.family_report(self.g, "open")
+        self.assertNotIn("Жалоба на ДМ", r)
+        self.assertIn("Чисто у всех", r)
+        r = self.fw.family_report(self.g, "reviewed")
+        self.assertIn("Жалоба на ДМ", r)
+        self.assertIn("🟢 рассмотрено", r)
+
+    def test_family_grouped(self):
+        r = self.fw.family_report(self.g, "all")
+        self.assertIn("**Ваня**", r)  # иск привязан к Ване (анкета: Vanya Ulyanov, 64524)
+        self.assertIn("Иск №58", r)
+        self.assertIn("**Петя Петров [55555]**", r)  # свидетель в жалобе
+        self.assertIn("🟡 на рассмотрении", r)
+        self.assertIn("🟢 рассмотрено", r)
+        self.assertNotIn("Чисто", r)
+        self.db.gdel(5, "forum:last")
+        self.assertNotIn("Чисто", self.fw.family_report(self.g, "open"))  # ни разу не проверяли — «чисто» не говорим
 
 
 if __name__ == "__main__":

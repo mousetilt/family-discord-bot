@@ -37,6 +37,9 @@ CASE_POLL_H = 6         # активное дело, которое не вид�
 DEFAULT_INTERVAL = 12
 COLORS = {"pending": 0xF9A825, "reviewed": 0x43A047, "rejected": 0x616161, "closed": 0x455A64}
 ROLE_RU = {"defendant": "ответчик / обвиняемый", "plaintiff": "заявитель", "witness": "свидетель", "mention": "упоминание"}
+WANT_RU = {"open": "не рассмотренные", "reviewed": "рассмотренные / отклонённые / закрытые", "all": ""}
+OTHER_RU = {"open": "Рассмотренных и закрытых — {n} (спроси «чем кончилось»).",
+            "reviewed": "Ещё на рассмотрении — {n}.", "all": ""}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS forum_threads(
@@ -766,13 +769,17 @@ class ForumWatch(commands.Cog):
                 return True
         return False
 
-    def person_hits(self, g, member, names, statics):
-        """Дела форума, где фигурирует человек. → [(дело, роль)]: роль относительно ЭТОГО человека."""
+    def person_hits(self, g, member, names, statics, cases=None, heads=None):
+        """Дела форума, где фигурирует человек. → [(дело, роль)]: роль относительно ЭТОГО человека.
+        cases/heads — заранее выбранные (сводка по семье проверяет многих подряд)."""
         db = self.bot.db
-        heads = {p["user_id"] for p in self.people(g) if p["head"] and p["user_id"]}
+        if heads is None:
+            heads = {p["user_id"] for p in self.people(g) if p["head"] and p["user_id"]}
+        if cases is None:
+            cases = db.all("SELECT * FROM forum_cases WHERE guild_id=? ORDER BY (status='pending') DESC, "
+                           "updated_ts DESC", g.id)
         out = []
-        for c in db.all("SELECT * FROM forum_cases WHERE guild_id=? ORDER BY (status='pending') DESC, updated_ts DESC",
-                        g.id):
+        for c in cases:
             dfd = norm(c["defendant"] or "")
             text = norm("\n".join([c["title"] or "", c["body"] or ""]))
             role = None
@@ -801,33 +808,62 @@ class ForumWatch(commands.Cog):
                 out.append((c, role))
         return out
 
-    def person_report(self, g, member, game_name=None, static=None, self_check=True):
-        """Ответ на «проверь меня по форуму»: дела с ролью, статусом и ссылкой — или «чисто». Только реальные данные."""
+    # ---------- статус дела для фильтра «не рассмотренные / рассмотренные» ----------
+    def case_status(self, g, c):
+        """Статус дела СЕЙЧАС. Раздел темы главнее: тему перенесли в «рассмотренные/отклонённые» — дело не открыто,
+        даже если в записи дела ещё «на рассмотрении» (список раздела видели раньше, чем перечитали тему). Дальше —
+        то, что бот вычитал из самой темы при чтении последних постов (префикс «Рассмотрено/Отказано», замок)."""
+        t = self.bot.db.one("SELECT forum_id FROM forum_threads WHERE guild_id=? AND thread_id=?", g.id,
+                            c["thread_id"])
+        for fid in ((t["forum_id"] if t else None), c["forum_id"]):
+            sec = SECTIONS.get(fid, ("", "", "pending"))[2] if fid else "pending"
+            if sec != "pending":
+                return sec
+        return c["status"] or "pending"
+
+    @staticmethod
+    def status_fits(st, want):
+        """open — только на рассмотрении; reviewed — рассмотрено/отклонено/закрыто; all — все."""
+        if want == "open":
+            return st == "pending"
+        if want == "reviewed":
+            return st != "pending"
+        return True
+
+    @staticmethod
+    def _case_line(c, role, st):
+        sec = SECTIONS.get(c["forum_id"], ("раздел форума",))[0]
+        return (f"{'🔴' if role == 'defendant' else '⚪'} {KIND_ICON.get(c['kind'], '⚖️')} "
+                f"{(c['kind'] or 'дело').capitalize()} [{c['title'][:70]}]({c['url']}) — "
+                f"{ROLE_RU.get(role, role)} · {sec} · подал {c['applicant'] or '?'} · {STATUS.get(st, st)}")
+
+    def person_report(self, g, member, game_name=None, static=None, self_check=True, status="all"):
+        """Ответ на «проверь меня по форуму»: дела с ролью, статусом и ссылкой — или «чисто». Только реальные данные.
+        status: open — только не рассмотренные, reviewed — только рассмотренные/отклонённые/закрытые, all — все."""
         db = self.bot.db
+        status = status if status in WANT_RU else "all"
         names, statics, label = self.identity(g, member, game_name, static)
         you = "тебя" if self_check else label
         if not names and not statics:
             dn = member.display_name if member is not None else (game_name or "?")
             return (f"По нику «{dn}» не понять, кто {'ты' if self_check else 'это'} в игре, а анкеты с статиком нет. "
                     f"{'Кто ты' if self_check else 'Кто это'} по игре — Имя Фамилия и статик?")
-        hits = self.person_hits(g, member, names, statics)
+        hits = [(c, role, self.case_status(g, c)) for c, role in self.person_hits(g, member, names, statics)]
+        fit = [h for h in hits if self.status_fits(h[2], status)]
         last = int(db.gget(g, "forum:last") or 0)
         ident = ", ".join(names[:2]) + (f", static {statics[0]}" if statics else "")
-        head = f"🔎 Форум по **{label}**" + (f" ({ident})" if ident else "") + ":"
-        lines = []
-        for c, role in hits[:8]:
-            sec = SECTIONS.get(c["forum_id"], ("раздел форума",))[0]
-            lines.append(f"{'🔴' if role == 'defendant' else '⚪'} {KIND_ICON.get(c['kind'], '⚖️')} "
-                         f"{(c['kind'] or 'дело').capitalize()} [{c['title'][:70]}]({c['url']}) — "
-                         f"{ROLE_RU.get(role, role)} · {sec} · подал {c['applicant'] or '?'} · "
-                         f"{STATUS.get(c['status'], c['status'])}")
+        head = f"🔎 Форум по **{label}**" + (f" ({ident})" if ident else "") + \
+            (f" — только {WANT_RU[status]}" if status != "all" else "") + ":"
+        lines = [self._case_line(c, role, st) for c, role, st in fit[:8]]
         titles = []
-        known = {c["thread_id"] for c, _ in hits}
-        for t in db.all("SELECT thread_id, title FROM forum_threads WHERE guild_id=? ORDER BY last_ts DESC LIMIT 2000",
-                        g.id):
+        known = {c["thread_id"] for c, _, _ in hits}
+        for t in db.all("SELECT thread_id, title, forum_id FROM forum_threads WHERE guild_id=? ORDER BY last_ts DESC "
+                        "LIMIT 2000", g.id):
             tt = norm(t["title"] or "")
-            if t["thread_id"] not in known and (any(re.search(rf"(?<!\d){re.escape(s)}(?!\d)", tt) for s in statics)
-                                                or any(self._names_in(tt, n) for n in names)):
+            if t["thread_id"] not in known and \
+                    self.status_fits(SECTIONS.get(t["forum_id"], ("", "", "pending"))[2], status) and \
+                    (any(re.search(rf"(?<!\d){re.escape(s)}(?!\d)", tt) for s in statics)
+                     or any(self._names_in(tt, n) for n in names)):
                 titles.append(f"· [{t['title'][:70]}]({thread_url(t['thread_id'])})")
             if len(titles) >= 5:
                 break
@@ -835,7 +871,14 @@ class ForumWatch(commands.Cog):
             return (head + "\n" + ("\n".join(lines) + "\n" if lines else "") +
                     "Форум ещё ни разу не проверялся — вход не настроен (владелец сервера: `/форум вход`), "
                     "так что «чисто» сказать не могу.")
-        body = "\n".join(lines) if lines else f"Чисто: жалоб, исков и обращений против {you} не вижу."
+        if lines:
+            body = "\n".join(lines)
+        else:
+            what = f"{WANT_RU[status]} " if status != "all" else ""
+            body = f"Чисто: {what}жалоб, исков и обращений против {you} не вижу."
+            rest = len(hits) - len(fit)
+            if rest:
+                body += " " + OTHER_RU[status].format(n=rest)
         if titles:
             body += "\nУпоминается в заголовках тем:\n" + "\n".join(titles)
         rx = surname_rx(self.stem(g))
@@ -845,8 +888,85 @@ class ForumWatch(commands.Cog):
             note += " · не из семьи: вижу только темы, где упомянута семья"
         return head + "\n" + body + note
 
-    def fresh_later(self, g, channel, member, game_name=None, static=None, self_check=True):
-        """«Посвежее»: проверка форума в фоне, потом — новый ответ в тот же канал."""
+    def family_report(self, g, status="all"):
+        """«На кого-то из семьи есть не рассмотренные жалобы?» — дела по ВСЕМ отслеживаемым: участники семьи (анкета,
+        ник, статик), ручной список форума и дела, которые не удалось привязать к человеку. По людям, только реальное."""
+        db = self.bot.db
+        status = status if status in WANT_RU else "all"
+        last = int(db.gget(g, "forum:last") or 0)
+        what = f" — только {WANT_RU[status]}" if status != "all" else ""
+        head = f"🔎 Форум по всей семье{what}:"
+        if not last:
+            return (head + "\nФорум ещё ни разу не проверялся — вход не настроен (владелец сервера: `/форум вход`), "
+                    "так что «чисто у всех» сказать не могу.")
+        cases = db.all("SELECT * FROM forum_cases WHERE guild_id=? ORDER BY (status='pending') DESC, updated_ts DESC",
+                       g.id)
+        people = self.people(g)
+        heads = {p["user_id"] for p in people if p["head"] and p["user_id"]}
+        groups, taken = {}, set()
+        checked = 0
+
+        def add(label, c, role):
+            taken.add(c["thread_id"])
+            got = groups.setdefault(label, {})
+            if c["thread_id"] not in got:
+                got[c["thread_id"]] = (c, role, self.case_status(g, c))
+
+        members = [m for m in self.bot.family_members(g) if not getattr(m, "bot", False)]
+        ids = {m.id for m in members}
+        for m in members:
+            names, statics, label = self.identity(g, m)
+            checked += 1
+            for c, role in self.person_hits(g, m, names, statics, cases, heads):
+                add(label, c, role)
+        for r in db.all("SELECT name, static_id, user_id FROM forum_people WHERE guild_id=?", g.id):
+            if r["user_id"] and r["user_id"] in ids:
+                continue  # уже проверен как участник
+            names, statics, label = self.identity(g, None, r["name"], r["static_id"])
+            if not names and not statics:
+                continue
+            checked += 1
+            for c, role in self.person_hits(g, None, names, statics, cases, heads):
+                add(label, c, role)
+        for c in cases:  # монитор хранит только дела, где фигурирует семья, — ничего не теряем
+            if c["thread_id"] not in taken:
+                label = c["defendant"] if c["role"] == "defendant" and (c["defendant"] or "—") != "—" \
+                    else "без привязки к человеку"
+                add(label, c, c["role"])
+        fit, total = {}, 0
+        for label, got in groups.items():
+            total += len(got)
+            rows = [h for h in got.values() if self.status_fits(h[2], status)]
+            if rows:
+                fit[label] = rows
+        # сначала те, на кого открытые дела в роли ответчика
+        order = sorted(fit, key=lambda k: (-sum(1 for _, r, s in fit[k] if r == "defendant" and s == "pending"),
+                                           -sum(1 for _, r, _ in fit[k] if r == "defendant"), k.lower()))
+        out = []
+        for label in order[:12]:
+            rows = fit[label]
+            out.append(f"**{label}**")
+            out += ["  " + self._case_line(c, role, st) for c, role, st in rows[:5]]
+            if len(rows) > 5:
+                out.append(f"  … и ещё {len(rows) - 5}")
+        if len(order) > 12:
+            out.append(f"… и ещё {len(order) - 12} чел. — все дела в канале «суды и жалобы»")
+        if out:
+            body = "\n".join(out)
+        else:
+            w = f"{WANT_RU[status]} " if status != "all" else ""
+            body = f"Чисто у всех: {w}жалоб, исков и обращений ни на кого из семьи не вижу."
+            if total:
+                body += " " + OTHER_RU[status].format(n=len({t for got in groups.values() for t in got}))
+        n_cases = len({c["thread_id"] for rows in fit.values() for c, _, _ in rows})
+        note = (f"\n-# Дел: {n_cases} у {len(fit)} чел. · проверил {checked} чел. · жалобы, суды и прокуратура, что "
+                f"бот видел на форуме · последняя проверка <t:{last}:R>")
+        return head + "\n" + body + note
+
+    def fresh_later(self, g, channel, member, game_name=None, static=None, self_check=True, status="all",
+                    report=None):
+        """«Посвежее»: проверка форума в фоне, потом — новый ответ в тот же канал. report — свой отчёт (сводка по
+        семье), иначе отчёт по человеку."""
         if self.net_lock.locked():
             return "⏳ Форум как раз проверяется — если что-то всплывёт, придёт в канал дел."
         last = int(self.bot.db.gget(g, "forum:last") or 0)
@@ -856,10 +976,12 @@ class ForumWatch(commands.Cog):
         async def run():
             await self.check_safe(g, manual=True)
             try:
-                await channel.send(("🔄 Свежая проверка:\n" + self.person_report(g, member, game_name, static,
-                                                                                self_check))[:1900])
+                text = report() if report else self.person_report(g, member, game_name, static, self_check, status)
+                await channel.send(("🔄 Свежая проверка:\n" + text)[:1900])
             except discord.HTTPException:
                 pass
+            except Exception:  # noqa: BLE001
+                log.exception("forumwatch: свежая проверка — отчёт не собрался")
         asyncio.create_task(run())
         return "🔄 Запустил свежую проверку форума — допишу сюда через пару минут."
 

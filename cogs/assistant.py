@@ -181,11 +181,17 @@ ACT_ALL = """ДЕЙСТВИЯ, доступные всем (поле "type"):
   («закрой мою комнату», «лимит 3», «назови комнату Кухня 2»)
 - paid_claim: {"what":"due"|"fine","amount":"100к" или null} — АВТОР САМ говорит, что сдал взнос / оплатил штраф
   («я сдал взнос», «скинул в казну 100к», «оплатил штраф»; часто со скрином). Бот отправит заявку казначею
-- forum_check: {"target_name":null или "как назвали","game_name":"Имя Фамилия в игре" или null,"static":"12345" или null,
-  "fresh":true|false} — жалобы, иски, обращения на форуме: «проверь меня по форуму», «пробей меня», «есть на меня
-  жалобы?», «пробей Петю». target_name null — сам автор: его статик и ник бот знает сам, НЕ переспрашивай. Это НЕ law
-  и НЕ поиск по правилам. fresh:true — если просят «посвежее», «прямо сейчас». Человек сам назвал игровое имя/статик —
-  передай в game_name/static
+- forum_check: {"scope":"self"|"member"|"family","target_name":null или "как назвали","game_name":"Имя Фамилия в игре"
+  или null,"static":"12345" или null,"status":"open"|"reviewed"|"all","fresh":true|false} — жалобы, иски, обращения
+  на форуме: «проверь меня по форуму», «пробей меня», «есть на меня жалобы?», «пробей Петю». Это НЕ law и НЕ поиск по
+  правилам. scope: «меня/на меня» → self (target_name null: статик и ник автора бот знает сам, НЕ переспрашивай);
+  назвали человека → member + target_name; «кого-то из семьи / на наших / на нас / по всем / всю семью» → family.
+  status: «не рассмотренные / висят / открытые / на рассмотрении» → open; «рассмотренные / отклонённые / закрытые /
+  чем кончилось» → reviewed; не сказали → all. «НЕ рассмотренные» — это open, не путай. fresh:true — если просят
+  «посвежее», «прямо сейчас». Человек сам назвал игровое имя/статик — передай в game_name/static. Примеры:
+  «на кого-то из семьи есть не рассмотренные жалобы?» → {"type":"forum_check","scope":"family","status":"open"};
+  «пробей Ваню, что по его делам» → {"type":"forum_check","scope":"member","target_name":"Ваня","status":"all"};
+  «на меня есть открытые?» → {"type":"forum_check","scope":"self","status":"open"}
 Для справок (law, market, top, profile, queue, roll, forum_check) "reply" оставь пустым — ответ придёт из базы.
 """
 ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
@@ -1044,13 +1050,25 @@ class Assistant(commands.Cog):
             pass
 
     async def forum_check(self, message, g, me, a):
-        """«Проверь меня/Петю по форуму»: себя — любой из семьи, другого — руководство и старший состав.
+        """«Проверь меня/Петю по форуму», «на кого-то из семьи есть не рассмотренные жалобы?».
+        scope: self — себя (любой из семьи), member — другого (руководство и старший состав), family — сводка по всем
+        (любой из семьи: те же дела и так видны в канале «суды и жалобы»). status: open | reviewed | all.
         Себя бот узнаёт сам (анкета, ник, прозвища, ручной список форума) и не переспрашивает без нужды."""
         fw = self.bot.get_cog("ForumWatch")
         if not fw:
             return "Форум-монитор не загружен."
+        status = str(a.get("status") or "all").lower()
+        status = status if status in ("open", "reviewed", "all") else "all"
         self_words = {"", "я", "меня", "мне", "себя", "мой", "моё", "мое"}
         named = str(a.get("target_name") or "").strip()
+        scope = str(a.get("scope") or "").lower()
+        if scope == "family" and not (a.get("users") or a.get("user")):
+            report = fw.family_report(g, status)
+            if a.get("fresh"):
+                report += "\n" + fw.fresh_later(g, message.channel, None, report=lambda: fw.family_report(g, status))
+            return report
+        if scope == "self":
+            named = ""
         target, game = me, a.get("game_name")
         if named.lower() not in self_words or a.get("users") or a.get("user"):
             q = {"users": a.get("users"), "user": a.get("user"), "names": a.get("names") or ([named] if named else None)}
@@ -1061,10 +1079,10 @@ class Assistant(commands.Cog):
         if (target is None or target.id != me.id) and not elevated:
             return "Пробивать других по форуму могут руководство и старший состав. Себя — пожалуйста: «проверь меня»."
         report = fw.person_report(g, target, game_name=game, static=a.get("static"),
-                                  self_check=target is not None and target.id == me.id)
+                                  self_check=target is not None and target.id == me.id, status=status)
         if a.get("fresh") and not report.endswith("?"):
             report += "\n" + fw.fresh_later(g, message.channel, target, game, a.get("static"),
-                                            self_check=target is not None and target.id == me.id)
+                                            self_check=target is not None and target.id == me.id, status=status)
         return report
 
     async def info(self, message, a, extra):
