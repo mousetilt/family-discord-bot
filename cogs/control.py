@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Настройки семьи без правки кода.
-/ии ключ     — семья вставляет СВОЙ бесплатный ключ Groq и/или Gemini (модалка; бот проверяет ключ перед сохранением)
-/ии статус   — какой ИИ работает у семьи и сколько запросов потрачено сегодня
+/ии ключ     — семья вставляет СВОЙ ключ Groq / Gemini (бесплатно) и/или Claude (платно) — модалка, бот проверяет
+/ии основной — какой провайдер главный (по умолчанию бесплатный; Claude — только по выбору)
+/ии статус   — какой ИИ работает у семьи, модели и сколько запросов потрачено сегодня
 /ии удалить  — убрать ключи семьи
 /настройки   — дерево модулей: модуль целиком и его отдельные действия (mod:<модуль>:<действие>)
 На домашнем сервере ИИ работает на ключах хоста; у остальных семей — только на своих (без ключа ИИ выключен)."""
@@ -12,11 +13,12 @@ from discord import app_commands
 from discord.ext import commands
 
 from core import config
-from core.ai import AI, NAMES
+from core.ai import AI, KEYED, NAMES
 from core.family import MODULES, NUMBER_GROUPS, NUMBERS, TEXTS, action_on, module_on, set_action, set_module
 
 log = logging.getLogger("family-bot.control")
-PROVIDERS = {"groq": "Groq — console.groq.com → API Keys", "gemini": "Gemini — aistudio.google.com → Get API key"}
+PROVIDERS = {"groq": "Groq — console.groq.com → API Keys", "gemini": "Gemini — aistudio.google.com → Get API key",
+             "claude": "Claude (платно) — console.anthropic.com → API Keys"}
 
 
 def mask(key):
@@ -28,11 +30,13 @@ def allowed(bot, inter):
     return bool(inter.guild) and (inter.user.id == inter.guild.owner_id or bot.has(inter.user, ["leader", "deputy"]))
 
 
-class KeyModal(discord.ui.Modal, title="Ключи ИИ семьи (бесплатные)"):
+class KeyModal(discord.ui.Modal, title="Ключи ИИ семьи"):
     groq = discord.ui.TextInput(label="Groq API key (console.groq.com)", required=False, max_length=200,
                                 placeholder="gsk_… · пусто — не менять · «-» — удалить")
     gemini = discord.ui.TextInput(label="Gemini API key (aistudio.google.com)", required=False, max_length=200,
                                   placeholder="AIza… · пусто — не менять · «-» — удалить")
+    claude = discord.ui.TextInput(label="Claude API key — платно (anthropic.com)", required=False,
+                                  max_length=200, placeholder="sk-ant-… · пусто — не менять · «-» — удалить")
 
     def __init__(self, bot):
         super().__init__()
@@ -41,7 +45,7 @@ class KeyModal(discord.ui.Modal, title="Ключи ИИ семьи (беспла
     async def on_submit(self, inter: discord.Interaction):
         await inter.response.defer(ephemeral=True, thinking=True)
         g, db, out = inter.guild, self.bot.db, []
-        for prov, field in (("groq", self.groq), ("gemini", self.gemini)):
+        for prov, field in (("groq", self.groq), ("gemini", self.gemini), ("claude", self.claude)):
             val = "".join((field.value or "").split())
             if not val:
                 continue
@@ -56,10 +60,12 @@ class KeyModal(discord.ui.Modal, title="Ключи ИИ семьи (беспла
             db.gset(g, f"ai:{prov}", val)
             out.append(f"✅ {NAMES[prov]}: ключ проверен и сохранён ({mask(val)})")
         if not out:
-            out.append("Ничего не изменилось — оба поля пустые.")
+            out.append("Ничего не изменилось — все поля пустые.")
         ai = self.bot.ai_for(g)
         out.append(f"\nСейчас у семьи: **{ai.name if ai.on else 'ИИ выключен'}**"
                    + (f" (резерв — {NAMES[ai.backup]})" if ai.on and ai.backup else ""))
+        if "claude" in ai.keys and not ai.is_claude:
+            out.append("Claude подключён, но основной — бесплатный. Сделать Claude основным: `/ии основной`.")
         log.warning("ИИ-ключи семьи на «%s» изменены (%s)", g.name, inter.user)
         await inter.followup.send("\n".join(out), ephemeral=True)
 
@@ -316,7 +322,7 @@ class Control(commands.Cog):
     async def _deny(self, inter):
         await inter.response.send_message("⛔ Только для Главы, заместителя или владельца сервера.", ephemeral=True)
 
-    @ai_group.command(name="ключ", description="Вставить свой бесплатный ключ Groq/Gemini (бот проверит его)")
+    @ai_group.command(name="ключ", description="Ключ Groq/Gemini (бесплатно) или Claude (платно) — бот проверит")
     async def ai_key(self, inter: discord.Interaction):
         if not allowed(self.bot, inter):
             return await self._deny(inter)
@@ -328,7 +334,14 @@ class Control(commands.Cog):
             return await self._deny(inter)
         g, ai = inter.guild, self.bot.ai_for(inter.guild)
         lines = [f"🤖 ИИ семьи: **{ai.name if ai.on else 'выключен'}**"
-                 + (f", резерв — {NAMES[ai.backup]}" if ai.on and ai.backup else "")]
+                 + (f", резерв — {', '.join(NAMES[b] for b in ai.backups)}" if ai.on and ai.backups else "")]
+        if ai.on:
+            fast, strong = ai.active_model(), ai.active_model(smart=True)
+            lines.append(f"🧠 Модель: `{fast}`" + (f", сложные задачи — `{strong}`" if strong != fast else ""))
+        primary = self.bot.db.gget(g, "ai:primary")
+        lines.append("⭐ Основной: " + (f"{NAMES.get(primary, primary)} (выбран)" if primary else
+                                       "по умолчанию (бесплатный)")
+                     + (" — но ключа нет, работает запасной" if primary and primary not in ai.keys else ""))
         home = self.bot.is_home(g)
         for prov, how in PROVIDERS.items():
             k = self.bot.db.gget(g, f"ai:{prov}")
@@ -344,12 +357,35 @@ class Control(commands.Cog):
         lines.append(f"📈 Запросов сегодня: {ai.used_today()}/{config.AI_DAILY_LIMIT}")
         await inter.response.send_message("\n".join(lines), ephemeral=True)
 
+    @ai_group.command(name="основной", description="Какой ИИ главный у семьи (по умолчанию — бесплатный)")
+    @app_commands.rename(provider="провайдер")
+    @app_commands.choices(provider=[app_commands.Choice(name="По умолчанию (бесплатный)", value="auto")] +
+                          [app_commands.Choice(name=NAMES[p], value=p) for p in KEYED])
+    async def ai_primary(self, inter: discord.Interaction, provider: app_commands.Choice[str]):
+        if not allowed(self.bot, inter):
+            return await self._deny(inter)
+        g, v = inter.guild, provider.value
+        if v == "auto":
+            self.bot.db.gdel(g, "ai:primary")
+        else:
+            self.bot.db.gset(g, "ai:primary", v)
+        ai = self.bot.ai_for(g)
+        text = f"⭐ Основной ИИ: **{provider.name}**. Сейчас работает: **{ai.name if ai.on else 'ИИ выключен'}**."
+        if v != "auto" and ai.provider != v:
+            text += f"\n⚠️ Ключа {NAMES[v]} нет — пока работает запасной. Вставь ключ: `/ии ключ`."
+        if ai.is_claude:
+            text += ("\n💳 Claude платный: обычные запросы — дешёвая модель, сложные (юрист, разбор дел, сводки) — "
+                     "сильная. Кончится лимит или деньги на ключе — бот сам перейдёт на Gemini/Groq.")
+        log.warning("ИИ «%s»: основной → %s (%s)", g.name, v, inter.user)
+        await inter.response.send_message(text, ephemeral=True)
+
     @ai_group.command(name="удалить", description="Удалить ключи ИИ семьи")
     async def ai_del(self, inter: discord.Interaction):
         if not allowed(self.bot, inter):
             return await self._deny(inter)
         for prov in PROVIDERS:
             self.bot.db.gdel(inter.guild, f"ai:{prov}")
+        self.bot.db.gdel(inter.guild, "ai:primary")
         await inter.response.send_message("🗑 Ключи ИИ семьи удалены.", ephemeral=True)
 
     @app_commands.command(name="настройки", description="Модули бота и их отдельные действия: что включить, что выключить")

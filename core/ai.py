@@ -3,8 +3,15 @@
   • Groq   — ключ на console.groq.com (GROQ_API_KEY)
   • Gemini — ключ на aistudio.google.com (GEMINI_API_KEY)
   • Ollama — модель на своём ПК, без ключа (OLLAMA_MODEL)
-  • Anthropic (Claude) — платно, по желанию (ANTHROPIC_API_KEY)
-Без ключа ИИ выключен, а всё остальное в боте работает."""
+  • Claude (Anthropic) — ПЛАТНО, по желанию (ANTHROPIC_API_KEY или /ии ключ); основным — только по выбору
+Без ключа ИИ выключен, а всё остальное в боте работает.
+
+Уровни запросов (флаги ask/ask_json) и какие модели Claude их обслуживают:
+  light=True  → CLAUDE_MODEL_FAST (Haiku): модерация, классификация, проверка связи, уточняющие вопросы
+  без флага   → CLAUDE_MODEL_FAST (Haiku): обычные ответы, черновики, разбор тем форума
+  smart=True  → CLAUDE_MODEL_SMART (Sonnet), при лимите — Haiku: юрист, итоги дел, намерения Швейцара, сводки
+  (smart главнее light). У бесплатных провайдеров smart ни на что не влияет, light — как раньше (Groq: младшая
+  модель первой). Лимит/ошибка Claude → cool/dead модели и откат на бесплатные Gemini/Groq той же семьи."""
 import asyncio
 import base64
 import datetime as dt
@@ -23,10 +30,19 @@ DEFAULTS = {
     "groq": ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
     "gemini": ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.1-flash-lite"],
     "ollama": ["qwen2.5:7b"],
-    "anthropic": ["claude-haiku-5-5"],
+    "claude": [config.CLAUDE_MODEL_FAST, config.CLAUDE_MODEL_SMART],
 }
 NAMES = {"groq": "Groq (бесплатно)", "gemini": "Google Gemini (бесплатно)", "ollama": "Ollama (локально)",
-         "anthropic": "Claude (платно)"}
+         "claude": "Claude (Anthropic, платно)"}
+FREE = ("gemini", "groq")             # бесплатные — запасные для всех
+KEYED = ("groq", "gemini", "claude")  # провайдеры с ключом семьи (guild_settings ai:<провайдер>)
+VISION = ("gemini", "claude")         # кто читает картинки
+CLAUDE_URL = "https://api.anthropic.com/v1/messages"
+CLAUDE_VERSION = "2023-06-01"
+# модели, где включаем серверный запасной вариант при отказе (refusal) — без него запрос просто останавливается
+CLAUDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+CLAUDE_FALLBACK_MODELS = ("claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5", "claude-fable-5-1",
+                          "claude-fable-5-2")
 
 
 class AIUnavailable(Exception):
@@ -34,29 +50,31 @@ class AIUnavailable(Exception):
 
 
 class AI:
-    def __init__(self, db, keys=None, scope=None):
-        """keys=None — ключи из окружения хоста (домашняя семья). keys={'groq': .., 'gemini': ..} — ключи семьи,
-        введённые через /ии ключ; scope — ID её сервера (свой дневной лимит)."""
+    def __init__(self, db, keys=None, scope=None, primary=None):
+        """keys=None — ключи из окружения хоста (домашняя семья). keys={'groq': .., 'gemini': .., 'claude': ..} —
+        ключи семьи (/ии ключ); scope — ID её сервера (свой дневной лимит). primary — основной провайдер, выбранный
+        семьёй (/ии основной); не задан — AI_PROVIDER, иначе бесплатный."""
         self.db = db
         self.scope = scope
+        self.primary = "claude" if primary == "anthropic" else primary
         if keys is None:
-            keys = {"groq": config.GROQ_API_KEY, "gemini": config.GEMINI_API_KEY}
+            keys = {"groq": config.GROQ_API_KEY, "gemini": config.GEMINI_API_KEY, "claude": config.ANTHROPIC_KEY}
             self.own_keys = False
         else:
             self.own_keys = True
         self.keys = {p: (k or "").strip() for p, k in keys.items() if (k or "").strip()}
         self.provider = self._detect()
-        own = {"groq": config.GROQ_MODEL, "gemini": config.GEMINI_MODEL, "ollama": config.OLLAMA_MODEL,
-               "anthropic": config.AI_MODEL}.get(self.provider)
+        own = {"groq": config.GROQ_MODEL, "gemini": config.GEMINI_MODEL,
+               "ollama": config.OLLAMA_MODEL}.get(self.provider)
         self.models = ([own] if own else []) + [m for m in DEFAULTS.get(self.provider, []) if m != own]
-        self._claude = None  # клиент Anthropic (имя не совпадает с методом _anthropic)
         self.cool = {}    # (провайдер, модель) -> до какого момента не трогаем: лимит исчерпан
         self.dead = set() # (провайдер, модель), которых у провайдера больше нет
         self._no_json = set()  # модели Groq без JSON-режима — им шлём обычный запрос
         self._no_search = set()  # модели Gemini без поиска Google (для grounded)
-        # второй бесплатный ИИ как подстраховка: кончился лимит у одного — отвечает другой
-        self.backup = ("gemini" if self.provider == "groq" and self.keys.get("gemini") else
-                       "groq" if self.provider == "gemini" and self.keys.get("groq") else None)
+        # бесплатные ИИ как подстраховка: кончился лимит / упал основной — отвечает следующий. Claude запасным
+        # не ставим (платный — только по явному выбору основным); у Claude запасные — Gemini, затем Groq.
+        self.backups = [p for p in FREE if p != self.provider and self.keys.get(p)] if self.provider else []
+        self.backup = self.backups[0] if self.backups else None
         if self.own_keys:
             return
         if self.provider:
@@ -65,24 +83,44 @@ class AI:
             log.info("ИИ выключен (нет ключа в .env) — бот работает без ИИ-функций")
 
     def _detect(self):
-        p = config.AI_PROVIDER
-        if self.own_keys:  # у семьи — только бесплатные Groq/Gemini по её ключам
-            if p in self.keys:
+        """Основной провайдер: выбор семьи → AI_PROVIDER → бесплатный → Ollama → Claude (если других нет).
+        Выбранный провайдер без ключа не берём — молча работаем на бесплатном."""
+        for p in (self.primary, config.AI_PROVIDER):
+            if p in KEYED and p in self.keys:
                 return p
-            return "gemini" if "gemini" in self.keys else "groq" if "groq" in self.keys else None
-        if p in ("groq", "gemini") and p in self.keys:
-            return p
-        if p in ("ollama", "anthropic"):
-            return p
+        if self.own_keys:
+            return next((p for p in ("gemini", "groq", "claude") if p in self.keys), None)
+        if config.AI_PROVIDER == "ollama":
+            return "ollama"
         if "groq" in self.keys:
             return "groq"
         if "gemini" in self.keys:
             return "gemini"
         if config.OLLAMA_MODEL:
             return "ollama"
-        if config.ANTHROPIC_KEY:
-            return "anthropic"
+        if "claude" in self.keys:
+            return "claude"
         return None
+
+    @property
+    def is_claude(self):
+        """Основной ИИ семьи — Claude (под него помечены smart-вызовы, агент, разбор картинок)."""
+        return self.provider == "claude"
+
+    @property
+    def vision(self):
+        """Может ли ИИ семьи читать картинки (Gemini или Claude в цепочке)."""
+        return self.on and any(p in VISION for p in [self.provider] + self.backups)
+
+    def tier_models(self, prov, smart=False, light=False):
+        """Модели провайдера для уровня запроса (см. шапку модуля)."""
+        if prov == "claude":
+            fast, strong = config.CLAUDE_MODEL_FAST, config.CLAUDE_MODEL_SMART
+            return [strong, fast] if smart and strong != fast else [fast]
+        return list(self.models) if prov == self.provider else list(DEFAULTS[prov])
+
+    def active_model(self, smart=False):
+        return self.tier_models(self.provider, smart=smart)[0] if self.on else None
 
     @property
     def on(self):
@@ -127,7 +165,8 @@ class AI:
                   images=None):
         """Запрос к ИИ, возвращает текст ответа. Заодно — здоровье для сторожа (ok_ts / fail_since / fail_reason).
         json_mode — просить у провайдера строгий JSON (Gemini responseMimeType, Groq response_format).
-        images — [(mime, bytes)]: картинки для разбора (только модели Gemini, они бесплатно видят изображения)."""
+        images — [(mime, bytes)]: картинки для разбора (Gemini бесплатно или Claude); smart/light — уровень модели
+        (см. шапку модуля); cache — кэш большого system у Claude (у бесплатных ни на что не влияет)."""
         try:
             text = await self._ask(system, prompt, max_tokens, smart, cache, light, json_mode, images)
         except AIUnavailable as e:
@@ -145,15 +184,12 @@ class AI:
                                 "командой /ии ключ" if self.own_keys else
                                 "ИИ не подключён. Бесплатный ключ: console.groq.com или aistudio.google.com")
         self._count()
-        chain = [(self.provider, m) for m in self.models]
-        if light:  # фоновые задачи (модерация) — сначала на младшие модели, чтобы не съедать лимит основной
-            chain.sort(key=lambda pm: "120b" in pm[1])
-        if self.backup:
-            chain += [(self.backup, m) for m in DEFAULTS[self.backup]]
-        if images:  # картинки понимает только Gemini (бесплатно); без ключа Gemini — честный отказ
-            chain = [pm for pm in chain if pm[0] == "gemini"]
+        chain = self.chain(smart, light)
+        if images:  # картинки понимают Gemini (бесплатно) и Claude; без них — честный отказ
+            chain = [pm for pm in chain if pm[0] in VISION]
             if not chain:
-                raise AIUnavailable("Картинки разбирает только Gemini — нужен бесплатный ключ Gemini (/ии ключ)")
+                raise AIUnavailable("Картинки разбирают Gemini (бесплатный ключ) или Claude — /ии ключ. "
+                                    "Или пришли текстом.")
         last_err, limited, now = None, False, time.monotonic()
         for prov, model in chain:
             key = (prov, model)
@@ -164,6 +200,8 @@ class AI:
                 continue
             try:
                 opts = {"json_mode": json_mode} if prov in ("groq", "gemini") else {}
+                if prov == "claude":
+                    opts = {"smart": smart and model == config.CLAUDE_MODEL_SMART, "cache": cache}
                 if images:
                     opts["images"] = images
                 text = await getattr(self, f"_{prov}")(model, system, prompt, max_tokens, **opts)
@@ -189,21 +227,33 @@ class AI:
             raise AIUnavailable("Лимит бесплатного ИИ исчерпан — попробуй через несколько минут или завтра")
         raise AIUnavailable(f"Ни одна модель не ответила: {str(last_err)[:150]}")
 
-    async def ask_json(self, system, prompt, max_tokens=800, smart=False, light=False, images=None):
+    def chain(self, smart=False, light=False):
+        """Порядок (провайдер, модель) для запроса: основной по уровню → бесплатные запасные."""
+        chain = [(self.provider, m) for m in self.tier_models(self.provider, smart, light)]
+        if light:  # фоновые задачи (модерация) — сначала на младшие модели, чтобы не съедать лимит основной
+            chain.sort(key=lambda pm: "120b" in pm[1])
+        for b in self.backups:
+            chain += [(b, m) for m in DEFAULTS[b]]
+        return chain
+
+    async def ask_json(self, system, prompt, max_tokens=800, smart=False, light=False, images=None, cache=False):
         """Ответ-JSON. Провайдера просим о строгом JSON (меньше «не понял» из-за битых ответов), а разбор всё равно
         терпимый (parse_json) — на случай модели без JSON-режима."""
         raw = await self.ask(system + "\nОтвечай ТОЛЬКО валидным JSON, без пояснений и без ```.", prompt,
-                             max_tokens=max_tokens, smart=smart, light=light, json_mode=True, images=images)
+                             max_tokens=max_tokens, smart=smart, light=light, json_mode=True, images=images,
+                             cache=cache)
         return parse_json(raw)
 
     # ---------- провайдеры ----------
-    async def _post(self, url, payload, headers):
-        timeout = aiohttp.ClientTimeout(total=30)
+    async def _post(self, url, payload, headers, timeout=30):
+        timeout = aiohttp.ClientTimeout(total=timeout)
         async with aiohttp.ClientSession(timeout=timeout) as s:
             async with s.post(url, json=payload, headers=headers) as r:
                 text = await r.text()
-                if r.status == 429:
+                if r.status in (429, 529):  # 529 — Anthropic перегружен: та же пауза, что и при лимите
                     raise _RateLimited(text[:400])
+                if r.status == 400 and "credit balance" in text.lower():  # у ключа Claude кончились деньги
+                    raise _RateLimited("credit balance too low - try again in 1h")
                 if r.status in (401, 403) or (r.status == 400 and "api key" in text.lower()):
                     raise AIUnavailable("Ключ ИИ не подходит — проверь его (/ии ключ)")
                 low = text.lower()
@@ -323,16 +373,30 @@ class AI:
             raise AIUnavailable("Ollama не запущена на этом ПК")
         return (data.get("message") or {}).get("content", "")
 
-    async def _anthropic(self, model, system, prompt, max_tokens):
-        if self._claude is None:
-            try:
-                from anthropic import AsyncAnthropic
-            except ImportError:
-                raise AIUnavailable("Для Claude установи пакет: pip install anthropic")
-            self._claude = AsyncAnthropic(api_key=config.ANTHROPIC_KEY)
-        r = await self._claude.messages.create(model=model, max_tokens=max_tokens, system=system,
-                                                  messages=[{"role": "user", "content": prompt}])
-        return "".join(getattr(b, "text", "") for b in r.content)
+    async def _claude(self, model, system, prompt, max_tokens, smart=False, cache=False, images=None):
+        """Claude через Messages API (сырой HTTP, как остальные провайдеры — общий _post с его ошибками и лимитами).
+        Haiku/Sonnet 5.5 думают сами (adaptive) — даём запас токенов на мысли, глубину держим effort: low для рутины,
+        medium для smart. temperature не шлём (у этих моделей — 400). JSON — инструкцией (ask_json) + parse_json."""
+        content = [{"type": "image", "source": {"type": "base64", "media_type": mime,
+                                                "data": base64.b64encode(raw).decode("ascii")}}
+                   for mime, raw in (images or [])] + [{"type": "text", "text": prompt}]
+        sys_block = {"type": "text", "text": system}
+        if cache:  # большой стабильный system (документы юриста, промпт Швейцара) — кэш, ~10% цены на повторах
+            sys_block["cache_control"] = {"type": "ephemeral"}
+        payload = {"model": model, "max_tokens": max_tokens + (4000 if smart else 1500),
+                   "system": [sys_block], "messages": [{"role": "user", "content": content}],
+                   "output_config": {"effort": "medium" if smart else "low"}}
+        headers = {"x-api-key": self.keys.get("claude", ""), "anthropic-version": CLAUDE_VERSION}
+        if model in CLAUDE_FALLBACK_MODELS:
+            headers["anthropic-beta"] = CLAUDE_FALLBACK_BETA
+            payload["fallbacks"] = "default"
+        data = await self._post(CLAUDE_URL, payload, headers, timeout=90 if smart else 45)
+        if data.get("stop_reason") == "refusal":
+            raise AIUnavailable("Claude отказался отвечать на этот запрос")
+        text = "".join(b.get("text", "") for b in data.get("content") or [] if b.get("type") == "text")
+        if not text.strip():
+            raise AIUnavailable(f"Claude не дал текста (stop_reason={data.get('stop_reason')})")
+        return text
 
 
 class _ModelMissing(Exception):

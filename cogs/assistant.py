@@ -760,7 +760,7 @@ class Assistant(commands.Cog):
                 system = self.bot.brand(ctx.author.guild, system)
                 data = await ai.ask_json(system, f"{self.context(ctx)}\n\n{card}{self.chat(ctx)}{self.history(ctx)}"
                                                           f"Сообщение от {ctx.author.display_name}: {request}",
-                                                  max_tokens=500)
+                                                  max_tokens=500, smart=True, cache=True)
             except Exception as e:
                 log.warning("Швейцар: ИИ не ответил — %s", str(e)[:200])
                 text = random.choice(NO_AI)

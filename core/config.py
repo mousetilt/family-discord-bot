@@ -30,14 +30,22 @@ FAMILY = os.getenv("FAMILY_NAME", "Ульяновы")
 FAMILY_GEN = os.getenv("FAMILY_NAME_GENITIVE", "Ульяновых")  # «семья Ульяновых»
 GAME_SERVER = os.getenv("GAME_SERVER", "Арбатский")
 # ИИ: работает с БЕСПЛАТНЫМ ключом Groq или Gemini (или локальной моделью Ollama). Без ключа ИИ просто выключен.
-AI_PROVIDER = os.getenv("AI_PROVIDER", "").strip().lower()  # groq | gemini | ollama | anthropic (пусто = авто)
+AI_PROVIDER = os.getenv("AI_PROVIDER", "").strip().lower()  # groq | gemini | claude | ollama (пусто = авто)
+if AI_PROVIDER == "anthropic":  # старое имя
+    AI_PROVIDER = "claude"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_MODEL = os.getenv("GROQ_MODEL", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "").strip()
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434").strip()
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "").strip()
-ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()  # платный, необязательно
+# Claude (Anthropic) — ПЛАТНО и по желанию. Ключ кладётся во вкладку «Окружение» хостинга как ANTHROPIC_API_KEY
+# (в git не коммитится) или семьёй через /ии ключ. Основным Claude становится только по выбору (/ии основной).
+ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+# Уровни моделей Claude: дешёвая — рутина и обычные запросы (light / без флага), сильная — smart=True
+# (юрист, разбор дел и итогов, понимание намерений Швейцара, сводки). Переопределяются окружением.
+CLAUDE_MODEL_FAST = os.getenv("CLAUDE_MODEL_FAST", "").strip() or "claude-haiku-5-5"
+CLAUDE_MODEL_SMART = os.getenv("CLAUDE_MODEL_SMART", "").strip() or "claude-sonnet-5-5"
 AI_MODEL = os.getenv("AI_MODEL", "").strip()
 AI_MODERATION = os.getenv("AI_MODERATION", "1") == "1"
 AI_MOD_INTERVAL = _int("AI_MOD_INTERVAL", 60)  # ИИ проверяет сообщения пачкой раз в N секунд (экономит лимит)

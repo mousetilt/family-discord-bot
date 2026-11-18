@@ -531,12 +531,8 @@ class WizardView(discord.ui.View):
                                           ephemeral=True)
 
     async def s_ai(self, inter):
-        bot, g = inter.client, inter.guild
-        if bot.is_home(g):
-            ai = bot.ai_for(g)
-            return await inter.response.send_message(
-                f"🏠 Домашний сервер: ИИ работает на ключах хоста — **{ai.name if ai.on else 'ключей нет'}**.",
-                ephemeral=True)
+        bot = inter.client
+        # и на домашнем — модалка: свой ключ (в т.ч. Claude) главнее ключей хоста; основной провайдер — /ии основной
         from cogs.control import KeyModal
         await inter.response.send_modal(KeyModal(bot))
 

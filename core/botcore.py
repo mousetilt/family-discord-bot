@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from . import config
-from .ai import AI
+from .ai import AI, KEYED
 from .db import DB, gid_of as guild_id_of
 from . import family as family_mod
 from .family import brand as family_brand, feature as family_feature, profile as family_profile
@@ -186,19 +186,21 @@ class FamilyBot(commands.Bot):
         if guild is None:
             return self.ai
         gid = guild_id_of(guild)
-        keys = {p: self.db.gget(gid, f"ai:{p}") for p in ("groq", "gemini")}
+        keys = {p: self.db.gget(gid, f"ai:{p}") for p in KEYED}
         keys = {p: k for p, k in keys.items() if k}
+        primary = self.db.gget(gid, "ai:primary") or None  # /ии основной; нет — AI_PROVIDER / бесплатный
         home = self.home_id is None or gid == self.home_id
         if home:
-            if not keys:
+            if not keys and not primary:
                 return self.ai
-            # свой ключ главнее; ключ хоста другого провайдера — запасной
-            keys = {**{p: k for p, k in self.ai.keys.items() if p in ("groq", "gemini")}, **keys}
-        sig = (home,) + tuple(sorted(keys.items()))
+            # свой ключ главнее; ключ хоста (в т.ч. ANTHROPIC_API_KEY) — запасной. Чужим семьям ключи хоста
+            # не даём (решение владельца: лимит и платный Claude хоста не делим) — у них только свои.
+            keys = {**{p: k for p, k in self.ai.keys.items() if p in KEYED}, **keys}
+        sig = (home, primary) + tuple(sorted(keys.items()))
         cached = self._ai_cache.get(gid)
         if cached and cached[0] == sig:
             return cached[1]
-        ai = AI(self.db, keys=keys, scope=None if home else gid)  # дневной лимит домашнего — общий, как раньше
+        ai = AI(self.db, keys=keys, scope=None if home else gid, primary=primary)  # дневной лимит домашнего — общий, как раньше
         self._ai_cache[gid] = (sig, ai)
         return ai
 

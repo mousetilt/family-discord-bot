@@ -1222,7 +1222,7 @@ class ForumWatch(commands.Cog):
                                                    role=ROLE_FOR_AI.get(c["role"], "ответчик / обвиняемый"),
                                                    status=STATUS.get(status, status)),
                                      f"Тема: {c['title']}\nСуть: {c['summary'] or '—'}\n\nСообщения:\n{text[:5000]}",
-                                     max_tokens=350, light=True)
+                                     max_tokens=350, light=True, smart=True)
         except Exception as e:  # noqa: BLE001 — лимит/сеть: без ИИ
             log.info("forumwatch: ИИ не вытащил итог (%s)", type(e).__name__)
             return None

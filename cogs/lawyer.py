@@ -66,6 +66,25 @@ def quote(text, n=700):
     return "\n".join("> " + ln for ln in text.splitlines() if ln.strip())
 
 
+
+IMAGE_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif")
+
+
+async def read_images(message, limit=3, max_bytes=5_000_000):
+    """Картинки из сообщения → [(mime, bytes)] (не больше limit, каждая ≤ max_bytes). Ошибки — пропуск."""
+    out = []
+    for a in getattr(message, "attachments", None) or []:
+        mime = (a.content_type or "").split(";")[0].strip().lower()
+        if mime not in IMAGE_TYPES or (a.size or 0) > max_bytes:
+            continue
+        try:
+            out.append((mime, await a.read()))
+        except Exception:  # noqa: BLE001 — не скачалось: без этой картинки
+            continue
+        if len(out) >= limit:
+            break
+    return out
+
 class TextDocModal(discord.ui.Modal, title="Добавить текст в базу знаний"):
     name = discord.ui.TextInput(label="Название документа", max_length=150)
     body = discord.ui.TextInput(label="Текст (можно вставить целиком)", style=discord.TextStyle.paragraph,
@@ -186,9 +205,10 @@ class Lawyer(commands.Cog):
             return []
         return [str(q).strip()[:100] for q in (data.get("questions") or []) if str(q).strip()][:3]
 
-    async def answer_full(self, gid, question, mode="q", member=None, template=None, clarify=False):
+    async def answer_full(self, gid, question, mode="q", member=None, template=None, clarify=False, images=None):
         """→ {text, sources, ai, mode, questions}. questions — не хватает фактов (тогда text пуст, спроси человека).
-        member из семьи — юрист знает о делах против семьи (forumwatch); просят защиту по делу — режим defense."""
+        member из семьи — юрист знает о делах против семьи (forumwatch); просят защиту по делу — режим defense.
+        images — [(mime, bytes)] скрины жалобы/документа: читает Gemini или Claude; без зрения — только текст."""
         bot = self.bot
         ai = bot.ai_for(gid)
         res = {"text": "", "sources": [], "ai": False, "mode": mode, "questions": []}
@@ -212,7 +232,8 @@ class Lawyer(commands.Cog):
         if defense and mode in ("q", "case"):
             mode = "defense"
         res["mode"] = mode
-        if clarify and mode in ASK_MODES:
+        images = images if images and ai.vision else None
+        if clarify and mode in ASK_MODES and not images:  # к скрину уточнения не нужны — факты на картинке
             res["questions"] = await self.clarify(ai, question)
             if res["questions"]:
                 return res
@@ -220,8 +241,10 @@ class Lawyer(commands.Cog):
         context, sources, _ = await bot.kb.context_smart(gid, question, ai)  # смысл + слова; без Gemini — по словам
         system = (f"{bot.brand(gid, BASE_PROMPT)}\n\nЗАДАЧА: {MODES[mode][1]}" + (f"\n\n{fam}" if fam else "") +
                   (f"\n\n{tmpl}" if tmpl else "") + f"\n\nДОКУМЕНТЫ:\n{context}")
+        if images:
+            system += "\n\nК вопросу приложены скриншоты — опирайся и на них (кто, против кого, суть, даты)."
         reply = await ai.ask(system, question, max_tokens=1600 if mode in ("doc", "defense") else 900, smart=True,
-                             cache=True)
+                             cache=True, images=images)
         text, missing = verify(reply or "ИИ не дал ответа, попробуй переформулировать.", bot.kb.docs(gid))
         if missing:  # самопроверка: ссылок, которых нет в базе, ИИ мог выдумать
             text += ("\n\n⚠️ Не нашёл в базе: " + ", ".join(missing[:6]) +
@@ -283,7 +306,7 @@ class Lawyer(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.guild or not message.content:
+        if message.author.bot or not message.guild or not (message.content or message.attachments):
             return
         if not self.bot.feature(message.guild, "lawyer:channel"):
             return
@@ -298,7 +321,12 @@ class Lawyer(commands.Cog):
         if asst and asst.claims(message, in_lawyer_channel=bool(in_channel)):
             return  # это просьба помощнику «Швейцар» — он ответит сам, двух ответов не надо
         question = message.content.replace(self.bot.user.mention, "").replace(f"<@!{self.bot.user.id}>", "").strip()
+        images = await read_images(message) if self.bot.ai_for(message.guild).vision else []
+        if images and len(question) < 3:
+            question = "Разбери скриншот: что это за документ/жалоба, кто против кого, суть, что делать."
         if len(question) < 3:
+            if message.attachments and not images and in_channel:
+                await message.reply("Картинки мой ИИ сейчас не читает — пришли суть текстом.", mention_author=False)
             return
         left = self.cooldown_left(message.author.id)
         if left:
@@ -308,7 +336,8 @@ class Lawyer(commands.Cog):
         async def send(**kw):
             await message.reply(mention_author=False, **kw)
         async with message.channel.typing():
-            res = await self.safe_full(message.guild.id, question, mode, member=message.author, clarify=True)
+            res = await self.safe_full(message.guild.id, question, mode, member=message.author, clarify=True,
+                                       images=images or None)
         if res["questions"]:
             return await self.ask_back(send, question, res, message.author.id, message.guild.id)
         await self.send_answer(send, question, res["text"], res["sources"], res["mode"], message.guild)

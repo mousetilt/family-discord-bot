@@ -326,7 +326,7 @@ class Automation(commands.Cog):
                                    "объявления, сборы, решения, кого приняли/наказали, затем движуха в чатах. Имена "
                                    "сохраняй. Коротко, в своём стиле.")
         try:
-            text = await ai.ask(system, blob, max_tokens=700)
+            text = await ai.ask(system, blob, max_tokens=700, smart=True)
         except Exception as e:
             return f"ИИ сейчас не отвечает ({str(e)[:80]}). Сообщений за {hours} ч: {len(lines)}."
         return f"🕰 **Что ты пропустил за {hours} ч**\n{text[:3500]}"
