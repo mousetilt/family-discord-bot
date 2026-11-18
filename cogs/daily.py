@@ -48,8 +48,8 @@ def make_backup(path, only_gid=None, home_gid=None):
                     dst.commit()
                 except sqlite3.Error:
                     pass
-            try:  # пароль аккаунта форума не уходит ни в одну копию
-                dst.execute("DELETE FROM guild_settings WHERE key='forum:pass'")
+            try:  # пароль и сессия аккаунта форума не уходят ни в одну копию
+                dst.execute("DELETE FROM guild_settings WHERE key IN ('forum:pass', 'forum:cookies')")
                 dst.commit()
             except sqlite3.Error:
                 pass

@@ -136,7 +136,7 @@ class Lawyer(commands.Cog):
         self.cool = {}
 
     async def fetch(self, guild, url, session=None):
-        """Документ по ссылке: как гость, а закрытую тему форума — аккаунтом семьи (/форум аккаунт), если он есть."""
+        """Документ по ссылке: как гость, а закрытую тему форума — аккаунтом семьи (/форум вход), если он есть."""
         try:
             return await fetch_url(url, session=session)
         except LoginRequired:

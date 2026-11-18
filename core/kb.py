@@ -407,8 +407,8 @@ async def _get(session, url):
             if status not in RETRY_CODES:
                 raise ValueError(f"Сайт ответил кодом {status}")
             if status == 403 and _is_login_wall(await r.text(errors="replace")):
-                raise LoginRequired("Тема закрыта для гостей (форум просит войти) — подключи аккаунт форума "
-                                    "(/форум аккаунт) или загрузи текст файлом: /база файл")
+                raise LoginRequired("Тема закрыта для гостей (форум просит войти) — владелец сервера может "
+                                    "подключить общий аккаунт (/форум вход), или загрузи текст файлом: /база файл")
             retry_after = r.headers.get("Retry-After", "")
         if retry_after.isdigit() and attempt < len(RETRY_DELAYS):
             await asyncio.sleep(min(int(retry_after), 30))

@@ -290,6 +290,36 @@ def analyze(title, text, author, rx, people=(), head_rx=None, ignore=()):
     return best
 
 
+SELF_WORDS = {"я", "меня", "мне", "себя", "самого себя"}
+_INTENT = [
+    re.compile(r"(?:провер\w*|пробей|пробить|прочекай|чекни|глянь|посмотри|поищи|найди)\s+(?P<who>[^,.!?]{1,40}?)\s+"
+               r"(?:по|на)\s+форум", re.I),
+    re.compile(r"(?:есть|нет|имеются|появились)\s+(?:ли\s+)?на\s+(?P<who>[^,.!?]{1,40}?)\s+"
+               r"(?:жалоб|иск|обращени|дел[оа]?\b|заявлени)", re.I),
+    re.compile(r"(?:жалоб\w*|иск\w*|обращени\w*|дел[оа]?)\s+(?:на|против)\s+(?P<who>меня|мне)(?!\w)", re.I),
+    re.compile(r"(?:провер\w*|пробей|прочекай|чекни|глянь|посмотри)\s+по\s+форуму\s+(?P<who>[^,.!?]{1,40}?)\s*[.!?]*$",
+               re.I),
+    re.compile(r"(?:^|\s)(?:пробей|прочекай|чекни)\s+(?P<who>[^,.!?\s]+(?:\s+[^,.!?\s]+)?)\s*[.!?]*\s*$", re.I),
+]
+
+
+def forum_intent(text):
+    """«проверь меня по форуму», «пробей Петю», «есть на меня жалобы?» → {"target_name": None|кто, "fresh": bool};
+    иначе None. Ловит без ИИ: такой вопрос не должен уходить юристу в правила."""
+    t = " ".join(re.sub(r"(?i)^\s*швейцар\w*[\s,:!]*", "", str(text or "")).replace("ё", "е").split())
+    for rx in _INTENT:
+        m = rx.search(t)
+        if not m:
+            continue
+        who = m.group("who").strip(" -—").lower()
+        if who.startswith("форум") or who in {"правила", "закон", "законы"} or                 (who.split()[0] in {"мне", "нам"} and len(who.split()) > 1):  # «пробей мне трек» — не про форум
+            continue  # «есть ли на форуме жалобы на ДМ» — это не про человека
+        who = re.sub(r"^(?:ещ[её]\s+|пожалуйста\s+|плиз\s+)", "", who)
+        fresh = bool(re.search(r"посвеж|свеж|прямо сейчас|сейчас же|актуальн|заново", t, re.I))
+        return {"target_name": None if who in SELF_WORDS else who, "fresh": fresh}
+    return None
+
+
 def case_number(title):
     m = re.search(r"№\s*([0-9]+(?:[\-/][0-9]+)?)", title or "")
     return m.group(1) if m else ""
@@ -297,10 +327,13 @@ def case_number(title):
 
 # ---------- сеть ----------
 class ForumClient:
-    """Сессия одного аккаунта: куки входа живут, пока жив клиент. Логин/пароль — только в памяти и в базе семьи."""
+    """Сессия общего аккаунта семьи (или гость, если входа нет). Ходим сохранённой кукой сессии; пароль нужен только,
+    когда кука протухла (форум отдал страницу входа) — тогда входим заново и отдаём новые куки в on_cookies."""
 
-    def __init__(self, login, password):
+    def __init__(self, login=None, password=None, cookies=None, on_cookies=None):
         self.login, self.password = login, password
+        self.cookies = {k: v for k, v in (cookies or {}).items() if str(k).startswith("xf_")}
+        self.on_cookies = on_cookies
         self.session = None
         self.logged_in = False
         self.last = 0.0
@@ -319,8 +352,17 @@ class ForumClient:
     def _open(self):
         if self.session is None or self.session.closed:
             self.session, self.logged_in = new_session(), False
+            if self.cookies:
+                from yarl import URL
+                self.session.cookie_jar.update_cookies(self.cookies, response_url=URL(f"{BASE}/"))
+                self.logged_in = True  # пробуем сохранённую сессию; не пустят — войдём паролем
+
+    def export_cookies(self):
+        return {c.key: c.value for c in (self.session.cookie_jar if self.session else []) if c.key.startswith("xf_")}
 
     async def sign_in(self):
+        if not (self.login and self.password):
+            raise LoginError("вход на форум не настроен — владелец сервера: /форум вход")
         self._open()
         await self._pause()
         html = await _get(self.session, f"{BASE}/login/")
@@ -339,6 +381,12 @@ class ForumClient:
             where = str(r.url)
         if 'data-logged-in="true"' in body[:3000]:
             self.logged_in = True
+            self.cookies = self.export_cookies()
+            if self.on_cookies:
+                try:
+                    self.on_cookies(self.cookies)
+                except Exception:  # noqa: BLE001 — не сохранили куку: просто войдём паролем в следующий раз
+                    pass
             return
         if "two-step" in where or "two-step" in body[:30000]:
             raise LoginError("на аккаунте включена двухфакторная защита — для аккаунта бота её нужно выключить")
@@ -349,13 +397,16 @@ class ForumClient:
         raise LoginError((err.get_text(" ", strip=True)[:200] if err else "") or "неверный логин или пароль")
 
     async def get(self, url):
-        """Страница форума под аккаунтом; вылетела сессия — один раз заходим заново."""
-        if not self.logged_in:
+        """Страница форума под аккаунтом (или гостем); вылетела сессия — один раз заходим заново паролем."""
+        self._open()
+        if not self.logged_in and self.password:
             await self.sign_in()
         await self._pause()
         try:
             return await _get(self.session, url)
         except LoginRequired:
+            if not self.password:
+                raise  # гость: раздел только для своих — нужен /форум вход
             self.logged_in = False
             await self.sign_in()
             await self._pause()

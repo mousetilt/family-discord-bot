@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Форум-монитор: жалобы, иски и обращения против семьи на форуме «Россия Онлайн». Модуль «forum» (по умолчанию выкл).
-• Аккаунт форума семьи (/форум аккаунт, модалка) — бот входит им и ТОЛЬКО читает. Пароль — секрет семьи: не
+• Аккаунт форума семьи (/форум вход, модалка) — бот входит им и ТОЛЬКО читает. Пароль — секрет семьи: не
   показывается, не логируется, вырезается из копий базы. Неверный пароль/двухфакторка → стоп и сообщение в бот-команды.
 • Раз в N минут (/форум интервал, по умолч. 12): 1-я страница каждого раздела (core.forum.SECTIONS), новые/обновлённые
   темы — читаем (не больше MAX_READS за цикл, паузы 2 с, одна сессия). Кэш тем — forum_threads(thread_id, last_ts).
@@ -8,6 +8,7 @@
   без ИИ — эвристика. Ответчик/обвиняемый → карточка в «⚖・суды-и-жалобы» + пинг; остальное — тихий лог (forum_cases).
 • Дело: новые ответы — ветка под карточкой, переезд в «рассмотренные/отклонённые» или замок — статус в карточке."""
 import asyncio
+import json
 import logging
 import re
 import time
@@ -22,6 +23,7 @@ from core.forum import (BASE, HEAD_TITLES, KIND_ICON, LAW_SECTIONS, ROLE_RANK, S
                         LoginError, analyze, case_number, find_person, norm, status_from, surname_rx, surname_stem,
                         thread_id, thread_url, titles_rx)
 from core.kb import FetchBlocked, LoginRequired
+from core.secret import PREFIX, decrypt, encrypt
 from core.legal import SECTION_TEMPLATE, diff_line
 
 log = logging.getLogger("family-bot.forumwatch")
@@ -83,10 +85,10 @@ def is_manager(bot, inter):
     return bool(inter.guild) and (inter.user.id == inter.guild.owner_id or bot.has(inter.user, MANAGERS))
 
 
-class AccountModal(discord.ui.Modal, title="Аккаунт форума для бота"):
-    login = discord.ui.TextInput(label="Логин или почта аккаунта форума", max_length=120,
-                                 placeholder="«-» — отключить аккаунт")
-    password = discord.ui.TextInput(label="Пароль (бот только читает форум)", max_length=200, required=False)
+class AccountModal(discord.ui.Modal, title="Общий аккаунт форума (только чтение)"):
+    login = discord.ui.TextInput(label="Логин или почта общего аккаунта семьи", max_length=120,
+                                 placeholder="«-» — забыть аккаунт")
+    password = discord.ui.TextInput(label="Пароль (хранится зашифрованным)", max_length=200, required=False)
 
     def __init__(self, cog):
         super().__init__()
@@ -95,7 +97,7 @@ class AccountModal(discord.ui.Modal, title="Аккаунт форума для �
     async def on_submit(self, inter: discord.Interaction):
         cog, g, db = self.cog, inter.guild, self.cog.bot.db
         if self.login.value.strip() == "-":
-            for k in ("forum:login", "forum:pass", "forum:auth_fail"):
+            for k in ("forum:login", "forum:pass", "forum:cookies", "forum:auth_fail"):
                 db.gdel(g, k)
             await cog.drop_client(g.id)
             return await inter.response.send_message("🔌 Аккаунт форума отключён, слежка остановлена.", ephemeral=True)
@@ -115,9 +117,14 @@ class AccountModal(discord.ui.Modal, title="Аккаунт форума для �
             return await inter.followup.send(f"❌ Форум не ответил: {str(e)[:150]}. Попробуй позже.", ephemeral=True)
         finally:
             await client.close()
-        db.gset(g, "forum:login", self.login.value.strip())
-        db.gset(g, "forum:pass", self.password.value)
-        db.gdel(g, "forum:auth_fail")
+        try:
+            db.gset(g, "forum:login", self.login.value.strip())
+            db.gset(g, "forum:pass", encrypt(self.password.value))
+            db.gset(g, "forum:cookies", encrypt(json.dumps(client.cookies)))  # дальше ходим кукой, пароль — запасной
+        except RuntimeError as e:
+            return await inter.followup.send(f"❌ Не могу зашифровать пароль: {e}. Ничего не сохранил.", ephemeral=True)
+        for k in ("forum:auth_fail", "forum:nologin_told"):
+            db.gdel(g, k)
         set_module(db, g, "forum", True)
         await cog.drop_client(g.id)
         ch = await cog.ensure_channel(g)
@@ -125,7 +132,8 @@ class AccountModal(discord.ui.Modal, title="Аккаунт форума для �
         await inter.followup.send(
             "✅ Вошёл на форум, разделы жалоб и судов видны. Модуль «⚖️ Суды и жалобы» включён.\n"
             f"Канал: {ch.mention if ch else '— не смог создать, укажи: `/форум канал`'}\n"
-            "Первая проверка уже идёт (первый раз — дольше: смотрю последние 30 дней). Пароль нигде не показываю.",
+            "Первая проверка уже идёт (первый раз — дольше: смотрю последние 30 дней).\n"
+            "Пароль и сессия хранятся зашифрованными (ключ — в окружении хоста, не в базе), бот только читает форум.",
             ephemeral=True)
         asyncio.create_task(cog.check_safe(g, manual=True))
 
@@ -156,15 +164,42 @@ class ForumWatch(commands.Cog):
 
     # ---------- настройки ----------
     def creds(self, g):
-        lg, pw = self.bot.db.gget(g, "forum:login"), self.bot.db.gget(g, "forum:pass")
-        return (lg, pw) if lg and pw else None
+        """(логин, пароль) общего аккаунта или None. Пароль в базе — зашифрован (core.secret)."""
+        db = self.bot.db
+        lg, raw = db.gget(g, "forum:login"), db.gget(g, "forum:pass")
+        if not (lg and raw):
+            return None
+        pw = decrypt(raw)
+        if pw is None:  # сменили DISCORD_TOKEN/FORUM_SECRET — старый шифр не читается
+            if not db.gget(g, "forum:auth_fail"):
+                db.gset(g, "forum:auth_fail", "не могу расшифровать пароль (сменился ключ на хосте) — /форум вход заново")
+            return None
+        if not str(raw).startswith(PREFIX):
+            try:
+                db.gset(g, "forum:pass", encrypt(pw))  # пароль из прошлой версии лежал открыто — шифруем
+            except RuntimeError:
+                pass
+        return lg, pw
 
     def client(self, g, creds):
+        """Клиент общего аккаунта (или гость при creds=None). Куки сессии — из базы, зашифрованные."""
+        key = creds or (None, None)
         cur = self.clients.get(g.id)
-        if cur and (cur[0], cur[1]) == creds:
+        if cur and (cur[0], cur[1]) == key:
             return cur[2]
-        c = ForumClient(*creds)
-        self.clients[g.id] = (creds[0], creds[1], c)
+        db = self.bot.db
+        try:
+            cookies = json.loads(decrypt(db.gget(g, "forum:cookies")) or "{}") if creds else {}
+        except (TypeError, ValueError):
+            cookies = {}
+
+        def save(ck, gid=g.id):
+            try:
+                db.gset(gid, "forum:cookies", encrypt(json.dumps(ck)))
+            except RuntimeError:
+                pass
+        c = ForumClient(key[0], key[1], cookies=cookies, on_cookies=save)
+        self.clients[g.id] = (key[0], key[1], c)
         return c
 
     async def drop_client(self, gid):
@@ -372,9 +407,7 @@ class ForumWatch(commands.Cog):
 
     async def check(self, g, manual=False):
         db = self.bot.db
-        creds = self.creds(g)
-        if not creds:
-            return "Аккаунт форума не подключён: `/форум аккаунт`."
+        creds = self.creds(g)  # None — гость: смотрим то, что видно без входа
         if db.gget(g, "forum:auth_fail") and not manual:
             return f"Вход на форум не работает: {db.gget(g, 'forum:auth_fail')}"
         self.seed(g)
@@ -442,13 +475,18 @@ class ForumWatch(commands.Cog):
                 err = f"не вхожу на форум: {e}"
                 db.gset(g, "forum:auth_fail", str(e)[:200])
                 await self.drop_client(g.id)
-                await self.alert(g, f"⚖️ Форум-монитор остановлен: {e}.\nПоправь данные: `/форум аккаунт`.")
+                await self.alert(g, f"⚖️ Форум-монитор остановлен: {e}.\nПоправь данные: `/форум вход`.")
             except FetchBlocked:
                 err = "форум попросил сбавить обороты (анти-флуд) — продолжу через 30 минут"
                 self.backoff[g.id] = time.time() + 1800
             except LoginRequired:
-                err = "аккаунт не видит разделы жалоб и судов"
-                await self.alert(g, "⚖️ Форум-монитор: аккаунт форума вошёл, но не видит разделы жалоб и судов.")
+                if creds:
+                    err = "аккаунт не видит разделы жалоб и судов"
+                    await self.alert(g, "⚖️ Форум-монитор: аккаунт форума вошёл, но не видит разделы жалоб и судов.")
+                else:
+                    err = "без входа разделы жалоб и судов не видны — владелец сервера: `/форум вход`"
+                    self.backoff[g.id] = time.time() + 6 * 3600  # гостем раз в 6 часов, не чаще
+                    await self.tell_owner(g)
         db.gset(g, "forum:last_err", err or "")
         await self.post_missing_cards(g)
         res = (f"Просмотрено разделов: {st['lists']}, тем прочитано: {st['read']}, новых дел: {st['new']}, "
@@ -631,6 +669,147 @@ class ForumWatch(commands.Cog):
             raise ValueError("В теме почти нет текста.")
         return title, content, thread_url(tid)
 
+    # ---------- проверка человека: «проверь меня / Петю по форуму» ----------
+    def identity(self, g, member, game_name=None, static=None):
+        """Кто человек по игре — молча из того, что бот уже знает: анкета (ник + статик), ручной список форума,
+        Discord-ник, прозвища. → (полные имена «Имя Фамилия», статики, как назвать в ответе)."""
+        db = self.bot.db
+        names, statics = [(game_name or "", False)], [re.sub(r"\D", "", str(static or ""))]  # (имя, строго?)
+        if member is not None:
+            for r in db.all("SELECT nick, static_id FROM applications WHERE guild_id=? AND user_id=? "
+                            "ORDER BY id DESC LIMIT 5", g.id, member.id):
+                names.append((r["nick"] or "", False))
+                statics.append(str(r["static_id"] or ""))
+            for r in db.all("SELECT name, static_id FROM forum_people WHERE guild_id=? AND user_id=?", g.id,
+                            member.id):
+                names.append((r["name"], False))
+                statics.append(str(r["static_id"] or ""))
+            # Discord-ник и прозвища — игровое имя, только если похоже на «Имя Фамилия» (с заглавных), а не «cool_guy»
+            names.append((member.display_name.split("[")[0], True))
+            statics += re.findall(r"(?<!\d)\d{4,7}(?!\d)", member.display_name)
+            names += [(x, True) for x in (db.gget(g, f"alias:{member.id}") or "").split(",")]
+        full, seen = [], set()
+        for n, strict in names:
+            n = " ".join(re.sub(r"[^A-Za-zА-Яа-яЁё\- ]", " ", norm(n).replace("\n", " ")).split())
+            words = n.split()
+            if len(words) < 2 or n.lower() in seen:  # искать можно только «Имя Фамилия»
+                continue
+            if strict and not all(w[0].isupper() for w in words[:2]):
+                continue
+            seen.add(n.lower())
+            full.append(n)
+        st = list(dict.fromkeys(x for x in statics if x and len(x) >= 3 and x.isdigit()))
+        label = member.display_name if member is not None else (full[0] if full else (game_name or "?"))
+        return full, st, label
+
+    @staticmethod
+    def _names_in(text, name):
+        """«Имя Фамилия» (в любом падеже, латиницей) в тексте: фамилия + имя рядом с ней."""
+        last = name.split()[-1].lower()
+        rx = surname_rx(re.sub(r"(а|ой|ая|ий)$", "", last) if len(last) > 5 else last)
+        for m in (rx.finditer(text) if rx else []):
+            zone = text[max(0, m.start() - 40):m.end() + 15]
+            if find_person([{"name": name, "static": None}], zone, zone):
+                return True
+        return False
+
+    def person_hits(self, g, member, names, statics):
+        """Дела форума, где фигурирует человек. → [(дело, роль)]: роль относительно ЭТОГО человека."""
+        db = self.bot.db
+        heads = {p["user_id"] for p in self.people(g) if p["head"] and p["user_id"]}
+        out = []
+        for c in db.all("SELECT * FROM forum_cases WHERE guild_id=? ORDER BY (status='pending') DESC, updated_ts DESC",
+                        g.id):
+            dfd = norm(c["defendant"] or "")
+            text = norm("\n".join([c["title"] or "", c["body"] or ""]))
+            role = None
+            if member is not None and (c["member_id"] == member.id or (c["head"] and member.id in heads)):
+                role = c["role"]
+            elif any(re.search(rf"(?<!\d){re.escape(s)}(?!\d)", dfd) for s in statics) or \
+                    any(self._names_in(dfd, n) for n in names):
+                role = c["role"]  # он и есть тот, на кого дело
+            else:
+                for s in statics:
+                    if re.search(rf"(?<!\d){re.escape(s)}(?!\d)", text):
+                        res = analyze(c["title"] or "", c["body"] or "", c["applicant"] or "", None,
+                                      [{"name": names[0] if names else "", "static": s}])
+                        role = res["role"] if res else "mention"
+                        break
+                if role is None:
+                    for n in names:
+                        if self._names_in(text, n) or self._names_in(norm(c["applicant"] or ""), n):
+                            last = n.split()[-1].lower()
+                            rx = surname_rx(re.sub(r"(а|ой|ая|ий)$", "", last) if len(last) > 5 else last)
+                            res = analyze(c["title"] or "", c["body"] or "", c["applicant"] or "", rx,
+                                          [{"name": n, "static": None}])
+                            role = res["role"] if res else "mention"
+                            break
+            if role:
+                out.append((c, role))
+        return out
+
+    def person_report(self, g, member, game_name=None, static=None, self_check=True):
+        """Ответ на «проверь меня по форуму»: дела с ролью, статусом и ссылкой — или «чисто». Только реальные данные."""
+        db = self.bot.db
+        names, statics, label = self.identity(g, member, game_name, static)
+        you = "тебя" if self_check else label
+        if not names and not statics:
+            dn = member.display_name if member is not None else (game_name or "?")
+            return (f"По нику «{dn}» не понять, кто {'ты' if self_check else 'это'} в игре, а анкеты с статиком нет. "
+                    f"{'Кто ты' if self_check else 'Кто это'} по игре — Имя Фамилия и статик?")
+        hits = self.person_hits(g, member, names, statics)
+        last = int(db.gget(g, "forum:last") or 0)
+        ident = ", ".join(names[:2]) + (f", static {statics[0]}" if statics else "")
+        head = f"🔎 Форум по **{label}**" + (f" ({ident})" if ident else "") + ":"
+        lines = []
+        for c, role in hits[:8]:
+            sec = SECTIONS.get(c["forum_id"], ("раздел форума",))[0]
+            lines.append(f"{'🔴' if role == 'defendant' else '⚪'} {KIND_ICON.get(c['kind'], '⚖️')} "
+                         f"{(c['kind'] or 'дело').capitalize()} [{c['title'][:70]}]({c['url']}) — "
+                         f"{ROLE_RU.get(role, role)} · {sec} · подал {c['applicant'] or '?'} · "
+                         f"{STATUS.get(c['status'], c['status'])}")
+        titles = []
+        known = {c["thread_id"] for c, _ in hits}
+        for t in db.all("SELECT thread_id, title FROM forum_threads WHERE guild_id=? ORDER BY last_ts DESC LIMIT 2000",
+                        g.id):
+            tt = norm(t["title"] or "")
+            if t["thread_id"] not in known and (any(re.search(rf"(?<!\d){re.escape(s)}(?!\d)", tt) for s in statics)
+                                                or any(self._names_in(tt, n) for n in names)):
+                titles.append(f"· [{t['title'][:70]}]({thread_url(t['thread_id'])})")
+            if len(titles) >= 5:
+                break
+        if not last:
+            return (head + "\n" + ("\n".join(lines) + "\n" if lines else "") +
+                    "Форум ещё ни разу не проверялся — вход не настроен (владелец сервера: `/форум вход`), "
+                    "так что «чисто» сказать не могу.")
+        body = "\n".join(lines) if lines else f"Чисто: жалоб, исков и обращений против {you} не вижу."
+        if titles:
+            body += "\nУпоминается в заголовках тем:\n" + "\n".join(titles)
+        rx = surname_rx(self.stem(g))
+        note = f"\n-# Жалобы, суды и прокуратура, что бот видел на форуме · последняя проверка <t:{last}:R>"
+        if not any(rx and rx.search(n) for n in names) and not any(
+                s == str(p["static"]) for p in self.people(g) for s in statics):
+            note += " · не из семьи: вижу только темы, где упомянута семья"
+        return head + "\n" + body + note
+
+    def fresh_later(self, g, channel, member, game_name=None, static=None, self_check=True):
+        """«Посвежее»: проверка форума в фоне, потом — новый ответ в тот же канал."""
+        if self.net_lock.locked():
+            return "⏳ Форум как раз проверяется — если что-то всплывёт, придёт в канал дел."
+        last = int(self.bot.db.gget(g, "forum:last") or 0)
+        if time.time() - last < 180:
+            return "-# Форум проверял пару минут назад — данные свежие."
+
+        async def run():
+            await self.check_safe(g, manual=True)
+            try:
+                await channel.send(("🔄 Свежая проверка:\n" + self.person_report(g, member, game_name, static,
+                                                                                self_check))[:1900])
+            except discord.HTTPException:
+                pass
+        asyncio.create_task(run())
+        return "🔄 Запустил свежую проверку форума — допишу сюда через пару минут."
+
     def remember(self, g, fid, it, cutoff):
         """Кэш темы из списка раздела. → [(case_id, новый статус, раздел)] для дел, у которых статус поменялся."""
         db = self.bot.db
@@ -749,6 +928,29 @@ class ForumWatch(commands.Cog):
         out["head"] = bool(data.get("head")) or base["head"]
         return out
 
+    async def tell_owner(self, g):
+        """Один раз: владельцу сервера в ЛС — без входа форум закрыт, нужен /форум вход."""
+        db = self.bot.db
+        if db.gget(g, "forum:nologin_told"):
+            return
+        db.gset(g, "forum:nologin_told", "1")
+        text = ("⚖️ Форум-монитор: разделы жалоб и судов на forum.russia.online видны только после входа. "
+                f"Введи общий аккаунт семьи на сервере «{g.name}»: `/форум вход` (только владелец сервера; бот только "
+                "читает, пароль хранится зашифрованным).")
+        owner = g.owner
+        if owner is None and g.owner_id:
+            try:
+                owner = await self.bot.fetch_user(g.owner_id)
+            except discord.HTTPException:
+                owner = None
+        if owner:
+            try:
+                await owner.send(text)
+                return
+            except discord.HTTPException:
+                pass
+        await self.alert(g, text)
+
     async def alert(self, g, text):
         ch = self.bot.ch(g, "botcmd") or self.bot.ch(g, "council_chat")
         if ch:
@@ -761,7 +963,7 @@ class ForumWatch(commands.Cog):
     async def watch_loop(self):
         db = self.bot.db
         for g in list(self.bot.home_guilds):
-            if not self.bot.feature(g, "forum:watch") or not self.creds(g) or db.gget(g, "forum:auth_fail"):
+            if not self.bot.feature(g, "forum:watch") or db.gget(g, "forum:auth_fail"):
                 continue
             if time.time() < self.backoff.get(g.id, 0):
                 continue
@@ -777,10 +979,10 @@ class ForumWatch(commands.Cog):
     async def deny(self, inter):
         await inter.response.send_message("⛔ Только Глава, заместитель или владелец сервера.", ephemeral=True)
 
-    @group.command(name="аккаунт", description="Подключить аккаунт форума (бот только читает разделы жалоб и судов)")
+    @group.command(name="вход", description="Общий аккаунт семьи на форуме — только владелец сервера (бот только читает)")
     async def account(self, inter: discord.Interaction):
-        if not is_manager(self.bot, inter):
-            return await self.deny(inter)
+        if inter.user.id != inter.guild.owner_id:
+            return await inter.response.send_message("⛔ Вход на форум вводит только владелец сервера.", ephemeral=True)
         await inter.response.send_modal(AccountModal(self))
 
     @group.command(name="канал", description="Канал для карточек дел (без канала — создам «⚖・суды-и-жалобы»)")
@@ -834,7 +1036,7 @@ class ForumWatch(commands.Cog):
         if not self.bot.has(inter.user, config.LEAD) and inter.user.id != inter.guild.owner_id:
             return await self.deny(inter)
         if not self.creds(inter.guild):
-            return await inter.response.send_message("Аккаунт форума не подключён: `/форум аккаунт`.", ephemeral=True)
+            return await inter.response.send_message("Аккаунт форума не подключён: `/форум вход`.", ephemeral=True)
         if self.net_lock.locked():
             return await inter.response.send_message("⏳ Проверка уже идёт — результат будет в канале дел.",
                                                       ephemeral=True)
@@ -865,7 +1067,7 @@ class ForumWatch(commands.Cog):
                     for c in quiet]
         last = int(db.gget(g, "forum:last") or 0)
         state = ("🔴 вход не работает: " + db.gget(g, "forum:auth_fail")) if db.gget(g, "forum:auth_fail") else \
-            ("🟢 слежу" if self.creds(g) and self.bot.feature(g, "forum:watch") else "⚪ выключено (`/форум аккаунт`)")
+            ("🟢 слежу" if self.creds(g) and self.bot.feature(g, "forum:watch") else "⚪ выключено (`/форум вход`)")
         head = f"{state} · раз в {self.interval(g)} мин" + (f" · последняя проверка <t:{last}:R>" if last else "")
         if db.gget(g, "forum:last_err"):
             head += f"\n⚠️ {db.gget(g, 'forum:last_err')}"

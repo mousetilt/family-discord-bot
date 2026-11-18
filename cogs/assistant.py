@@ -18,6 +18,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from core import config
+from core.forum import forum_intent
 from core.names import forms, similarity
 from core.botcore import fmt_hours, now, now_iso, parse_dt, safe_dm
 
@@ -30,7 +31,7 @@ INFO = "\u200b"   # пометка «это ответ-справка»: пок�
 ASK = {"law", "profile", "top", "inactive", "people", "warns", "bl_check", "market", "digest", "queue", "roll", "recruit_stats",
        "car_list",
        "web_search", "missed", "draft",
-       "treasury_balance", "treasury_debtors", "salary_rates", "fine_list"}
+       "treasury_balance", "treasury_debtors", "salary_rates", "fine_list", "forum_check"}
 # казна (cogs/treasury.py): запись — после «Выполнить», справки — сразу
 TREASURY_ACTS = {"treasury_in", "treasury_out", "treasury_due", "treasury_balance", "treasury_debtors", "dues_set",
                  "salary_rates", "salary_rate_set", "salary_ranks", "salary_role", "salary_pay",
@@ -43,7 +44,7 @@ GARAGE_BY = config.LEAD + ["senior", "treasurer"]  # ведут автопарк
 CHANNEL_ONLY = {"purge", "slowmode", "poll"}  # работают с текущим каналом — в ЛС их не выполняем
 # болтать со Швейцаром может вся семья и друзья; им доступны только безобидные вещи
 EVERYONE = config.FAMILY_PLUS
-FOR_ALL = {"paid_claim", "vacation", "vacation_end", "room", "car_list", "web_search", "missed", "law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
+FOR_ALL = {"forum_check", "paid_claim", "vacation", "vacation_end", "room", "car_list", "web_search", "missed", "law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
            "music_pause", "music_resume", "music_volume", "listen", "listen_stop", "leave", "invite", "forget"}
 INVITE_GAP = 10 * 60  # один человек зовёт кого-то в войс через бота не чаще раза в 10 минут
 # живые отговорки вместо казённых фраз
@@ -76,7 +77,8 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "peopl
          "fine_add": config.TREASURY + ["hr_head"], "fine_list": config.TREASURY + ["hr_head"],
          "paid_claim": config.FAMILY_RANKS, "undo": USERS, "vacation": config.FAMILY_RANKS,
          "vacation_end": config.FAMILY_RANKS, "room": config.FAMILY_PLUS, "mentor_assign": config.MENTORS,
-         "relation_set": config.DIPLO, "protocol": config.LEAD}
+         "relation_set": config.DIPLO, "protocol": config.LEAD,
+         "forum_check": config.FAMILY_RANKS}  # себя — любой из семьи; другого — руководство и старший состав (проверка внутри)
 LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив", "people": "👥 Кто в семье",
          "warns": "⚖️ Выговоры", "bl_check": "⛔ Проверка ЧС", "market": "🛒 Рынок", "queue": "🎶 Очередь",
          "roll": "🎲 Кубик", "digest": "🗞 Сводка", "music_pause": "⏸ Пауза", "music_resume": "▶️ Продолжить",
@@ -100,7 +102,8 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "salary_role": "💸 Выплата роли", "salary_pay": "💸 Выплата", "fine_add": "🧾 Штраф",
          "fine_list": "🧾 Неоплаченные штрафы", "fine_paid": "✅ Оплата штрафа", "paid_claim": "🧾 Заявка в казну", "undo": "↩️ Отменить последнее",
          "vacation": "🌴 Отпуск", "vacation_end": "👋 Из отпуска", "room": "🔊 Моя комната",
-         "mentor_assign": "🧑‍🏫 Наставник", "relation_set": "🤝 Отношения с семьёй", "protocol": "📝 Протокол собрания"}
+         "mentor_assign": "🧑‍🏫 Наставник", "relation_set": "🤝 Отношения с семьёй", "protocol": "📝 Протокол собрания",
+         "forum_check": "🔎 Проверка по форуму"}
 
 # как каналы называют в разговоре (ключ канала из настроек → слова)
 CHANNEL_HINTS = {
@@ -178,7 +181,12 @@ ACT_ALL = """ДЕЙСТВИЯ, доступные всем (поле "type"):
   («закрой мою комнату», «лимит 3», «назови комнату Кухня 2»)
 - paid_claim: {"what":"due"|"fine","amount":"100к" или null} — АВТОР САМ говорит, что сдал взнос / оплатил штраф
   («я сдал взнос», «скинул в казну 100к», «оплатил штраф»; часто со скрином). Бот отправит заявку казначею
-Для справок (law, market, top, profile, queue, roll) "reply" оставь пустым — ответ придёт из базы.
+- forum_check: {"target_name":null или "как назвали","game_name":"Имя Фамилия в игре" или null,"static":"12345" или null,
+  "fresh":true|false} — жалобы, иски, обращения на форуме: «проверь меня по форуму», «пробей меня», «есть на меня
+  жалобы?», «пробей Петю». target_name null — сам автор: его статик и ник бот знает сам, НЕ переспрашивай. Это НЕ law
+  и НЕ поиск по правилам. fresh:true — если просят «посвежее», «прямо сейчас». Человек сам назвал игровое имя/статик —
+  передай в game_name/static
+Для справок (law, market, top, profile, queue, roll, forum_check) "reply" оставь пустым — ответ придёт из базы.
 """
 ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
 - move: {{"users":[id...]}} или {{"source":"my"|"all"|"channel:<id>"}}, плюс "to": id канала и "to_name": как назвал автор
@@ -244,7 +252,13 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
 только если выбрать правда нельзя. В действиях с людьми добавляй "names" — как автор их назвал.
 Кто в каком войсе — видно в списке каналов, на это отвечай сам.
 """
-TAIL = """Непонятно или нужного человека/канала нет — "actions": [] и короткий вопрос в "reply".
+TAIL = """КАК ДУМАТЬ: понимай СМЫСЛ, а не слова — подбирай подходящее действие из списков, даже если сказали иначе, чем
+в примерах. Вопрос о данных семьи или форума (кто, сколько, у кого, есть ли, на кого жалобы) — бери справочное
+действие (people, profile, warns, top, car_list, forum_check, treasury_balance, fine_list…), не отвечай из головы.
+Имена, статики, номера дел, суммы — ТОЛЬКО из данных ниже или из ответа действия, НИКОГДА не выдумывай. Наказания,
+роли, казна, рассылки — только по прямой просьбе: права и подтверждение бот проверит сам, ты просто верни действие.
+Нет подходящего действия и это не болтовня — честно скажи в характере, что так не умеешь, или задай ОДИН вопрос.
+Непонятно или нужного человека/канала нет — "actions": [] и короткий вопрос в "reply".
 Верни JSON: {"reply":"что скажешь или сделаешь","actions":[{"type":"...", ...}],"mood":0,"remember":""}"""
 ACT_TREASURY = """КАЗНА семьи (внутриигровые вирты; только когда просят про казну/взносы):
 - treasury_in: {"amount":"50к","user":id от кого или null,"names":["как назвал"],"reason":"за что"} — приход
@@ -582,11 +596,13 @@ class Assistant(commands.Cog):
         if self.awaiting(message.channel.id, message.author.id) and not ref and len(text) < 300:
             return True  # бот только что спросил этого человека — это ответ на вопрос
         me = self.bot.user.id
-        if not (f"<@{me}>" in text or f"<@!{me}>" in text) or message.mention_everyone:
-            return False
         if in_lawyer_channel is None:
             law = self.bot.ch(message.guild, "lawyer")
             in_lawyer_channel = bool(law and message.channel.id == law.id)
+        if in_lawyer_channel and forum_intent(text.replace(f"<@{me}>", "").replace(f"<@!{me}>", "")):
+            return True  # «проверь меня по форуму» в канале юриста — это проверка дел, а не вопрос по законам
+        if not (f"<@{me}>" in text or f"<@!{me}>" in text) or message.mention_everyone:
+            return False
         return not in_lawyer_channel
 
     def dm_home(self, user):
@@ -721,30 +737,34 @@ class Assistant(commands.Cog):
         """ctx — сообщение или похожий объект (guild, author, channel, content, mentions). Возвращает короткий
         итог для озвучки."""
         ai = self.bot.ai_for(ctx.author.guild)
-        if not ai.on:
+        fi = forum_intent(request)  # «проверь меня по форуму» понятно и без ИИ — и не уйдёт к юристу
+        if fi is None and not ai.on:
             await send(content="ИИ не настроен — помощник не работает. Руководство может подключить бесплатный ключ: "
                                "`/ии ключ`.")
             return "ИИ не настроен"
         persona = self.bot.get_cog("Persona")
-        card = (persona.card(ctx.author) + "\n\n") if persona else ""
-        try:
-            system = SYSTEM if self.bot.has(ctx.author, USERS) else SYSTEM_LITE
-            if self.bot.feature(ctx.author.guild, "treasury") and self.bot.has(ctx.author, config.TREASURY):
-                system = system[:-len(TAIL)] + ACT_TREASURY + TAIL
-            system = self.bot.brand(ctx.author.guild, system)
-            data = await ai.ask_json(system, f"{self.context(ctx)}\n\n{card}{self.chat(ctx)}{self.history(ctx)}"
-                                                      f"Сообщение от {ctx.author.display_name}: {request}",
-                                              max_tokens=500)
-        except Exception as e:
-            log.warning("Швейцар: ИИ не ответил — %s", str(e)[:200])
-            text = random.choice(NO_AI)
-            await send(content=text)
-            return text
+        if fi is not None:
+            data = {"reply": "", "actions": [{"type": "forum_check", **fi}]}
+        else:
+            card = (persona.card(ctx.author) + "\n\n") if persona else ""
+            try:
+                system = SYSTEM if self.bot.has(ctx.author, USERS) else SYSTEM_LITE
+                if self.bot.feature(ctx.author.guild, "treasury") and self.bot.has(ctx.author, config.TREASURY):
+                    system = system[:-len(TAIL)] + ACT_TREASURY + TAIL
+                system = self.bot.brand(ctx.author.guild, system)
+                data = await ai.ask_json(system, f"{self.context(ctx)}\n\n{card}{self.chat(ctx)}{self.history(ctx)}"
+                                                          f"Сообщение от {ctx.author.display_name}: {request}",
+                                                  max_tokens=500)
+            except Exception as e:
+                log.warning("Швейцар: ИИ не ответил — %s", str(e)[:200])
+                text = random.choice(NO_AI)
+                await send(content=text)
+                return text
         if not isinstance(data, dict):
             text = random.choice(HUH)
             await send(content=text)
             return text
-        if persona:
+        if persona and fi is None:
             try:
                 persona.apply(ctx.author.guild.id, ctx.author.id, data.get("mood"), data.get("remember"))
             except Exception:
@@ -798,7 +818,9 @@ class Assistant(commands.Cog):
                 text = "\n".join(acts)
             else:
                 text = reply + "\n-# " + " · ".join(acts)[:300]
-            self.remember(ctx, request, (text if facts or failed else reply or "Готово")[:300])
+            said = (text if facts or failed else reply or "Готово")
+            # справка закончилась вопросом («кто ты по игре?») — следующий ответ автора без «Швейцар» тоже наш
+            self.remember(ctx, request, said[:300], ask=str(said).rstrip().endswith("?"))
             await send(content=(text or "Готово.")[:1900])
             for e in extra[:2]:
                 await (send(**e) if isinstance(e, dict) else send(embed=e))
@@ -1021,9 +1043,35 @@ class Assistant(commands.Cog):
         except Exception:
             pass
 
+    async def forum_check(self, message, g, me, a):
+        """«Проверь меня/Петю по форуму»: себя — любой из семьи, другого — руководство и старший состав.
+        Себя бот узнаёт сам (анкета, ник, прозвища, ручной список форума) и не переспрашивает без нужды."""
+        fw = self.bot.get_cog("ForumWatch")
+        if not fw:
+            return "Форум-монитор не загружен."
+        self_words = {"", "я", "меня", "мне", "себя", "мой", "моё", "мое"}
+        named = str(a.get("target_name") or "").strip()
+        target, game = me, a.get("game_name")
+        if named.lower() not in self_words or a.get("users") or a.get("user"):
+            q = {"users": a.get("users"), "user": a.get("user"), "names": a.get("names") or ([named] if named else None)}
+            found = [m for m in self.find_members(g, q) if not m.bot]
+            target = found[0] if found else None
+            game = game or (named if target is None else None)  # не участник сервера — ищем по игровому имени
+        elevated = me.id == g.owner_id or self.bot.has(me, config.LEAD + ["senior"])
+        if (target is None or target.id != me.id) and not elevated:
+            return "Пробивать других по форуму могут руководство и старший состав. Себя — пожалуйста: «проверь меня»."
+        report = fw.person_report(g, target, game_name=game, static=a.get("static"),
+                                  self_check=target is not None and target.id == me.id)
+        if a.get("fresh") and not report.endswith("?"):
+            report += "\n" + fw.fresh_later(g, message.channel, target, game, a.get("static"),
+                                            self_check=target is not None and target.id == me.id)
+        return report
+
     async def info(self, message, a, extra):
         """Справки: возвращает готовый текст ответа."""
         g, me, bot, db, t = message.guild, message.author, self.bot, self.bot.db, a["type"]
+        if t == "forum_check":
+            return await self.forum_check(message, g, me, a)
         if t == "law":
             law = bot.get_cog("Lawyer")
             q = str(a.get("question") or message.content or "")[:500]
