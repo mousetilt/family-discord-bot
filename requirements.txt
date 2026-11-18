@@ -11,3 +11,4 @@ edge-tts>=7.2
 gTTS>=2.5
 rapidfuzz>=3.0
 pymorphy3>=2.0
+webrtcvad-wheels>=2.0

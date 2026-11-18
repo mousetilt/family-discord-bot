@@ -73,6 +73,20 @@ VOICE_LEVEL = 350      # средняя громкость 20-мс кусочк�
 MIN_VOICED = 0.35      # сек речи во фразе; меньше — это щелчок, вздох или шум, в распознавание не отправляем
 
 
+try:  # детектор речи — необязательный (pip webrtcvad-wheels); нет — считаем по громкости, как раньше
+    import webrtcvad as _webrtcvad
+    _VAD = _webrtcvad.Vad(2)
+except Exception:  # noqa: BLE001
+    _VAD = None
+
+
+def _vad_speech(frame):
+    try:
+        return _VAD.is_speech(frame, 16000)
+    except Exception:  # noqa: BLE001 — кривой кадр: не мешаем, считаем речью
+        return True
+
+
 def pcm_to_wav16k(pcm):
     """48 кГц стерео → 16 кГц моно (с простым сглаживанием) → (WAV, сколько секунд в нём похоже на речь)."""
     s = array.array("h")
@@ -81,9 +95,12 @@ def pcm_to_wav16k(pcm):
     for k, i in enumerate(range(0, len(s), 6)):
         out[k] = (s[i] + s[i + 1] + s[i + 2] + s[i + 3] + s[i + 4] + s[i + 5]) // 6
     voiced = 0
+    raw = out.tobytes()
     for i in range(0, len(out) - 320, 320):
         if sum(map(abs, out[i:i + 320])) // 320 > VOICE_LEVEL:
-            voiced += 1
+            # громко — а речь ли это? webrtcvad (если стоит) отсекает кашель, музыку, стук клавиатуры
+            if _VAD is None or _vad_speech(raw[i * 2:(i + 320) * 2]):
+                voiced += 1
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(1)
@@ -175,6 +192,7 @@ class Listener:
         self.inter = None       # /швейцар — для скрытых ответов (Discord даёт 15 минут)
         self.inter_at = 0
         self.pending = None     # (plan, ctx, monotonic) — ждём «Швейцар, да/нет»
+        self.minutes = None     # протокол собрания: [(unix, user_id, текст)] — записываем всех, а не только команды
         self.running = True
         self.tasks = [asyncio.create_task(self.reader()), asyncio.create_task(self.flusher()),
                       asyncio.create_task(self.worker())]
@@ -437,7 +455,7 @@ class Listener:
 
     def enqueue(self, uid, pcm):
         prio = self.priority(uid)
-        if prio:  # у остальных важна только последняя фраза — старую выкидываем
+        if prio and self.minutes is None:  # у остальных важна только последняя фраза (в протоколе — все)
             self.todo = [x for x in self.todo if x[2] != uid]
         self.todo.append((prio, time.monotonic(), uid, pcm))
         if len(self.todo) > 12:  # шумный канал: сверху очереди — самое важное и свежее
@@ -453,7 +471,7 @@ class Listener:
             while self.todo and self.running:
                 self.todo.sort(key=lambda x: (x[0], x[1]))
                 prio, t, uid, pcm = self.todo.pop(0)
-                if prio and time.monotonic() - t > STALE_SEC:
+                if prio and self.minutes is None and time.monotonic() - t > STALE_SEC:
                     continue  # пока разбирали важное, фраза остальных устарела — отвечать на неё поздно
                 await self.phrase(uid, pcm, low=prio > 0)
 
@@ -466,10 +484,13 @@ class Listener:
     async def phrase(self, uid, pcm, low=False):
         try:
             self.stats["phrases"] += 1
-            text = await self.cog.transcribe(self.guild, pcm, low=low)
+            text = await self.cog.transcribe(self.guild, pcm, low=low and self.minutes is None)
             self.stats["heard"] = (text or "∅")[:80]
             if not text:
                 return
+            if self.minutes is not None:
+                self.minutes.append((int(time.time()), uid, text[:500]))
+                self.last_cmd = time.monotonic()  # пока идёт собрание — не уходим «за молчанием»
             if self.capture and uid == self.capture[0]:
                 self.last_cmd = time.monotonic()
                 self.resolve(text)  # это ответ на наш вопрос — командой не считаем
@@ -774,6 +795,55 @@ class Jarvis(commands.Cog):
                 "покажу здесь (видишь только ты), дальше — только голосом. В чат ничего не пишу.\n"
                 "Серьёзное (мут, выговор…) подтверждай голосом: «Швейцар, да» / «Швейцар, нет». "
                 "Выключить: «Швейцар, выйди» или `/швейцар`.")
+
+    # ---------- протокол собрания ----------
+    async def minutes_start(self, guild, member):
+        """Зайти в войс автора и записывать всё сказанное. Вслух предупреждаем, что идёт запись."""
+        li = self.listeners.get(guild.id)
+        if not li or not member.voice or li.channel_id != member.voice.channel.id:
+            res = await self.start(guild, member, hello="Веду протокол собрания. Всё, что здесь говорят, записывается. "
+                                                        "Закончить: «Швейцар, закончи протокол».")
+            li = self.listeners.get(guild.id)
+            if not li:
+                return res
+        else:
+            asyncio.create_task(self.say(guild, "Веду протокол собрания. Всё, что здесь говорят, записывается."))
+        li.minutes = []
+        li.idle_stop = max(li.idle_stop, 3 * 3600)
+        return ("📝 Веду протокол в <#%d>. Все в канале предупреждены голосом. Закончить: «Швейцар, закончи протокол». "
+                "Лимит распознавания — %d фраз в сутки, на час собрания хватает." % (li.channel_id, DAILY_LIMIT))
+
+    async def minutes_stop(self, guild, by):
+        li = self.listeners.get(guild.id)
+        if not li or li.minutes is None:
+            return "Протокол сейчас не ведётся."
+        lines, li.minutes = li.minutes, None
+        if not lines:
+            return "📝 Протокол закрыт — ничего не записалось."
+        name = lambda uid: getattr(guild.get_member(uid), "display_name", str(uid))  # noqa: E731
+        raw = "\n".join(f"[{time.strftime('%H:%M', time.gmtime(t + 3 * 3600))}] {name(u)}: {x}" for t, u, x in lines)
+        ai = self.bot.ai_for(guild)
+        text = None
+        if ai.on:
+            try:
+                text = await ai.ask(self.bot.brand(guild, "Ты секретарь собрания RP-семьи. По расшифровке (распознавание "
+                                    "речи, возможны ошибки) составь протокол по-русски: 1) кто был, 2) что обсуждали, "
+                                    "3) РЕШЕНИЯ, 4) кто что делает и к какому сроку. Только то, что реально сказано — "
+                                    "ничего не выдумывай. Коротко, с эмодзи, до 1800 знаков."),
+                                    raw[-15000:], max_tokens=1200, smart=True)
+            except Exception as e:  # noqa: BLE001
+                log.info("Протокол: ИИ не ответил — %s", e)
+        c = self.bot.ch(guild, "council_chat") or self.bot.ch(guild, "botcmd")
+        if not c:
+            return "📝 Протокол готов, но некуда положить (нет канала совета)."
+        file = discord.File(io.BytesIO(raw.encode("utf-8")), filename="расшифровка.txt")
+        try:
+            await c.send(embed=self.bot.embed("📝 Протокол собрания", (text or "ИИ недоступен — ниже полная расшифровка.")[:4000],
+                                              config.GOLD, guild).set_footer(text=f"Закрыл: {by.display_name}"),
+                         file=file)
+        except discord.HTTPException:
+            return "❌ Не смог отправить протокол в канал совета."
+        return f"📝 Протокол ({len(lines)} фраз) — в {c.mention}."
 
     async def stop(self, guild, why=""):
         li = self.listeners.pop(guild.id, None)

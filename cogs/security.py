@@ -176,6 +176,8 @@ class Security(commands.Cog):
                                  f"{member.mention} добавил {adder.mention if adder else 'неизвестный'} — бот выгнан. "
                                  "Ботов может добавлять только владелец сервера.")
             return
+        if not self.bot.feature(g, "moderation:raid"):
+            return  # анти-рейд выключен в /настройки (проверка ботов выше — работает всегда)
         t = time.monotonic()
         joins = self.joins[g.id]
         joins.append(t)
@@ -203,6 +205,8 @@ class Security(commands.Cog):
     # ---------- анти-нюк ----------
     async def track(self, guild, action, kind):
         """kind — что сделали (для сообщения). Находим виновника через журнал аудита."""
+        if not self.bot.feature(guild, "moderation:nuke"):
+            return
         try:
             entry = None
             async for e in guild.audit_logs(limit=1, action=action):

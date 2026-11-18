@@ -7,6 +7,7 @@
 • Управление: речью («Швейцар, внеси в казну 50к от Пети») и кнопками /панель → Казна. /казна — ярлык, скрыт у рядовых.
 • Каждая операция — в канал казны (ch:treasury_log, иначе кадровый журнал).
 Модуль «treasury» в /настройки, по умолчанию включён."""
+import asyncio
 import datetime as dt
 import io
 import json
@@ -898,8 +899,35 @@ class Treasury(commands.Cog):
                                   app_commands.Choice(name="Всё время", value="all")])
     @treasury_only()
     async def c_report(self, inter: discord.Interaction, period: app_commands.Choice[str] = None):
-        await inter.response.send_message(self.report_text(inter.guild, period.value if period else "month"),
-                                          ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        await inter.response.defer(ephemeral=True, thinking=True)
+        kw = {}
+        png = await self.balance_chart(inter.guild)
+        if png:
+            kw["file"] = discord.File(io.BytesIO(png), filename="balance.png")
+        await inter.followup.send(self.report_text(inter.guild, period.value if period else "month"), ephemeral=True,
+                                  allowed_mentions=discord.AllowedMentions.none(), **kw)
+
+    async def balance_chart(self, guild, days=30):
+        """График баланса казны по дням за последние N дней (PNG) или None, если операций мало."""
+        start = int(now().timestamp()) - days * 86400
+        db, gid = self.bot.db, guild.id
+        before = db.one("SELECT COALESCE(SUM(CASE WHEN kind='out' THEN -amount ELSE amount END), 0) b FROM treasury_tx "
+                        "WHERE guild_id=? AND ts<?", gid, start)["b"] or 0
+        rows = db.all("SELECT ts, CASE WHEN kind='out' THEN -amount ELSE amount END v FROM treasury_tx "
+                      "WHERE guild_id=? AND ts>=? ORDER BY ts", gid, start)
+        if len(rows) < 2:
+            return None
+        bal, points, i = before, [], 0
+        for d in range(days + 1):
+            edge = start + (d + 1) * 86400
+            while i < len(rows) and rows[i]["ts"] < edge:
+                bal += rows[i]["v"]
+                i += 1
+            label = dt.datetime.fromtimestamp(edge - 1, dt.timezone.utc).astimezone(
+                dt.timezone(dt.timedelta(hours=config.GATHER_UTC_OFFSET))).strftime("%d.%m")
+            points.append((label, bal))
+        from core.charts import line_png
+        return await asyncio.to_thread(line_png, points, f"Баланс казны за {days} дней")
 
     @group.command(name="настроить-взнос", description="Сумма членского взноса и период (Глава/зам)")
     @app_commands.rename(amount="сумма", period="период")

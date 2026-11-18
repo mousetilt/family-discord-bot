@@ -42,6 +42,12 @@ def make_backup(path, only_gid=None, home_gid=None):
                 dst.commit()
             except sqlite3.Error:
                 pass
+            for t in ("msg_cache", "kb_vec"):  # суточный кэш сообщений и векторы базы знаний — не данные семьи
+                try:
+                    dst.execute(f"DELETE FROM {t}")
+                    dst.commit()
+                except sqlite3.Error:
+                    pass
             if only_gid:
                 strip_foreign(dst, only_gid)
             elif home_gid:  # полная копия — но без ИИ-ключей других семей (они их вводили не для нас)
@@ -247,6 +253,9 @@ class Daily(commands.Cog):
                                          + (f"\n{money}" if money else ""), inline=False)
         if len(e.fields) == 1 and not flags:
             e.description += "\n\n✅ Всё разобрано: открытых заявок, обращений и просроченных сроков нет."
+        rep = bot.ch(guild, "reports")
+        if rep and bot.feature(guild, "reports:weekly"):  # анализ недели ИИ — там, здесь только «что требует решения»
+            e.add_field(name="📊 Разбор недели", value=f"Еженедельный отчёт с советами — в {rep.mention}", inline=False)
         e.set_footer(text=f"Сводка приходит раз в {every or '—'} сут. · {bot.brand(guild, config.FOOTER)}")
         return e
 

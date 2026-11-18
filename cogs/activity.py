@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Активность: время в войсах, сообщения, карточка участника (/профиль), топ, неактив, еженедельный отчёт."""
+import asyncio
 import datetime as dt
+import io
 import json
 import logging
 import random
@@ -312,8 +314,25 @@ class Activity(commands.Cog):
     async def report(self, inter: discord.Interaction):
         await inter.response.defer(ephemeral=True, thinking=True)
         text = await self.build_report(inter.guild)
-        await inter.followup.send(embed=self.bot.embed("📊 Отчёт об активности", text[:4000], config.GOLD, inter.guild),
-                                  ephemeral=True)
+        e = self.bot.embed("📊 Отчёт об активности", text[:4000], config.GOLD, inter.guild)
+        kw = {}
+        png = await self.top_chart(inter.guild)
+        if png:
+            e.set_image(url="attachment://top.png")
+            kw["file"] = discord.File(io.BytesIO(png), filename="top.png")
+        await inter.followup.send(embed=e, ephemeral=True, **kw)
+
+    async def top_chart(self, guild):
+        """Столбики: часы в войсе за неделю у топ-10 (PNG) или None."""
+        rows = self.bot.db.all("SELECT user_id, week_voice v FROM activity WHERE guild_id=? AND week_voice>0 "
+                               "ORDER BY week_voice DESC LIMIT 10", guild.id)
+        rows = [(guild.get_member(r["user_id"]), r["v"]) for r in rows]
+        rows = [(m.display_name, round(v / 3600, 1)) for m, v in rows if m]
+        if not rows:
+            return None
+        from core.charts import bars_png
+        return await asyncio.to_thread(bars_png, [n for n, _ in rows], [v for _, v in rows], "Часы в войсе за неделю",
+                                       " ч")
 
     @app_commands.default_permissions(manage_messages=True)
     @app_commands.command(name="кто", description="Список людей по фильтрам: ранг, взнос, экзамен, войс, выговоры…")

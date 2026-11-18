@@ -76,7 +76,7 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "peopl
          "fine_add": config.TREASURY + ["hr_head"], "fine_list": config.TREASURY + ["hr_head"],
          "paid_claim": config.FAMILY_RANKS, "undo": USERS, "vacation": config.FAMILY_RANKS,
          "vacation_end": config.FAMILY_RANKS, "room": config.FAMILY_PLUS, "mentor_assign": config.MENTORS,
-         "relation_set": config.DIPLO}
+         "relation_set": config.DIPLO, "protocol": config.LEAD}
 LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "🏆 Топ активности", "inactive": "💤 Неактив", "people": "👥 Кто в семье",
          "warns": "⚖️ Выговоры", "bl_check": "⛔ Проверка ЧС", "market": "🛒 Рынок", "queue": "🎶 Очередь",
          "roll": "🎲 Кубик", "digest": "🗞 Сводка", "music_pause": "⏸ Пауза", "music_resume": "▶️ Продолжить",
@@ -100,7 +100,7 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "salary_role": "💸 Выплата роли", "salary_pay": "💸 Выплата", "fine_add": "🧾 Штраф",
          "fine_list": "🧾 Неоплаченные штрафы", "fine_paid": "✅ Оплата штрафа", "paid_claim": "🧾 Заявка в казну", "undo": "↩️ Отменить последнее",
          "vacation": "🌴 Отпуск", "vacation_end": "👋 Из отпуска", "room": "🔊 Моя комната",
-         "mentor_assign": "🧑‍🏫 Наставник", "relation_set": "🤝 Отношения с семьёй"}
+         "mentor_assign": "🧑‍🏫 Наставник", "relation_set": "🤝 Отношения с семьёй", "protocol": "📝 Протокол собрания"}
 
 # как каналы называют в разговоре (ключ канала из настроек → слова)
 CHANNEL_HINTS = {
@@ -204,6 +204,8 @@ ACT_MGMT = f"""ДЕЙСТВИЯ УПРАВЛЕНИЯ:
   неделю с нами» → 7) — число дней в "min_days"; не назвали — null (срок семьи). «даже неактивных» →
   "only_active":false. Это НЕ inactive
 - mentor_assign: {{"user":id новичка,"names":["как назвал"],"mentor":id наставника или null — подобрать}}
+- protocol: {{"on":true|false}} — вести протокол собрания в войсе автора («веди протокол», «запиши собрание»)
+  и закончить его («закончи протокол»): бот предупредит всех вслух, что идёт запись
 - relation_set: {{"family":"название семьи","status":"ally"|"pact"|"neutral"|"tension"|"war","note":"..."}}
 - accept: {{"user":id,"names":["как назвал"],"nick":"ник в игре или null","static":"Static ID или null"}} — принять
   человека в семью ВРУЧНУЮ, без экзамена («прими Петю в семью», «возьми Васю без экзамена»)
@@ -822,6 +824,8 @@ class Assistant(commands.Cog):
         if t == "people":
             from core import people
             return f"{LABEL[t]}: {people.criteria(people.filters(a))}"
+        if t == "protocol":
+            return f"{LABEL[t]}: {'начать — все в войсе услышат, что идёт запись' if a.get('on', True) is not False else 'закончить'}"
         if t == "mentor_assign":
             try:
                 mentor = g.get_member(int(a.get("mentor") or 0))
@@ -1463,6 +1467,14 @@ class Assistant(commands.Cog):
                     dip = bot.get_cog("Diplomacy")
                     out.append(await dip.set_relation(g, a.get("family"), str(a.get("status") or ""), a.get("note"), me)
                                if dip else "❌ Дипломатия не загружена.")
+                elif t == "protocol":
+                    jar = bot.get_cog("Jarvis")
+                    if not jar:
+                        out.append("❌ Голосовой модуль не загружен.")
+                    elif a.get("on", True) is not False:
+                        out.append(await jar.minutes_start(g, me))
+                    else:
+                        out.append(await jar.minutes_stop(g, me))
                 elif t == "undo":
                     out.append(await self.undo_last(g, me))
                 elif t == "paid_claim":

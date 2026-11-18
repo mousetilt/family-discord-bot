@@ -27,7 +27,12 @@ CREATE TABLE IF NOT EXISTS member_log(
     id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER, actor_id INTEGER,
     kind TEXT NOT NULL, text TEXT, ts INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_member_log_g ON member_log(guild_id, user_id, ts);
+CREATE TABLE IF NOT EXISTS msg_cache(
+    message_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, channel_id INTEGER, author_id INTEGER, text TEXT,
+    files INTEGER DEFAULT 0, ts INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_msg_cache_ts ON msg_cache(ts);
 """
+CACHE_SEC = 24 * 3600  # сообщения помним сутки — чтобы удаление после перезапуска бота тоже попало в журнал
 KINDS = {"voice": "🎙 Войс", "mic": "🎤 Микро и камера", "members": "👤 Профиль и роли", "messages": "💬 Сообщения",
          "server": "🛠 Сервер"}
 CHANNEL = {"voice": "voice_log", "mic": "voice_log"}   # остальное — в audit
@@ -137,9 +142,24 @@ class Journal(commands.Cog):
                 if ln is not None:
                     chunk += ("\n" if chunk else "") + ln
 
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        """Короткая память сообщений (сутки, 300 знаков) — только для журнала удалений; кэш Discord теряется при
+        перезапуске, а удаление «старого» сообщения тогда не попало бы в журнал вовсе."""
+        g = message.guild
+        if message.author.bot or not self.on(g, "messages") or message.channel.id in self.log_channels(g):
+            return
+        try:
+            self.bot.db.q("INSERT OR REPLACE INTO msg_cache(message_id, guild_id, channel_id, author_id, text, files, ts) "
+                          "VALUES(?,?,?,?,?,?,?)", message.id, g.id, message.channel.id, message.author.id,
+                          (message.content or "")[:300], len(message.attachments), int(time.time()))
+        except Exception:  # noqa: BLE001 — журнал не должен ломать приём сообщений
+            log.exception("msg_cache")
+
     @tasks.loop(hours=6)
     @guarded
     async def cleanup(self):
+        self.bot.db.q("DELETE FROM msg_cache WHERE ts<?", int(time.time()) - CACHE_SEC)
         for g in list(self.bot.home_guilds):
             days = self.bot.num(g, "journal_days")
             self.bot.db.q("DELETE FROM member_log WHERE guild_id=? AND ts<?", g.id, int(time.time()) - days * 86400)
@@ -331,8 +351,18 @@ class Journal(commands.Cog):
     async def on_raw_message_delete(self, payload):
         g = self.bot.get_guild(payload.guild_id) if payload.guild_id else None
         msg = payload.cached_message
-        # не из кэша (старое, до перезапуска) — автора и текста не знаем; сообщения ботов не пишем
-        if not msg or msg.author.bot or not self.on(g, "messages") or payload.channel_id in self.log_channels(g):
+        if not self.on(g, "messages") or payload.channel_id in self.log_channels(g):
+            return
+        if msg is None:  # нет в кэше Discord (бот перезапускался) — берём из своей суточной памяти
+            row = self.bot.db.one("SELECT * FROM msg_cache WHERE message_id=? AND guild_id=?", payload.message_id, g.id)
+            author = g.get_member(row["author_id"]) if row else None
+            ch = g.get_channel(payload.channel_id)
+            if not row or not author or not ch:
+                return
+            msg = type("Cached", (), {"author": author, "content": row["text"], "attachments": [None] * (row["files"] or 0),
+                                      "channel": ch})()
+        self.bot.db.q("DELETE FROM msg_cache WHERE message_id=?", payload.message_id)
+        if msg.author.bot:
             return
         actor = await self.actor(g, A.message_delete, msg.author.id,
                                  check=lambda e: getattr(getattr(e.extra, "channel", None), "id", None) == payload.channel_id)
