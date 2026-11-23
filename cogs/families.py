@@ -85,9 +85,13 @@ class ProfileModal(discord.ui.Modal, title="Профиль семьи"):
             return await inter.response.send_message("❌ Все поля обязательны.", ephemeral=True)
         for k, v in vals.items():
             self.bot.db.gset(self.guild, f"family:{k}", v)
+        from core import projects
+        p = projects.info(self.bot.db, self.guild.id)
+        forum = "" if projects.forum_ok(self.bot.db, self.guild.id) else f"\nℹ️ {projects.why_no_forum(self.bot.db, self.guild.id)}"
         await inter.response.send_message(
-            f"✅ Профиль сохранён: семья **{vals['name']}** (семья {vals['gen']}), сервер **{vals['server']}**, "
-            f"титул «{vals['title']}».\nДальше: `/семья роли` (если роли уже есть) → `/настройка`.", ephemeral=True)
+            f"✅ Профиль сохранён: семья **{vals['name']}** (семья {vals['gen']}), проект **{p['name']}**, сервер "
+            f"**{vals['server']}**, титул «{vals['title']}».{forum}\nДальше: `/семья роли` (если роли уже есть) → "
+            "`/настройка`.", ephemeral=True)
 
 
 # ─────────────── проверка («здоровье» семьи) ───────────────

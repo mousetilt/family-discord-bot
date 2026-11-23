@@ -21,7 +21,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from core import config
+from core import config, projects
 from core.botcore import guarded
 from core.family import set_module
 from core.forum import (BASE, HEAD_TITLES, KIND_ICON, LAW_SECTIONS, ROLE_RANK, SECTIONS, STATUS, ForumClient,
@@ -1400,6 +1400,8 @@ class ForumWatch(commands.Cog):
         for g in list(self.bot.home_guilds):
             if not self.bot.feature(g, "forum:watch") or db.gget(g, "forum:auth_fail"):
                 continue
+            if not projects.forum_ok(db, g.id):  # разделы форума известны не для всех проектов и серверов
+                continue
             if time.time() < self.backoff.get(g.id, 0):
                 continue
             if time.time() - int(db.gget(g, "forum:last") or 0) < self.interval(g) * 60:
@@ -1418,6 +1420,9 @@ class ForumWatch(commands.Cog):
     async def account(self, inter: discord.Interaction):
         if inter.user.id != inter.guild.owner_id:
             return await inter.response.send_message("⛔ Вход на форум вводит только владелец сервера.", ephemeral=True)
+        if not projects.forum_ok(self.bot.db, inter.guild.id):
+            return await inter.response.send_message("ℹ️ " + projects.why_no_forum(self.bot.db, inter.guild.id) +
+                                                     "\nПроект и сервер — в `/семья профиль`.", ephemeral=True)
         await inter.response.send_modal(AccountModal(self))
 
     @group.command(name="канал", description="Канал для карточек дел (без канала — создам «⚖・суды-и-жалобы»)")

@@ -74,6 +74,7 @@ class AI:
         # дневной лимит вызовов Claude (платный): ставит bot.ai_for из «Чисел» семьи; 0 — без лимита.
         # Кончился — Claude молча выпадает из цепочки, отвечают бесплатные
         self.claude_limit, self.claude_scope = 0, scope
+        self.project = None  # проект семьи (core/projects.info) — «Россия Онлайн» в промптах меняется на него
         # бесплатные ИИ как подстраховка: кончился лимит / упал основной — отвечает следующий. Claude запасным
         # не ставим (платный — только по явному выбору основным); у Claude запасные — Gemini, затем Groq.
         self.backups = [p for p in FREE if p != self.provider and self.keys.get(p)] if self.provider else []
@@ -188,6 +189,9 @@ class AI:
         images — [(mime, bytes)]: картинки для разбора (Gemini бесплатно или Claude); smart/light — уровень модели
         (см. шапку модуля); cache — кэш большого system у Claude (у бесплатных ни на что не влияет)."""
         try:
+            if self.project:
+                from .projects import rebrand
+                system = rebrand(system, self.project)
             text = await self._ask(system, prompt, max_tokens, smart, cache, light, json_mode, images)
         except AIUnavailable as e:
             if self.on:

@@ -1189,6 +1189,10 @@ class Assistant(commands.Cog):
         fw = self.bot.get_cog("ForumWatch")
         if not fw:
             return "Форум-монитор не загружен."
+        from core import projects
+        db = getattr(self.bot, "db", None)
+        if db is not None and not projects.forum_ok(db, g.id):
+            return projects.why_no_forum(db, g.id)
         status = str(a.get("status") or "all").lower()
         status = status if status in ("open", "reviewed", "all") else "all"
         self_words = {"", "я", "меня", "мне", "себя", "мой", "моё", "мое"}

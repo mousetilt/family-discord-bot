@@ -412,13 +412,21 @@ class Lawyer(commands.Cog):
             e.add_field(name=f"📄 {h['title'][:240]}", value=quote(h["text"], 900)[:1024], inline=False)
         await inter.response.send_message(embed=e, ephemeral=True)
 
-    @kb.command(name="правила-проекта", description="Загрузить основные правила проекта с форума (13 тем)")
+    @kb.command(name="правила-проекта", description="Загрузить основные правила игрового проекта (с открытых страниц)")
     async def kb_project(self, inter: discord.Interaction):
         if not self.bot.has(inter.user, KB_STAFF):
             return await inter.response.send_message("⛔ Недостаточно прав.", ephemeral=True)
+        from core import projects
+        proj = projects.info(self.bot.db, inter.guild.id)
+        urls = proj["rules"]
+        if not urls:
+            return await inter.response.send_message(
+                f"ℹ️ Для проекта «{proj['name']}» у меня нет открытых страниц с правилами. "
+                + (proj.get("note") or "Загрузите правила в базу юриста текстом или файлом: `/база текст`, `/база файл`."),
+                ephemeral=True)
         await inter.response.defer(ephemeral=True, thinking=True)
         ok, bad = [], []
-        for i, url in enumerate(config.PROJECT_RULE_URLS, 1):
+        for i, url in enumerate(urls, 1):
             try:
                 title, content, url2 = await fetch_url(url)
                 self.bot.kb.add(0, title, url2, "ooc", content, inter.user.id)  # правила проекта — общие для всех семей
@@ -427,11 +435,11 @@ class Lawyer(commands.Cog):
                 bad.append(f"❌ {url} — {e}")
             if i % 3 == 0:
                 try:
-                    await inter.edit_original_response(content=f"⏳ Загружаю… {i}/{len(config.PROJECT_RULE_URLS)}")
+                    await inter.edit_original_response(content=f"⏳ Загружаю… {i}/{len(urls)}")
                 except discord.HTTPException:
                     pass
         await inter.edit_original_response(content=None, embed=self.bot.embed(
-            f"📘 Правила проекта: загружено {len(ok)}/{len(config.PROJECT_RULE_URLS)}", "\n".join(ok + bad)[:4000],
+            f"📘 Правила проекта: загружено {len(ok)}/{len(urls)}", "\n".join(ok + bad)[:4000],
             config.GREEN if ok else config.RED, inter.guild))
 
     @kb.command(name="ссылка", description="Добавить документ по ссылке (тема форума, закон, кодекс)")

@@ -202,6 +202,8 @@ class FamilyBot(commands.Bot):
             return self.ai
         ai = self._ai_for(guild)
         ai.claude_limit, ai.claude_scope = self.num(guild, "claude_daily"), guild_id_of(guild)
+        from .projects import info as project_info
+        ai.project = project_info(self.db, guild_id_of(guild))
         return ai
 
     def _ai_for(self, guild):
@@ -349,7 +351,9 @@ class FamilyBot(commands.Bot):
             self.db.set("home_guild", str(hid))
         if self.home_id:
             self.db.adopt_orphans(self.home_id)
-        name = "Россия Онлайн" if self.families else f"Россия Онлайн · семья {config.FAMILY}"
+        from .projects import name as project_name
+        game = project_name(self.db, self.home_id) if self.home_id else "Россия Онлайн"
+        name = game if self.families else f"{game} · семья {config.FAMILY}"
         await self.change_presence(activity=discord.Game(name=name))
         print("\n================================================")
         print("Серверы, на которых стоит бот:")

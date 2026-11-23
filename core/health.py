@@ -77,10 +77,15 @@ def check(bot, guild):
                                   "(/настройки → Числа → ИИ)"))
 
     # 7. модули, которым нужно что-то ещё
-    if feat("forum") and not db.gget(guild, "forum:login"):
+    from . import projects
+    forum_ok = projects.forum_ok(db, guild.id)
+    if feat("forum") and not forum_ok:
+        out.append(Item(WARN, "Суды и жалобы включены, но для вашего проекта/сервера форум не читается: "
+                              + projects.why_no_forum(db, guild.id), "profile"))
+    if feat("forum") and forum_ok and not db.gget(guild, "forum:login"):
         out.append(Item(WARN, "Суды и жалобы включены, но нет аккаунта форума — разделы закрыты для гостей. "
                               "Владелец сервера: /форум вход"))
-    if feat("forum") and db.gget(guild, "forum:auth_fail"):
+    if feat("forum") and forum_ok and db.gget(guild, "forum:auth_fail"):
         out.append(Item(BAD, "Форум не пускает аккаунт семьи — введите данные заново: /форум вход"))
     if feat("lawyer"):
         n = db.one("SELECT COUNT(*) AS n FROM kb_docs WHERE guild_id IN (?, 0)", guild.id)

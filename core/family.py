@@ -10,6 +10,8 @@ FIELDS = {  # ключ: (подпись, значение по умолчани�
     "gen": ("Родительный падеж («семья …»)", config.FAMILY_GEN),
     "server": ("Игровой сервер", config.GAME_SERVER),
     "title": ("Титул для пиара", DEFAULT_TITLE),
+    # игровой проект (core/projects.py): «Россия Онлайн», «Majestic RP» или любое название
+    "project": ("Проект: Россия Онлайн / Majestic RP / …", None),
 }
 
 
@@ -226,11 +228,13 @@ def set_action(db, gid, mod, act, on):
 
 
 def profile(db, gid):
-    """{'name','gen','server','title'} для сервера gid (int)."""
+    """{'name','gen','server','title','project'} для сервера gid (int)."""
+    from . import projects
     out = {}
     for k, (_, default) in FIELDS.items():
         v = db.gget(gid, f"family:{k}") if gid else None
-        out[k] = (v or "").strip() or default
+        out[k] = (v or "").strip() or (default if default is not None else projects.PROJECTS.get(
+            projects.DEFAULT, projects.PROJECTS["ro"])["name"] or "RP-проект")
     return out
 
 
@@ -244,4 +248,5 @@ def brand(db, gid, text):
     for old, new in pairs:
         if old and old != new:
             text = text.replace(old, new)
-    return text
+    from . import projects
+    return projects.rebrand(text, projects.info(db, gid))
