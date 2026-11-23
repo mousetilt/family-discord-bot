@@ -27,5 +27,37 @@ class Wake(unittest.TestCase):
         self.assertFalse(j.JUNK.search("Швейцар, включи музыку"))
 
 
+class Catchup(unittest.TestCase):
+    """Пересказ при входе в войс: только тем, кто включил, и только после долгого отсутствия."""
+
+    def run_event(self, persona, member, before, after):
+        import asyncio
+        from unittest import mock
+        started = []
+        with mock.patch("asyncio.create_task", lambda coro: (started.append(coro), coro.close())):
+            asyncio.run(persona.on_voice_state_update(member, before, after))
+        return started
+
+    def test_trigger(self):
+        import time
+        from cogs import persona as pm
+        from core.db import DB
+        db = DB(":memory:")
+        bot = types.SimpleNamespace(db=db, feature=lambda g, k: True)
+        p = pm.Persona.__new__(pm.Persona)
+        p.bot = bot
+        g = types.SimpleNamespace(id=7, guild_id=7)
+        m = types.SimpleNamespace(id=5, bot=False, guild=g)
+        out = types.SimpleNamespace(channel=None)
+        inside = types.SimpleNamespace(channel=types.SimpleNamespace(id=9))
+        self.assertEqual(self.run_event(p, m, out, inside), [])  # не включал — молчим
+        db.gset(7, "persona:catchup:5", 1)
+        db.gset(7, "persona:catchup_seen:5", int(time.time()) - 3600)
+        self.assertEqual(self.run_event(p, m, out, inside), [])  # не было всего час
+        db.gset(7, "persona:catchup_seen:5", int(time.time()) - 20 * 3600)
+        self.assertEqual(len(self.run_event(p, m, out, inside)), 1)  # 20 часов — рассказываем
+        self.assertEqual(self.run_event(p, m, inside, out), [])  # вышел — только метка
+
+
 if __name__ == "__main__":
     unittest.main()

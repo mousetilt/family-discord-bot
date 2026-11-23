@@ -289,7 +289,8 @@ class Automation(commands.Cog):
         return f"🔎 По «{query[:80]}» ничего толком не нашёл — или поиск сейчас перегружен. Попробуй позже."
 
     # ---------- что я пропустил ----------
-    async def missed(self, member, hours=12):
+    async def missed(self, member, hours=12, voice=False):
+        """voice=True — коротко и без разметки, для озвучки при входе в войс (Persona.catchup)."""
         g = member.guild
         if not self.on(g, "missed"):
             return "Сводка «что пропустил» у семьи выключена (`/настройки` → «Автоматизация»)."
@@ -321,6 +322,17 @@ class Automation(commands.Cog):
         ai = self.bot.ai_for(g)
         if not ai.on:
             return f"За {hours} ч: {len(lines)} сообщений. ИИ не подключён — сводку сделать не могу."
+        if voice:
+            system = self.bot.brand(g, f"Ты Швейцар — помощник RP-семьи «{config.FAMILY}». Человек {hours} ч не "
+                                       "заходил и только что вошёл в голосовой канал. Скажи ему ВСЛУХ, что он "
+                                       "пропустил: 2–4 коротких предложения, только самое важное (сборы, решения, кого "
+                                       "приняли/наказали, объявления). Без списков, эмодзи и разметки, до 400 знаков. "
+                                       "Если важного нет — одной фразой, что всё спокойно.")
+            try:
+                text = await ai.ask(system, blob, max_tokens=220)
+            except Exception:  # noqa: BLE001 — голосом просто промолчим
+                return None
+            return " ".join(str(text or "").replace("*", "").split())[:450] or None
         system = self.bot.brand(g, f"Ты Швейцар — помощник RP-семьи «{config.FAMILY}». Человек отсутствовал {hours} ч. "
                                    "Сделай сводку, что он пропустил: главное по пунктам (до 10), сначала важное — "
                                    "объявления, сборы, решения, кого приняли/наказали, затем движуха в чатах. Имена "

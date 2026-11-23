@@ -9,7 +9,7 @@ import time
 
 FORMAT = "family-bot-settings"
 VERSION = 1
-PREFIXES = ("mod:", "set:", "text:", "salary:", "recruit:rate:", "alias:", "persona:novisit:", "relay:filter",
+PREFIXES = ("mod:", "set:", "text:", "salary:", "recruit:rate:", "alias:", "persona:novisit:", "persona:catchup:", "relay:filter",
             "relay:mode", "relay:rss")
 KEYS = {"family:name", "family:gen", "family:server", "family:title", "family:project", "nick:template",
         "probation:days", "tts:voice", "ai:primary", "dues:amount", "dues:period", "forum:titles", "forum:ignore",

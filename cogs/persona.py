@@ -32,6 +32,7 @@ VISIT_GAP = 45 * 60         # и вообще не чаще
 VISIT_HOURS = (8, 2)        # по Москве: с 08:00 до 02:00, ночью людей не дёргаем
 VISIT_WAIT = 150            # сек ждём ответа, потом уходим
 VISIT_IDLE = 5 * 60         # в гостях молчат 5 минут — уходим
+CATCHUP_HOURS = 12          # пересказ «что пропустил» — если человека не было в войсе столько часов
 
 VOICE_SYSTEM = f"""Ты «Швейцар» — наглый, языкастый, злопамятный, но свой в доску старый швейцар RP-семьи
 «{config.FAMILY}» в Discord. Сейчас ты говоришь ГОЛОСОМ в голосовом канале. Ответь ОДНОЙ короткой живой репликой
@@ -281,6 +282,53 @@ class Persona(commands.Cog):
                                                "Понял, не до меня. Ушёл."]))
             await jv.stop(guild, "")
 
+    # ---------- пересказ «что пропустил» голосом при входе в войс ----------
+    def catchup_on(self, guild, uid):
+        return bool(self.bot.db.gget(guild, f"persona:catchup:{uid}"))
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        """Кто включил /помощник пересказ: зашёл в войс после долгого отсутствия — Швейцар коротко рассказывает
+        голосом, что было. Метка «был в войсе» — в базе (переживёт перезапуск)."""
+        if member.bot or before.channel == after.channel:
+            return
+        g = member.guild
+        if not self.catchup_on(g, member.id):
+            return
+        key = f"persona:catchup_seen:{member.id}"
+        now_ts = int(time.time())
+        last = int(self.bot.db.gget(g, key) or 0)
+        self.bot.db.gset(g, key, now_ts)
+        if before.channel is not None or after.channel is None or not last:
+            return
+        if now_ts - last < CATCHUP_HOURS * 3600 or not self.bot.feature(g, "persona:catchup"):
+            return
+        asyncio.create_task(self.catchup(member, min(72, (now_ts - last) // 3600)))
+
+    async def catchup(self, member, hours):
+        await asyncio.sleep(6)  # дать человеку зайти и осмотреться
+        g = member.guild
+        ch = member.voice.channel if member.voice else None
+        auto, music, jv = self.bot.get_cog("Automation"), self.bot.get_cog("Music"), self.bot.get_cog("Jarvis")
+        if not ch or not auto:
+            return
+        li = jv.listeners.get(g.id) if jv else None
+        here = getattr(li, "channel_id", None) if li else None
+        if li and here and here != ch.id:
+            return  # Швейцар слушает другой войс — не дёргаем его оттуда
+        try:
+            text = await auto.missed(member, hours, voice=True)
+        except Exception:  # noqa: BLE001
+            log.exception("Пересказ для %s", member)
+            return
+        if not text or not (member.voice and member.voice.channel and member.voice.channel.id == ch.id):
+            return
+        text = f"{member.display_name}, пока тебя не было: {text}"
+        if li and here:
+            await jv.say(g, text)
+        elif music:
+            await music.announce(g, [ch.id], text=text)
+
     def novisit(self, guild, uid):
         return bool(self.bot.db.gget(guild, f"persona:novisit:{uid}"))
 
@@ -291,6 +339,22 @@ class Persona(commands.Cog):
             self.bot.db.gdel(guild, f"persona:novisit:{uid}")
 
     # ---------- команды ----------
+    @app_commands.command(name="пересказ", description="Рассказывать голосом, что ты пропустил, когда заходишь в войс")
+    @app_commands.rename(mode="режим")
+    @app_commands.choices(mode=[app_commands.Choice(name="Рассказывать", value="on"),
+                                app_commands.Choice(name="Не надо", value="off")])
+    @app_commands.guild_only()
+    async def catchup_cmd(self, inter: discord.Interaction, mode: app_commands.Choice[str]):
+        on = mode.value == "on"
+        if on:
+            self.bot.db.gset(inter.guild, f"persona:catchup:{inter.user.id}", 1)
+            self.bot.db.gset(inter.guild, f"persona:catchup_seen:{inter.user.id}", int(time.time()))
+        else:
+            self.bot.db.gdel(inter.guild, f"persona:catchup:{inter.user.id}")
+        await inter.response.send_message(
+            f"🕰 Договорились: зайдёшь в войс после {CATCHUP_HOURS}+ ч отсутствия — расскажу коротко, что было."
+            if on else "🕰 Ладно, молчу. Захочешь узнать — спроси «Швейцар, что я пропустил».", ephemeral=True)
+
     @app_commands.command(name="визиты", description="Заходить ли Швейцару к тебе в войс, когда ты сидишь один")
     @app_commands.rename(mode="режим")
     @app_commands.choices(mode=[app_commands.Choice(name="Не заходить ко мне", value="off"),
