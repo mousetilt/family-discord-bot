@@ -11,7 +11,7 @@
 Выпуск версии: запись в НАЧАЛО data/changelog.json → commit → push.
 
 Хостинг (бесплатный тариф надо продлевать вручную раз в host:days дней, по умолчанию 4):
-• host:renewed — когда продлили (unix). Кнопка «✅ Продлил» (host:ok) в ЛС и в /статус ставит «сейчас»,
+• host:renewed — когда продлили (unix). Кнопка «✅ Продлил» (host:ok) в ЛС и в /бот статус ставит «сейчас»,
   «⚙️ Срок тарифа» (host:cfg) — модалка с числом дней. Напоминания владельцу домашнего сервера: за сутки, за 6 ч и
   за час до отключения (host:warned — какая ступень уже отправлена). Тумблер service:hosting.
 • Память: из cgroup контейнера (лимит хоста), иначе /proc. Сторож: занято > 85% дольше 10 мин — тревога."""
@@ -377,7 +377,7 @@ class Maintenance(commands.Cog):
             if now_ - s >= 600 and k not in self._alerted:
                 self._alerted.add(k)
                 await self.alert(f"⚠️ {t} не работает уже **{int((now_ - s) // 60)} мин**.\nПричина: {r or '—'}\n"
-                                 "Если не пройдёт само — `/перезапуск`, а для ИИ проверь ключ: `/ии статус`.")
+                                 "Если не пройдёт само — `/бот перезапуск`, а для ИИ проверь ключ: `/ии статус`.")
         for k in list(self._alerted):
             if k not in bad:
                 self._alerted.discard(k)
@@ -432,7 +432,7 @@ class Maintenance(commands.Cog):
         fresh = newer(remote, local[0]["v"] if local else None)
         e = self.bot.embed(f"⬇️ Доступно обновление бота · {fresh[0].get('title', top)}",
                            "\n\n".join(entry_text(x) for x in fresh[:3])[:3700]
-                           + "\n\nНажми кнопку — бот подтянет код и перезапустится (~20 сек). Или команда `/обновить`.",
+                           + "\n\nНажми кнопку — бот подтянет код и перезапустится (~20 сек). Или команда `/бот обновить`.",
                            config.GOLD, home)
         e.set_footer(text=f"Версия {top}")
         sent = False
@@ -608,7 +608,7 @@ class Maintenance(commands.Cog):
         await self.do_update(inter)
 
     async def do_update(self, inter: discord.Interaction):
-        """/обновить и кнопка «Обновить бота» из уведомления (в т.ч. в ЛС владельца домашнего сервера)."""
+        """/бот обновить и кнопка «Обновить бота» из уведомления (в т.ч. в ЛС владельца домашнего сервера)."""
         home = self.home()
         in_owner_dm = inter.guild is None and home is not None and inter.user.id == home.owner_id
         if not in_owner_dm and not self._allowed(inter):

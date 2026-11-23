@@ -165,5 +165,46 @@ class HostBackups(unittest.TestCase):
             check_copy(junk)
 
 
+class CommandGroups(unittest.TestCase):
+    """Служебные команды — в /бот и /помощник; после перезагрузки модуля не дублируются и привязаны к нему."""
+
+    def test_groups(self):
+        import logging
+        from discord import app_commands
+        from core import config
+        from core.botcore import FamilyBot
+        logging.disable(logging.CRITICAL)
+
+        async def run():
+            bot = FamilyBot(presences=False)
+            for ext in config.EXTENSIONS:
+                await bot.load_extension(ext)
+            roots = [c.name for c in bot.tree.get_commands()]
+            await bot.reload_extension("cogs.persona")
+            roots2 = [c.name for c in bot.tree.get_commands()]
+            grp = bot.tree.get_command("помощник")
+            visits = grp.get_command("визиты")
+            same = visits.binding is bot.get_cog("Persona")
+            subs = {g: sorted(c.name for c in bot.tree.get_command(g).commands) for g in bot.COMMAND_GROUPS}
+            qn = {c.qualified_name for c in bot.tree.walk_commands() if isinstance(c, app_commands.Command)}
+            await bot.close()
+            return roots, roots2, same, subs, qn
+
+        roots, roots2, same, subs, qn = asyncio.run(run())
+        logging.disable(logging.NOTSET)
+        for g, (_, _, names) in __import__("core.botcore", fromlist=["FamilyBot"]).FamilyBot.COMMAND_GROUPS.items():
+            self.assertEqual(subs[g], sorted(names))
+            for n in names:
+                self.assertNotIn(n, roots)
+        self.assertEqual(sorted(roots), sorted(roots2))
+        self.assertTrue(same)
+        self.assertLessEqual(len(roots), 75)  # было 86 — запас под новые фичи
+        from cogs.hub import ACTIONS
+        for key, (_, _, cmd, _) in ACTIONS.items():
+            if not cmd:
+                continue
+            self.assertIn(cmd, qn, f"кнопка панели {key} ведёт на несуществующую команду /{cmd}")
+
+
 if __name__ == "__main__":
     unittest.main()

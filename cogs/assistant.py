@@ -1252,7 +1252,7 @@ class Assistant(commands.Cog):
         if t in ("profile", "warns"):
             m = self.one(g, a)
             if not m and (a.get("user") or a.get("users") or a.get("names")):
-                return "Не нашёл такого человека — назови ник точнее или задай прозвище через /прозвище."
+                return "Не нашёл такого человека — назови ник точнее или задай прозвище через /помощник прозвище."
             m = m or me
             rows = db.all("SELECT id, reason, created_at FROM warns WHERE guild_id=? AND user_id=? AND active=1 "
                           "ORDER BY id", g.id, m.id)
@@ -1399,7 +1399,7 @@ class Assistant(commands.Cog):
                     mins = max(1, min(1440, int(a.get("minutes") or 10)))
                     text = str(a.get("text") or "ты просил напомнить")[:300]
                     auto = bot.get_cog("Automation")
-                    if auto:  # в базу — переживёт /обновить и перезапуск
+                    if auto:  # в базу — переживёт /бот обновить и перезапуск
                         auto.remind_later(g, "remind", time.time() + mins * 60,
                                           getattr(message.channel, "id", None), me.id, text)
                         out.append(f"⏰ Напомню через {mins} мин.")

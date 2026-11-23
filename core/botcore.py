@@ -281,6 +281,43 @@ class FamilyBot(commands.Bot):
             if getattr(fn, "__self__", None) in allowed:
                 self._schedule_event(fn, ev, *args, **kwargs)
 
+    # служебные и «личные» команды — подкомандами двух групп: у Discord лимит 100 команд на сервер, а эти и так
+    # редко набирают руками (руководство — с панели и /помощь). Сами команды живут в своих модулях как раньше.
+    COMMAND_GROUPS = {
+        "бот": ("Служебное: статус, обновление, перезапуск, копия базы, ошибки, голос озвучки", True,
+                ["статус", "перезапуск", "обновить", "модуль", "ошибки", "копия", "голос", "швейцар-статус"]),
+        "помощник": ("Швейцар и ты: визиты в войс, досье, прозвища", False,
+                     ["визиты", "досье", "забудь_меня", "любимчики", "прозвище"]),
+    }
+
+    def regroup(self):
+        """Переносит команды из COMMAND_GROUPS в группы. Повторный вызов безопасен (после перезагрузки модуля его
+        команды снова оказываются в корне — переносим ещё раз, со свежей привязкой к модулю)."""
+        for gname, (desc, admin, names) in self.COMMAND_GROUPS.items():
+            grp = self.tree.get_command(gname)
+            if not isinstance(grp, app_commands.Group):
+                grp = app_commands.Group(name=gname, description=desc, guild_only=True,
+                                         default_permissions=discord.Permissions(administrator=True) if admin else None)
+                self.tree.add_command(grp)
+            for n in names:
+                cmd = self.tree.get_command(n)
+                if not isinstance(cmd, app_commands.Command):
+                    continue
+                self.tree.remove_command(n)
+                if grp.get_command(n):
+                    grp.remove_command(n)
+                b = cmd.binding
+                grp.add_command(cmd._copy_with(parent=grp, binding=b, bindings={b: b} if b is not None else {},
+                                               set_on_binding=False))
+
+    async def load_extension(self, name, *, package=None):
+        await super().load_extension(name, package=package)
+        self.regroup()
+
+    async def reload_extension(self, name, *, package=None):
+        await super().reload_extension(name, package=package)
+        self.regroup()
+
     async def setup_hook(self):
         for ext in config.EXTENSIONS:
             try:
@@ -305,7 +342,7 @@ class FamilyBot(commands.Bot):
     async def on_ready(self):
         log.info("Бот запущен как %s (серверов: %d)", self.user, len(self.guilds))
         # запоминаем домашний сервер: если GUILD_ID пропадёт из окружения, а бот стоит на нескольких серверах,
-        # без этого «домашним» (с /обновить, /перезапуск, токеном разработчика) стал бы любой сервер
+        # без этого «домашним» (с /бот обновить, /бот перезапуск, токеном разработчика) стал бы любой сервер
         hid = config.GUILD_ID or (self.guilds[0].id if len(self.guilds) == 1 else None)
         if hid and str(self.db.get("home_guild") or "") != str(hid) and \
                 (config.GUILD_ID or not self.db.get("home_guild")):

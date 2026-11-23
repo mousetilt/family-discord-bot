@@ -548,7 +548,7 @@ class Listener:
                 persona = self.bot.get_cog("Persona")
                 if persona:
                     persona.set_novisit(self.guild, uid, True)
-                await self.cog.say(self.guild, "Понял, больше сам не зайду. Передумаешь — команда «визиты».")
+                await self.cog.say(self.guild, "Понял, больше сам не зайду. Передумаешь — команда «помощник визиты».")
                 return await self.cog.stop(self.guild, "попросили не заходить")
             if STOP.search(cmd) and len(cmd) < 40:
                 if uid != self.owner and not self.bot.has(member, self.cog.users_roles):
