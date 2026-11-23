@@ -29,6 +29,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from core import config
+from core.addressing import _dist, is_name
 from core.botcore import now
 
 log = logging.getLogger("family-bot.jarvis")
@@ -44,20 +45,27 @@ try:
 except Exception:  # pragma: no cover
     READY = False
 
-WAKE = re.compile(r"^\W*(швейц\w*|швец\w*|швайц\w*|швейцер\w*)\W*", re.I)
+WAKE = re.compile(r"^\W*(швейц(?!ари[яиюейх]|арск)\w*|швец\w*|швайц\w*|швейцер\w*)\W*", re.I)
 # обращение не в начале фразы: человек говорил без паузы или позвал в конце («включи музыку, швейцар»)
-WAKE_ANY = re.compile(r"(?<![а-яёa-z])(швейц\w*|швец\w*|швайц\w*)\W*", re.I)
+WAKE_ANY = re.compile(r"(?<![а-яёa-z])(швейц(?!ари[яиюейх]|арск)\w*|швец\w*|швайц\w*)\W*", re.I)
 YES = re.compile(r"\b(да|подтвер\w*|выполн\w*|давай|делай|ок|окей)\b", re.I)
 NO = re.compile(r"\b(нет|отмен\w*|не надо|стоп)\b", re.I)
+# «не заходи ко мне» — человек не хочет визитов «проведать одинокого» (persona), запоминаем навсегда
+NOVISIT = re.compile(r"\bне\s+(?:надо\s+)?(?:заход\w*|приход\w*|беспоко\w*|навеща\w*)|\bбольше\s+не\s+(?:заход|приход)\w*", re.I)
+_WORDS = re.compile(r"[a-zа-яё]+", re.I)
+# частые «галлюцинации» распознавателя на тишине/шуме (субтитры из обучающих данных) — это не речь
+JUNK = re.compile(r"субтитр|продолжение следует|спасибо за просмотр|подписывайтесь|dimatorzok|редактор|"
+                  r"корректор|amara\.org", re.I)
 STOP = re.compile(r"\b(выйди|выходи|свободен|хватит слушать|перестань слушать|отключись|уходи)\b", re.I)
-SILENCE = 0.8          # сек тишины = конец фразы
+SILENCE = 1.1          # сек тишины = конец фразы (0.8 резало «Швейцар… включи музыку» на две фразы)
 MIN_SEC, MAX_SEC = 0.6, 15
 IDLE_STOP = 30 * 60    # нет команд 30 минут — уходим
 DAILY_LIMIT = int(getattr(config, "WHISPER_DAILY", 0) or 1800)  # бесплатный Groq даёт 2000 распознаваний в сутки
 WHISPER_RPM = int(getattr(config, "WHISPER_RPM", 0) or 18)  # у Groq лимит 20/мин — держим с запасом, чтобы не ловить 429
 OWNER_RESERVE = 5      # из минутного лимита столько распознаваний держим для того, кто позвал (остальные их не тратят)
 STALE_SEC = 20         # фраза остальных, пролежавшая в очереди дольше, уже неактуальна
-WHISPER_MODEL = "whisper-large-v3-turbo"
+# полная модель заметно точнее turbo на русском (лимиты Groq у них одинаковые, тоже бесплатно); turbo — запасная
+WHISPER_MODELS = ("whisper-large-v3", "whisper-large-v3-turbo")
 BYTES_PER_SEC = 48000 * 2 * 2  # 48 кГц, стерео, 16 бит
 
 
@@ -78,6 +86,14 @@ try:  # детектор речи — необязательный (pip webrtcva
     _VAD = _webrtcvad.Vad(2)
 except Exception:  # noqa: BLE001
     _VAD = None
+
+
+def _voice_name(word):
+    """Голосом имя искажается сильнее, чем в чате: «Швицар», «Шварцар» — на «шв», до 2 правок от «швейцар»."""
+    w = word.lower().replace("ё", "е")
+    if len(w) < 5 or not w.startswith("шв") or re.match(r"швейцари|швейцарск", w):
+        return False
+    return any(_dist(x, "швейцар") <= 2 for x in {w, w.rstrip("ьуаеоы")})
 
 
 def _vad_speech(frame):
@@ -497,11 +513,11 @@ class Listener:
                 return
             if self.temp:
                 return
-            m = WAKE.match(text)
+            m = WAKE.match(text) or self.cog.fuzzy_wake(text, first=True)
             asst = self.cog.bot.get_cog("Assistant")
             cmd = None
             if not m:
-                found = list(WAKE_ANY.finditer(text))
+                found = list(WAKE_ANY.finditer(text)) or self.cog.fuzzy_wake(text)
                 if found:
                     m = found[-1]
                     cmd = text[m.end():].strip(" ,.!?-—")
@@ -528,6 +544,12 @@ class Listener:
                     return await self.cog.say(self.guild, random.choice(NOPE))
             if not cmd:
                 return await self.cog.say(self.guild, random.choice(WHAT))
+            if NOVISIT.search(cmd) and len(cmd) < 60:
+                persona = self.bot.get_cog("Persona")
+                if persona:
+                    persona.set_novisit(self.guild, uid, True)
+                await self.cog.say(self.guild, "Понял, больше сам не зайду. Передумаешь — команда «визиты».")
+                return await self.cog.stop(self.guild, "попросили не заходить")
             if STOP.search(cmd) and len(cmd) < 40:
                 if uid != self.owner and not self.bot.has(member, self.cog.users_roles):
                     return await self.cog.say(self.guild, "Не ты меня звал — не тебе и выгонять.")
@@ -569,6 +591,7 @@ class Jarvis(commands.Cog):
         self.bot = bot
         self.listeners = {}
         self._whisper_by_key = {}  # ключ Groq -> метки последних распознаваний (минутный лимит)
+        self.whisper_dead = set()  # модели, которых у Groq больше нет (до перезапуска)
         self.whisper_fail_since, self.whisper_fail_reason = None, ""  # для сторожа (cogs/maintenance.py)
         self.asking = set()  # guild_id — сейчас ходим спрашивать человека в войсе (ask_voice)
         from cogs.assistant import USERS
@@ -698,19 +721,48 @@ class Jarvis(commands.Cog):
         if len(calls) >= (WHISPER_RPM - OWNER_RESERVE if low else WHISPER_RPM):
             return None
         calls.append(mono)
+        models = [m for m in WHISPER_MODELS if m not in self.whisper_dead] or list(WHISPER_MODELS[-1:])
+        try:
+            for model in models:
+                text = await self._whisper_call(key, payload, filename, ctype, model, counter)
+                if text is not False:
+                    return text
+            return None
+        except Exception as e:
+            log.warning("Whisper: %s", e)
+            self.whisper_fail_since = self.whisper_fail_since or time.time()
+            self.whisper_fail_reason = type(e).__name__
+            return None
+
+    def fuzzy_wake(self, text, first=False):
+        """Имя бота, которое распознаватель записал криво («Швицар», «Шварцар», «Sveitsar»): совпадения слов.
+        first — только если имя первое слово фразы (как WAKE.match)."""
+        hits = [m for m in _WORDS.finditer(text[:300]) if is_name(m.group(0)) or _voice_name(m.group(0))]
+        if first:
+            w = _WORDS.search(text)
+            return w if w and hits and hits[0].start() == w.start() else None
+        return hits
+
+    async def _whisper_call(self, key, payload, filename, ctype, model, counter):
+        """Текст / None (не распознано, лимит) / False (модель недоступна — пробуем следующую)."""
         form = aiohttp.FormData()
         form.add_field("file", payload, filename=filename, content_type=ctype)
-        form.add_field("model", WHISPER_MODEL)
+        form.add_field("model", model)
         form.add_field("language", "ru")
         form.add_field("response_format", "verbose_json")
         form.add_field("temperature", "0")
         # подсказка только для написания имени. Готовых команд в ней быть не должно: на шуме распознаватель
         # возвращает текст подсказки, и бот «слышал» команду, которую никто не говорил
         form.add_field("prompt", "Разговор в голосовом канале. К боту обращаются по имени: Швейцар.")
-        try:
+        if True:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
                 async with s.post("https://api.groq.com/openai/v1/audio/transcriptions", data=form,
                                   headers={"Authorization": f"Bearer {key}"}) as r:
+                    if r.status in (400, 404) and "model" in (await r.text()).lower() and \
+                            model != WHISPER_MODELS[-1]:
+                        log.warning("Whisper: модель %s недоступна (%s) — перехожу на запасную", model, r.status)
+                        self.whisper_dead.add(model)
+                        return False
                     if r.status != 200:
                         log.warning("Whisper %s: %s", r.status, (await r.text())[:200])
                         if r.status != 429:  # минутный лимит — штатно; остальное — сбой для сторожа
@@ -723,17 +775,19 @@ class Jarvis(commands.Cog):
                     self.bot.db.set(counter, int(self.bot.db.get(counter) or 0) + 1)
                     segs = data.get("segments")
                     if isinstance(segs, list) and segs:
-                        # выкидываем куски, где распознаватель сам не уверен, что это речь
-                        good = [s.get("text", "") for s in segs if isinstance(s, dict)
-                                and float(s.get("no_speech_prob") or 0) < 0.6
-                                and float(s.get("avg_logprob") or 0) > -1.0]
+                        # выкидываем куски, где это не речь. Правило самого Whisper: «тишина» = no_speech высокий
+                        # И уверенность низкая. Раньше резали по любому из двух — и теряли слова команды
+                        good = []
+                        for sg in segs:
+                            if not isinstance(sg, dict):
+                                continue
+                            ns, lp = float(sg.get("no_speech_prob") or 0), float(sg.get("avg_logprob") or 0)
+                            if (ns > 0.6 and lp < -0.8) or lp < -1.6 or JUNK.search(sg.get("text", "")):
+                                continue
+                            good.append(sg.get("text", ""))
                         return "".join(good).strip()
-                    return (data.get("text") or "").strip()
-        except Exception as e:
-            log.warning("Whisper: %s", e)
-            self.whisper_fail_since = self.whisper_fail_since or time.time()
-            self.whisper_fail_reason = type(e).__name__
-            return None
+                    text = (data.get("text") or "").strip()
+                    return "" if JUNK.search(text) else text
 
     async def say(self, guild, text):
         music = self.bot.get_cog("Music")

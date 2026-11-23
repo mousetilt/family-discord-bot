@@ -220,6 +220,7 @@ class Persona(commands.Cog):
                           "играю музыку" if music.vc(g) and music.player(g).current else
                           "у него выключен звук (наушники)" if m.voice.self_deaf or m.voice.deaf else
                           "он не в семье и не друг семьи" if not self.bot.has(m, config.FAMILY_PLUS) else
+                          "сам попросил не заходить" if self.novisit(g, m.id) else
                           "к нему уже заходил меньше 6 часов назад" if t - self.visited.get(m.id, -1e9) < VISIT_EVERY else
                           "недавно заходил к другому (пауза 45 минут)" if t - self.last_visit.get(g.id, -1e9) < VISIT_GAP else None)
                 if reason:
@@ -256,6 +257,10 @@ class Persona(commands.Cog):
                                        "кого-нибудь?")
         if not (member.voice and member.voice.channel and member.voice.channel.id == channel.id):
             return
+        hint = f"persona:visit_hint:{member.id}"
+        if not self.bot.db.gget(guild, hint):  # в первый раз — подсказка, как от этого отказаться
+            self.bot.db.gset(guild, hint, 1)
+            text = f"{text} Если не хочешь, чтобы я заходил, — так и скажи: «не заходи»."
         res = await jv.start(guild, member, hello=text)
         li = jv.listeners.get(guild.id)
         if str(res).startswith("❌") or not li:
@@ -276,7 +281,28 @@ class Persona(commands.Cog):
                                                "Понял, не до меня. Ушёл."]))
             await jv.stop(guild, "")
 
+    def novisit(self, guild, uid):
+        return bool(self.bot.db.gget(guild, f"persona:novisit:{uid}"))
+
+    def set_novisit(self, guild, uid, on):
+        if on:
+            self.bot.db.gset(guild, f"persona:novisit:{uid}", 1)
+        else:
+            self.bot.db.gdel(guild, f"persona:novisit:{uid}")
+
     # ---------- команды ----------
+    @app_commands.command(name="визиты", description="Заходить ли Швейцару к тебе в войс, когда ты сидишь один")
+    @app_commands.rename(mode="режим")
+    @app_commands.choices(mode=[app_commands.Choice(name="Не заходить ко мне", value="off"),
+                                app_commands.Choice(name="Можно заходить", value="on")])
+    @app_commands.guild_only()
+    async def visits_cmd(self, inter: discord.Interaction, mode: app_commands.Choice[str]):
+        off = mode.value == "off"
+        self.set_novisit(inter.guild, inter.user.id, off)
+        await inter.response.send_message(
+            "🚪 Понял, сам к тебе больше не зайду. Позовёшь — приду." if off else
+            "🚪 Ладно, буду иногда заглядывать, если засидишься один.", ephemeral=True)
+
     @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="досье", description="Что Швейцар о тебе помнит и как к тебе относится")
     async def dossier_cmd(self, inter: discord.Interaction):
