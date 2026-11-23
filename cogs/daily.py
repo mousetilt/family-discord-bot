@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """Ежедневные дела бота.
 • Резервная копия базы — раз в сутки владельцу сервера в ЛС (в базе есть авторы анонимных обращений, поэтому
-  в каналы сервера её не кладём).
+  в каналы сервера её не кладём). Плюс полная копия на самом хосте (папка backups/, последние 7 дней).
+• Восстановление — /копия восстановить_из:<дата> или файл:<zip из ЛС> (владелец домашнего сервера, с
+  подтверждением): перед заменой — снимок текущей базы, ключи ИИ/форума/GitHub сохраняются, затем перезапуск.
 • Сводка Главе в ЛС раз в N суток (/настройки → «Числа»: digest_days): заявки, обращения, испытательные сроки, неактив, выговоры.
 • Выговоры снимаются сами через N дней без новых выговоров (warn_days)."""
 import asyncio
@@ -24,6 +26,124 @@ log = logging.getLogger("family-bot.daily")
 BACKUP_HOUR = 2    # UTC: 05:00 по Москве
 DIGEST_HOUR = 7    # UTC: 10:00 по Москве
 INACTIVE_DAYS = 5
+
+
+BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(config.DB_PATH)), "backups")
+KEEP_HOST = 7
+
+
+def host_backup(path, folder=BACKUP_DIR, name=None, keep=KEEP_HOST):
+    """Полная копия базы на хосте (вместе с ключами — она лежит там же, где сама база). Старше keep дней — удаляем."""
+    os.makedirs(folder, exist_ok=True)
+    name = name or f"family-{now().date().isoformat()}.db"
+    dst_path = os.path.join(folder, name)
+    tmp = dst_path + ".tmp"
+    src = sqlite3.connect(path)
+    try:
+        dst = sqlite3.connect(tmp)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    os.replace(tmp, dst_path)
+    for prefix, n in (("family-", keep), ("prerestore-", 1)):
+        old = sorted(f for f in os.listdir(folder) if f.startswith(prefix) and f.endswith(".db"))
+        for f in old[:-n]:
+            try:
+                os.remove(os.path.join(folder, f))
+            except OSError:
+                pass
+    return dst_path
+
+
+def host_backups(folder=BACKUP_DIR):
+    """Копии на хосте, новые первыми: [(имя файла, дата)]."""
+    try:
+        files = sorted((f for f in os.listdir(folder) if f.startswith("family-") and f.endswith(".db")), reverse=True)
+    except OSError:
+        return []
+    return [(f, f[len("family-"):-3]) for f in files]
+
+
+def check_copy(path):
+    """Файл — целая база этого бота? Иначе ValueError с понятной причиной."""
+    try:
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        raise ValueError("файл не открывается как база") from None
+    try:
+        if c.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise ValueError("файл повреждён")
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"guild_settings", "settings", "applications"} <= tables:
+            raise ValueError("это не база этого бота")
+    except sqlite3.DatabaseError:
+        raise ValueError("файл не открывается как база") from None
+    finally:
+        c.close()
+
+
+def restore_into(conn, path):
+    """Заменить содержимое живой базы копией. Секреты (ключи ИИ, форум, токен GitHub) берём из ТЕКУЩЕЙ базы:
+    в копиях из ЛС их нет, а вводить заново никто не хочет."""
+    check_copy(path)
+    qg = ",".join("?" * len(SECRET_GUILD_KEYS))
+    keep_g = conn.execute(f"SELECT guild_id, key, value FROM guild_settings WHERE key IN ({qg})",
+                          SECRET_GUILD_KEYS).fetchall()
+    keep = conn.execute(f"SELECT key, value FROM settings WHERE key IN ({','.join('?' * len(SECRET_KEYS))})",
+                        SECRET_KEYS).fetchall()
+    conn.commit()
+    src = sqlite3.connect(path)
+    try:
+        src.backup(conn)
+    finally:
+        src.close()
+    for row in keep_g:
+        if not conn.execute("SELECT 1 FROM guild_settings WHERE guild_id=? AND key=?", tuple(row[:2])).fetchone():
+            conn.execute("INSERT INTO guild_settings(guild_id, key, value) VALUES(?,?,?)", tuple(row))
+    for row in keep:
+        conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?,?)", tuple(row))
+    conn.commit()
+
+
+def unpack_upload(data: bytes, folder):
+    """Вложение из ЛС (zip с family.db или сам .db) → путь к файлу базы во folder."""
+    path = os.path.join(folder, "upload.db")
+    if data[:2] == b"PK":
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            names = [n for n in z.namelist() if n.endswith(".db")]
+            if not names:
+                raise ValueError("в архиве нет файла базы")
+            if z.getinfo(names[0]).file_size > 200 * 1024 * 1024:
+                raise ValueError("база в архиве слишком большая")
+            with open(path, "wb") as f:
+                f.write(z.read(names[0]))
+    else:
+        with open(path, "wb") as f:
+            f.write(data)
+    return path
+
+
+class RestoreConfirm(discord.ui.View):
+    def __init__(self, cog, user_id, path, label):
+        super().__init__(timeout=120)
+        self.cog, self.user_id, self.path, self.label = cog, user_id, path, label
+
+    async def interaction_check(self, inter):
+        return inter.user.id == self.user_id
+
+    @discord.ui.button(label="Да, восстановить", style=discord.ButtonStyle.danger, emoji="♻️")
+    async def yes(self, inter: discord.Interaction, _):
+        self.stop()
+        await inter.response.edit_message(content=f"♻️ Восстанавливаю базу из «{self.label}»…", view=None)
+        await self.cog.do_restore(inter, self.path, self.label)
+
+    @discord.ui.button(label="Отмена", style=discord.ButtonStyle.secondary)
+    async def no(self, inter: discord.Interaction, _):
+        self.stop()
+        await inter.response.edit_message(content="Отменил — база не тронута.", view=None)
 
 
 SECRET_GUILD_KEYS = ("forum:pass", "forum:cookies", "ai:groq", "ai:gemini", "ai:claude", "dev:gh_token")
@@ -138,6 +258,12 @@ class Daily(commands.Cog):
 
     async def backup(self, guild):
         t = now()
+        if self.bot.is_home(guild) and t.hour >= BACKUP_HOUR and self.bot.db.get("backup:host") != str(t.date()):
+            self.bot.db.set("backup:host", str(t.date()))
+            try:
+                await asyncio.to_thread(host_backup, config.DB_PATH)
+            except (OSError, sqlite3.Error) as e:
+                log.error("Копия базы на хосте не сделана: %s", e)
         key = f"backup:{t.date()}"
         if t.hour < BACKUP_HOUR or self.bot.db.gget(guild, key) or not self.bot.feature(guild, "service:backup"):
             return
@@ -146,15 +272,69 @@ class Daily(commands.Cog):
             await self.bot.log(guild, "💾 Не смог отправить владельцу сервера резервную копию базы — открой ЛС от "
                                       "участников сервера. Вручную: `/копия`.", color=0xFB8C00)
 
-    @app_commands.command(name="копия", description="Прислать резервную копию базы бота в ЛС (только владелец сервера)")
+    @app_commands.command(name="копия", description="Копия базы в ЛС; или восстановить базу из копии (владелец)")
+    @app_commands.rename(src="восстановить_из", upload="файл")
+    @app_commands.describe(src="Восстановить из копии на хосте (последние 7 дней) — только домашний сервер",
+                           upload="Восстановить из файла копии, который бот присылал в ЛС (zip)")
     @app_commands.default_permissions(administrator=True)
-    async def backup_cmd(self, inter: discord.Interaction):
+    async def backup_cmd(self, inter: discord.Interaction, src: str = None, upload: discord.Attachment = None):
         if inter.user.id != inter.guild.owner_id:
             return await inter.response.send_message("⛔ Копию базы получает только владелец сервера.", ephemeral=True)
+        if src or upload:
+            return await self.ask_restore(inter, src, upload)
         await inter.response.defer(ephemeral=True)
         ok = await self.send_backup(inter.guild)
         await inter.followup.send("💾 Отправил в ЛС." if ok else "❌ Не смог написать в ЛС — открой личные сообщения "
                                   "от участников сервера.", ephemeral=True)
+
+    @backup_cmd.autocomplete("src")
+    async def _src_auto(self, inter: discord.Interaction, current: str):
+        return [app_commands.Choice(name=f"Копия за {d}", value=f) for f, d in host_backups()
+                if current.lower() in d][:25]
+
+    async def ask_restore(self, inter, src, upload):
+        if not self.bot.is_home(inter.guild):
+            return await inter.response.send_message("⛔ Восстановить базу можно только на домашнем сервере бота — "
+                                                     "она общая на все семьи.", ephemeral=True)
+        await inter.response.defer(ephemeral=True, thinking=True)
+        try:
+            if upload:
+                if upload.size > 25 * 1024 * 1024:
+                    raise ValueError("файл больше 25 МБ")
+                folder = tempfile.mkdtemp(prefix="restore_")
+                path = await asyncio.to_thread(unpack_upload, await upload.read(), folder)
+                label = upload.filename
+            else:
+                name = os.path.basename(src)
+                path = os.path.join(BACKUP_DIR, name)
+                if not (name.startswith("family-") and os.path.isfile(path)):
+                    raise ValueError("такой копии на хосте нет")
+                label = f"копия за {name[len('family-'):-3]}"
+            await asyncio.to_thread(check_copy, path)
+        except (ValueError, OSError, zipfile.BadZipFile) as e:
+            return await inter.followup.send(f"❌ Не могу восстановить: {e}.", ephemeral=True)
+        await inter.followup.send(
+            f"⚠️ Заменить ВСЮ базу бота копией «{label}»? Всё, что было после неё (заявки, выговоры, казна…), "
+            "пропадёт. Текущую базу сохраню рядом на всякий случай, ключи ИИ и форума останутся. Потом бот "
+            "перезапустится.", view=RestoreConfirm(self, inter.user.id, path, label), ephemeral=True)
+
+    async def do_restore(self, inter, path, label):
+        try:
+            await asyncio.to_thread(host_backup, config.DB_PATH, BACKUP_DIR,
+                                    f"prerestore-{now().strftime('%Y%m%d-%H%M%S')}.db")
+            restore_into(self.bot.db.c, path)
+        except (ValueError, OSError, sqlite3.Error) as e:
+            log.error("Восстановление базы из «%s» не удалось: %s", label, e)
+            return await inter.followup.send(f"❌ Не получилось: {e}. База не изменилась.", ephemeral=True)
+        log.warning("База восстановлена из «%s» (%s)", label, inter.user)
+        await inter.followup.send(f"✅ База восстановлена из «{label}». Перезапускаюсь…", ephemeral=True)
+        await asyncio.sleep(1.5)
+        from cogs.maintenance import _restart_in_place
+        try:
+            await self.bot.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _restart_in_place()
 
     @app_commands.command(name="ошибки", description="Последние ошибки бота из журнала (руководство)")
     @app_commands.default_permissions(administrator=True)

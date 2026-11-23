@@ -126,5 +126,44 @@ class Health(unittest.TestCase):
         self.assertFalse(any(i.fix == "ai" for i in items))
 
 
+class HostBackups(unittest.TestCase):
+    """Копии на хосте: ротация, проверка файла, восстановление с сохранением ключей."""
+
+    def db(self, path, note):
+        c = sqlite3.connect(path)
+        c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        c.execute("CREATE TABLE IF NOT EXISTS guild_settings (guild_id INTEGER, key TEXT, value TEXT)")
+        c.execute("CREATE TABLE IF NOT EXISTS applications (id INTEGER)")
+        c.execute("INSERT INTO settings VALUES ('note', ?)", (note,))
+        c.commit()
+        return c
+
+    def test_rotation_and_restore(self):
+        from cogs.daily import check_copy, host_backup, host_backups, restore_into
+        d = tempfile.mkdtemp()
+        live_path = os.path.join(d, "live.db")
+        live = self.db(live_path, "old")
+        folder = os.path.join(d, "backups")
+        for day in range(1, 10):
+            host_backup(live_path, folder, f"family-2026-11-{day:02d}.db", keep=7)
+        self.assertEqual(len(host_backups(folder)), 7)
+        self.assertEqual(host_backups(folder)[0][1], "2026-11-09")
+        # после копии база ушла вперёд, и появились ключи
+        live.execute("UPDATE settings SET value='new' WHERE key='note'")
+        live.execute("INSERT INTO guild_settings VALUES (1, 'ai:gemini', 'secret')")
+        live.execute("INSERT INTO settings VALUES ('dev:gh_token', 'tok')")
+        live.commit()
+        restore_into(live, os.path.join(folder, "family-2026-11-09.db"))
+        self.assertEqual(live.execute("SELECT value FROM settings WHERE key='note'").fetchone()[0], "old")
+        self.assertEqual(live.execute("SELECT value FROM guild_settings WHERE key='ai:gemini'").fetchone()[0], "secret")
+        self.assertEqual(live.execute("SELECT value FROM settings WHERE key='dev:gh_token'").fetchone()[0], "tok")
+        live.close()
+        junk = os.path.join(d, "junk.db")
+        with open(junk, "wb") as f:
+            f.write(b"not a database at all" * 50)
+        with self.assertRaises(ValueError):
+            check_copy(junk)
+
+
 if __name__ == "__main__":
     unittest.main()
