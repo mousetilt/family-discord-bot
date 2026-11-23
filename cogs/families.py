@@ -329,10 +329,12 @@ class Families(commands.Cog):
                 sent = True
             except discord.HTTPException:
                 pass
-        if not sent:  # некуда спросить — не держим семью в подвешенном состоянии
-            bot.db.gset(g, "family:approved", 1)
-            await self.enable_family(g, inter.user)
-            return await inter.followup.send("🎉 Семья подключена! Дальше — `/настройка`.", ephemeral=True)
+        if not sent:  # некуда спросить — одобрять сами не будем (иначе одобрение можно обойти), ждём
+            bot.db.gdel(g, "family:requested")  # можно повторить, не дожидаясь суток
+            log.error("Заявку семьи «%s» (%s) некуда доставить: ни канала бот-команд, ни ЛС владельца домашнего "
+                      "сервера", g.name, g.id)
+            return await inter.followup.send("⏳ Не смог достучаться до владельца бота. Напиши ему сам — пусть "
+                                             "откроет ЛС; потом снова `/семья подключить`.", ephemeral=True)
         await inter.followup.send("📨 Заявка отправлена владельцу бота. Как только он разрешит — я напишу тебе в ЛС, "
                                   "и можно будет запускать `/настройка`.", ephemeral=True)
 
@@ -380,6 +382,13 @@ class Families(commands.Cog):
     async def enable_family(self, g, who):
         bot = self.bot
         bot.set_family(g, True)
+        if not bot.is_home(g) and not bot.db.gget(g, "family:name"):
+            # пока профиль не заполнен, чужая семья не должна везде зваться «Ульяновы» — берём имя сервера
+            nm = (g.name or "").strip()[:40]
+            if nm:
+                bot.db.gset(g, "family:name", nm)
+                bot.db.gset(g, "family:gen", nm)
+                bot.db.gset(g, "family:title", nm)
         try:
             await bot.sync_commands(g)
         except discord.HTTPException as e:

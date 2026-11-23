@@ -488,10 +488,29 @@ async def _fetch(s, url, max_pages):
     return title, content[:300000], url
 
 
+async def check_public_url(url):
+    """Только http(s) и только внешние адреса: ссылкой из /база нельзя заставить бота лезть во внутреннюю сеть
+    хостинга (localhost, 10.x, 192.168.x, метаданные облака)."""
+    import ipaddress
+    import socket
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("нужна обычная ссылка http(s)://…")
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(parts.hostname, parts.port or 443, type=socket.SOCK_STREAM)
+    except OSError:
+        raise ValueError("такой сайт не найден") from None
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if not ip.is_global or ip.is_multicast:
+            raise ValueError("это внутренний адрес — такие ссылки не скачиваю")
+
+
 async def fetch_url(url, max_pages=10, session=None):
     """Скачивает тему форума (все посты автора, до max_pages страниц) или обычную страницу.
     session — общая сессия прогона (куки/keep-alive); без неё создаётся своя."""
     url = url.strip().split("#")[0]
+    await check_public_url(url)
     if session is not None:
         return await _fetch(session, url, max_pages)
     async with new_session() as s:

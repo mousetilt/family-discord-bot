@@ -299,6 +299,12 @@ class FamilyBot(commands.Bot):
 
     async def on_ready(self):
         log.info("Бот запущен как %s (серверов: %d)", self.user, len(self.guilds))
+        # запоминаем домашний сервер: если GUILD_ID пропадёт из окружения, а бот стоит на нескольких серверах,
+        # без этого «домашним» (с /обновить, /перезапуск, токеном разработчика) стал бы любой сервер
+        hid = config.GUILD_ID or (self.guilds[0].id if len(self.guilds) == 1 else None)
+        if hid and str(self.db.get("home_guild") or "") != str(hid) and \
+                (config.GUILD_ID or not self.db.get("home_guild")):
+            self.db.set("home_guild", str(hid))
         if self.home_id:
             self.db.adopt_orphans(self.home_id)
         name = "Россия Онлайн" if self.families else f"Россия Онлайн · семья {config.FAMILY}"
@@ -330,8 +336,9 @@ class FamilyBot(commands.Bot):
         log.exception("Ошибка команды /%s", inter.command.name if inter.command else "?", exc_info=orig)
         if isinstance(orig, discord.Forbidden):
             text = "❌ Боту не хватает прав. Перетащи роль бота на самый верх списка ролей."
-        else:
-            text = f"❌ Ошибка: {str(orig)[:300]}"
+        else:  # внутренности (пути, SQL) людям не показываем — подробности уже в журнале ошибок разработчику
+            text = (f"❌ Что-то пошло не так ({type(orig).__name__}). Ошибка уже записана и уйдёт разработчику — "
+                    "попробуй ещё раз чуть позже.")
         try:
             if inter.response.is_done():
                 await inter.followup.send(text, ephemeral=True)

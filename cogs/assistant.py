@@ -798,7 +798,10 @@ class Assistant(commands.Cog):
                 prompt = (f"{self.context(ctx)}\n\n{card}{self.chat(ctx)}{self.history(ctx)}"
                           + (vision.to_prompt(seen) + "\n\n" if seen else "") +
                           f"Сообщение от {ctx.author.display_name}: {request}")
-                data = await ai.ask_json(system, prompt, max_tokens=500, smart=True, cache=True)
+                # сильная модель (у Claude — Sonnet) — руководству; рядовым и болтовне — быстрая (Haiku): дешевле.
+                # У бесплатных ИИ smart ни на что не влияет
+                data = await ai.ask_json(system, prompt, max_tokens=500, cache=True,
+                                         smart=self.bot.has(ctx.author, USERS))
             except Exception as e:
                 log.warning("Швейцар: ИИ не ответил — %s", str(e)[:200])
                 text = random.choice(NO_AI)
@@ -1376,6 +1379,10 @@ class Assistant(commands.Cog):
                         out.append("▶️ Продолжаю.")
                 elif t in ("voice_mute", "voice_unmute"):
                     people = [m for m in self.targets(message, a) if m.voice and m.id != me.id]
+                    skipped = 0
+                    if t == "voice_mute":  # выключить микрофон старшему по иерархии нельзя
+                        keep = [m for m in people if not self.protected(me, m)]
+                        skipped, people = len(people) - len(keep), keep
                     n = 0
                     for m in people[:40]:
                         try:
@@ -1384,7 +1391,10 @@ class Assistant(commands.Cog):
                         except discord.HTTPException:
                             pass
                     out.append(f"🎙 Микрофоны {'выключены' if t == 'voice_mute' else 'включены'}: {n} чел."
-                               if people else "❌ Не понял, кому переключить микрофон.")
+                               if people else "⛔ Этих людей трогать не могу — они не ниже тебя." if skipped
+                               else "❌ Не понял, кому переключить микрофон.")
+                    if people and skipped:
+                        out.append(f"⛔ Пропустил {skipped} чел. — они не ниже тебя.")
                 elif t == "remind":
                     mins = max(1, min(1440, int(a.get("minutes") or 10)))
                     text = str(a.get("text") or "ты просил напомнить")[:300]
@@ -1557,10 +1567,16 @@ class Assistant(commands.Cog):
                             out.append("❌ Не нашёл такой голосовой канал.")
                             continue
                     people = [m for m in self.targets(message, a) if m.voice and m.voice.channel != to]
+                    # себя — можно, старших по иерархии — нельзя (иначе рекрутёр мог бы выкинуть Главу из войса)
+                    keep = [m for m in people if m.id == me.id or not self.protected(me, m)]
+                    skipped, people = len(people) - len(keep), keep
                     if not people:
-                        out.append("❌ Не понял, кого переносить (или они не в войсе)." if t == "move"
+                        out.append("⛔ Этих людей трогать не могу — они не ниже тебя." if skipped else
+                                   "❌ Не понял, кого переносить (или они не в войсе)." if t == "move"
                                    else "❌ Не понял, кого отключить.")
                         continue
+                    if skipped:
+                        out.append(f"⛔ Пропустил {skipped} чел. — они не ниже тебя.")
                     n = 0
                     for m in people:
                         try:

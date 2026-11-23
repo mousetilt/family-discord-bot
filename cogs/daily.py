@@ -26,6 +26,10 @@ DIGEST_HOUR = 7    # UTC: 10:00 по Москве
 INACTIVE_DAYS = 5
 
 
+SECRET_GUILD_KEYS = ("forum:pass", "forum:cookies", "ai:groq", "ai:gemini", "ai:claude", "dev:gh_token")
+SECRET_KEYS = ("dev:gh_token", "forum:pass", "forum:cookies")
+
+
 def make_backup(path, only_gid=None, home_gid=None):
     """Целостная копия базы (даже если бот в этот момент пишет) → zip в памяти.
     only_gid — оставить только данные этой семьи (владельцу чужого сервера — не вся база бота)."""
@@ -48,16 +52,16 @@ def make_backup(path, only_gid=None, home_gid=None):
                     dst.commit()
                 except sqlite3.Error:
                     pass
-            try:  # пароль и сессия аккаунта форума не уходят ни в одну копию
-                dst.execute("DELETE FROM guild_settings WHERE key IN ('forum:pass', 'forum:cookies')")
-                dst.commit()
-            except sqlite3.Error:
-                pass
+            # секреты не уходят ни в одну копию (копия — вложение в ЛС Discord): пароль и сессия форума,
+            # ключи ИИ всех семей, токен GitHub разработчика. После восстановления их вводят заново
+            for table, keys in (("guild_settings", SECRET_GUILD_KEYS), ("settings", SECRET_KEYS)):
+                try:
+                    dst.execute(f"DELETE FROM {table} WHERE key IN ({','.join('?' * len(keys))})", keys)
+                    dst.commit()
+                except sqlite3.Error:
+                    pass
             if only_gid:
                 strip_foreign(dst, only_gid)
-            elif home_gid:  # полная копия — но без ИИ-ключей других семей (они их вводили не для нас)
-                dst.execute("DELETE FROM guild_settings WHERE key LIKE 'ai:%' AND guild_id<>?", (home_gid,))
-                dst.commit()
         finally:
             dst.close()
     finally:

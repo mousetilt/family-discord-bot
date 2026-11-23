@@ -25,7 +25,7 @@
     в git не коммитится**; семья — `/ии ключ` (слот `ai:claude`). Основной провайдер семьи — `ai:primary`
     (`/ии основной`; не задан — `AI_PROVIDER`, иначе бесплатный). Чужим семьям ключи хоста (и Claude) не даются.
   - Уровни: `light`/без флага → `CLAUDE_MODEL_FAST` (Haiku), `smart=True` → `CLAUDE_MODEL_SMART` (Sonnet, потом Haiku);
-    у бесплатных `smart` ни на что не влияет. `cache=True` — кэш system у Claude. `images` — Gemini или Claude
+    у бесплатных `smart` ни на что не влияет. Швейцар зовёт `smart` только для `USERS` (руководство) и в агент-шагах, рядовым — Haiku. `cache=True` — кэш system у Claude. `images` — Gemini или Claude
     (`ai.vision`). `ai.is_claude` — активен ли Claude. Лимит/529/нет денег/отказ → откат на Gemini/Groq.
 - `cogs/` — фичи (см. ниже).
 

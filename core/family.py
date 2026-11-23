@@ -111,9 +111,11 @@ NUMBERS = {
     "app_ping_hours": ("Пинг кадрам, если заявку не взяли за, часов (0 — выкл)", 2, 0, 72),
     "auto_idle_days": ("Автоперевод: не переводить, если не появлялся, дней (0 — не смотреть)", 5, 0, 60),
 }
-NUMBER_GROUPS = {"discipline": ("⚖️ Дисциплина и сроки", ["warn_limit", "warn_days", "probation_days", "digest_days",
-                                                          "market_days", "journal_days", "app_ping_hours",
-                                                          "auto_idle_days"]),
+# в одной группе не больше 5 чисел: окно Discord вмещает максимум 5 полей (иначе оно не откроется)
+NUMBER_GROUPS = {"discipline": ("⚖️ Дисциплина и новички", ["warn_limit", "warn_days", "probation_days",
+                                                            "auto_idle_days"]),
+                 "periods": ("🗓 Сроки и напоминания", ["digest_days", "market_days", "journal_days",
+                                                       "app_ping_hours"]),
                  "exam": ("🧠 Экзамен", ["exam_questions", "exam_pass", "exam_time", "exam_retry"])}
 # Тексты семьи (/настройки → «📜 Тексты»): ключ text:<имя>. Пусто — текст по умолчанию из config (под семью).
 TEXTS = {
