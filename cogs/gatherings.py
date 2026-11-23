@@ -3,7 +3,9 @@
 • events:discord — у сбора со временем ещё и событие сервера Discord (видно в шапке сервера, Discord сам напоминает
   отметившимся «Интересно»). «Интересно» в событии = «Иду» на карточке (d["via_event"] — кого так добавили).
 • events:results — через 10 минут после начала: итоги (кто пришёл) ответом на карточку + кнопка «Премия пришедшим»
-  (выплата из казны, только TREASURY)."""
+  (выплата из казны, только TREASURY).
+• events:dm — за час до начала: ЛС отметившимся «Иду»/«Возможно» с кнопками «Приду» / «Не смогу» (меняют карточку).
+• upcoming() — ближайшие сборы строками (речь «какие сборы на неделе», утренняя сводка)."""
 import asyncio
 import datetime as dt
 import json
@@ -19,6 +21,7 @@ from core.parse import parse_when as _parse_when
 
 log = logging.getLogger("family-bot.gather")
 REMIND_BEFORE = 15 * 60   # за сколько до начала пинговать тех, кто отметился «Иду»
+DM_BEFORE = 60 * 60       # за сколько до начала — ЛС с кнопками «Приду / Не смогу»
 EVENT_LEN = 2 * 3600      # событие Discord «снаружи» обязано иметь конец — считаем, что сбор идёт 2 часа
 CHECK_AFTER = 10 * 60     # через сколько после начала отмечать, кто реально пришёл в войс
 
@@ -68,15 +71,60 @@ class RsvpButton(discord.ui.DynamicItem[discord.ui.Button], template=r"rsvp:(?P<
         if not row:
             return await inter.response.send_message("Сбор не найден.", ephemeral=True)
         d = json.loads(row["data"])
-        uid = inter.user.id
-        if self.k == "yes" and d.get("limit") and uid not in d["yes"] and len(d["yes"]) >= d["limit"]:
-            return await inter.response.send_message("😔 Мест больше нет. Отметься «Возможно».", ephemeral=True)
-        for k in RSVP:
-            if uid in d[k]:
-                d[k].remove(uid)
-        d[self.k].append(uid)
+        err = mark(d, inter.user.id, self.k)
+        if err:
+            return await inter.response.send_message(err, ephemeral=True)
         db.q("UPDATE events SET data=? WHERE message_id=?", json.dumps(d), inter.message.id)
         await inter.response.edit_message(embed=event_embed(inter.client, d, inter.guild))
+
+
+def mark(d, uid, k):
+    """Перенести человека в список k (yes/maybe/no) с учётом лимита мест. → None или текст отказа."""
+    if k == "yes" and d.get("limit") and uid not in d["yes"] and len(d["yes"]) >= d["limit"]:
+        return "😔 Мест больше нет. Отметься «Возможно»."
+    for key in RSVP:
+        if uid in d[key]:
+            d[key].remove(uid)
+    d[k].append(uid)
+    return None
+
+
+class DmRsvp(discord.ui.DynamicItem[discord.ui.Button], template=r"gdm:(?P<mid>\d+):(?P<k>yes|no)"):
+    """Кнопки в ЛС за час до сбора: работают без сервера (сбор ищем по номеру сообщения карточки)."""
+
+    def __init__(self, mid, k):
+        label, emoji, style = ("Приду", "✅", discord.ButtonStyle.success) if k == "yes" else \
+            ("Не смогу", "❌", discord.ButtonStyle.danger)
+        super().__init__(discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=f"gdm:{mid}:{k}"))
+        self.mid, self.k = int(mid), k
+
+    @classmethod
+    async def from_custom_id(cls, inter, item, match):
+        return cls(match["mid"], match["k"])
+
+    async def callback(self, inter: discord.Interaction):
+        bot = inter.client
+        row = bot.db.one("SELECT guild_id, data FROM events WHERE message_id=?", self.mid)
+        if not row:
+            return await inter.response.send_message("Сбор уже не найден.", ephemeral=True)
+        d = json.loads(row["data"])
+        if d.get("checked") or (d.get("ts") and now().timestamp() > d["ts"] + CHECK_AFTER):
+            return await inter.response.edit_message(content="Сбор уже прошёл.", view=None)
+        err = mark(d, inter.user.id, self.k)
+        if err:
+            return await inter.response.send_message(err, ephemeral=True)
+        bot.db.q("UPDATE events SET data=? WHERE message_id=?", json.dumps(d), self.mid)
+        await inter.response.edit_message(
+            content=(f"✅ Записал: идёшь на **{d['what']}** <t:{d['ts']}:R>." if self.k == "yes"
+                     else f"❌ Понял, на **{d['what']}** не придёшь. Передумаешь — кнопка на карточке сбора."),
+            view=None)
+        g = bot.get_guild(row["guild_id"])
+        ch = bot.ch(g, "gather") if g else None
+        if ch:
+            try:
+                await ch.get_partial_message(self.mid).edit(embed=event_embed(bot, d, g))
+            except discord.HTTPException:
+                pass
 
 
 class BonusButton(discord.ui.DynamicItem[discord.ui.Button], template=r"gbonus:(?P<mid>\d+)"):
@@ -165,6 +213,11 @@ class Gatherings(commands.Cog):
             for g in filter(None, [self.bot.get_guild(row["guild_id"])]):
                 ch = self.bot.ch(g, "gather")
                 msg = ch.get_partial_message(row["message_id"]) if ch else None
+                if not d.get("dm_reminded") and t >= ts - DM_BEFORE:
+                    d["dm_reminded"], changed = True, True
+                    if t < ts - REMIND_BEFORE and ts - d.get("made", 0) > DM_BEFORE + 120 and \
+                            self.bot.feature(g, "events:dm"):
+                        await self.dm_remind(g, row["message_id"], d, msg)
                 if not d.get("reminded") and t >= ts - REMIND_BEFORE:
                     d["reminded"], changed = True, True
                     if t < ts and d["yes"] and msg and ts - d.get("made", 0) > REMIND_BEFORE + 120:
@@ -192,10 +245,40 @@ class Gatherings(commands.Cog):
             if changed:
                 # кнопки могли поменять списки, пока мы работали — обновляем только свои поля
                 fresh = json.loads(db.one("SELECT data FROM events WHERE message_id=?", row["message_id"])["data"])
-                for k in ("reminded", "checked", "came"):
+                for k in ("reminded", "dm_reminded", "checked", "came"):
                     if k in d:
                         fresh[k] = d[k]
                 db.q("UPDATE events SET data=? WHERE message_id=?", json.dumps(fresh), row["message_id"])
+
+    async def dm_remind(self, g, mid, d, msg):
+        """За час: ЛС тем, кто отметился «Иду» или «Возможно», — с кнопками «Приду» / «Не смогу»."""
+        from core.botcore import safe_dm
+        v = discord.ui.View(timeout=None)
+        v.add_item(DmRsvp(mid, "yes"))
+        v.add_item(DmRsvp(mid, "no"))
+        link = f"\n{msg.jump_url}" if msg else ""
+        for uid in list(dict.fromkeys((d.get("yes") or []) + (d.get("maybe") or [])))[:60]:
+            m = g.get_member(uid)
+            if not m or m.bot:
+                continue
+            await safe_dm(m, f"⏰ Через час сбор семьи {config.FAMILY}: **{d['what']}** — <t:{d['ts']}:t>"
+                             f"{(', ' + d['where']) if d.get('where') else ''}. Будешь?{link}", view=v)
+            await asyncio.sleep(0.5)
+
+    def upcoming(self, guild, days=7):
+        """Ближайшие сборы строками (для речи и сводки)."""
+        t0, out = now().timestamp(), []
+        for row in self.bot.db.all("SELECT message_id, data FROM events WHERE guild_id=?", guild.id):
+            try:
+                d = json.loads(row["data"])
+            except ValueError:
+                continue
+            ts = d.get("ts")
+            if isinstance(ts, int) and t0 - CHECK_AFTER <= ts <= t0 + days * 86400:
+                lim = f"/{d['limit']}" if d.get("limit") else ""
+                out.append((ts, f"📣 <t:{ts}:f> — **{d['what']}**{(' · ' + d['where']) if d.get('where') else ''}"
+                                f" · идут {len(d.get('yes') or [])}{lim}, возможно {len(d.get('maybe') or [])}"))
+        return [s for _, s in sorted(out)]
 
     @tick.before_loop
     async def _before(self):
@@ -338,5 +421,5 @@ class Gatherings(commands.Cog):
 
 
 async def setup(bot):
-    bot.add_dynamic_items(RsvpButton, BonusButton)
+    bot.add_dynamic_items(RsvpButton, BonusButton, DmRsvp)
     await bot.add_cog(Gatherings(bot))

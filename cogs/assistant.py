@@ -28,7 +28,7 @@ MOD = config.LEAD + ["hr_head"]
 INFO = "\u200b"   # пометка «это ответ-справка»: показываем целиком и зачитываем в голосе
 # справки — только чтение, выполняются сразу
 ASK = {"law", "profile", "top", "inactive", "people", "warns", "bl_check", "market", "digest", "queue", "roll", "recruit_stats",
-       "car_list",
+       "car_list", "events",
        "web_search", "missed", "draft",
        "treasury_balance", "treasury_debtors", "salary_rates", "fine_list", "forum_check", "law_doc", "brief", "insights"}
 # казна (cogs/treasury.py): запись — после «Выполнить», справки — сразу
@@ -43,7 +43,7 @@ GARAGE_BY = config.LEAD + ["senior", "treasurer"]  # ведут автопарк
 CHANNEL_ONLY = {"purge", "slowmode", "poll"}  # работают с текущим каналом — в ЛС их не выполняем
 # болтать со Швейцаром может вся семья и друзья; им доступны только безобидные вещи
 EVERYONE = config.FAMILY_PLUS
-FOR_ALL = {"forum_check", "law_doc", "paid_claim", "vacation", "vacation_end", "room", "car_list", "web_search", "missed", "law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
+FOR_ALL = {"events", "forum_check", "law_doc", "paid_claim", "vacation", "vacation_end", "room", "car_list", "web_search", "missed", "law", "roll", "queue", "top", "profile", "remind", "market", "music_play", "music_skip", "music_stop",
            "music_pause", "music_resume", "music_volume", "listen", "listen_stop", "leave", "invite", "forget"}
 INVITE_GAP = 10 * 60  # один человек зовёт кого-то в войс через бота не чаще раза в 10 минут
 # живые отговорки вместо казённых фраз
@@ -68,7 +68,7 @@ PERMS = {"law": USERS, "profile": USERS, "top": USERS, "inactive": USERS, "peopl
          "leave": USERS, "listen": USERS, "listen_stop": USERS, "move": USERS, "disconnect": USERS, "say": USERS, "music_play": USERS, "music_skip": USERS,
          "music_stop": USERS, "music_volume": USERS, "gather": config.ORGANIZERS, "announce": config.LEAD + ["events"],  # как /запланировать
          "alarm": config.LEAD, "car_list": USERS, **{t: GARAGE_BY for t in ("car_add", "car_give", "car_status", "car_remove")},
-         "web_search": USERS, "missed": USERS, "draft": config.LEAD + ["events", "hr_head", "recruiter", "diplomat"],
+         "events": USERS, "web_search": USERS, "missed": USERS, "draft": config.LEAD + ["events", "hr_head", "recruiter", "diplomat"],
          "accept": config.HR, "recruit_stats": config.HR + ["treasurer"], "mute": MOD, "unmute": MOD, "warn": MOD, "purge": MOD, "rank": config.LEAD,
          "promote_newbies": config.HR,  # как accept: кадры и руководство
          **{t: config.TREASURY for t in TREASURY_ACTS}, "dues_set": LEADS, "salary_rate_set": LEADS,
@@ -93,7 +93,7 @@ LABEL = {"law": "⚖️ Юрист", "profile": "🪪 Профиль", "top": "�
          "mute": "🔇 Мут", "unmute": "🔊 Снять мут", "warn": "⚖️ Выговор", "purge": "🧹 Очистить чат",
          "rank": "🔁 Ранг", "accept": "🛂 Принять в семью", "promote_newbies": "🎓 Новичков — в Члены семьи", "car_list": "🚗 Автопарк", "car_add": "🚗 Добавить машину",
          "car_give": "🔁 Передать машину", "car_status": "🔧 Статус машины", "car_remove": "🗑 Списать машину",
-         "web_search": "🔎 Поиск", "missed": "🕰 Что я пропустил", "draft": "📝 Черновик",
+         "events": "📅 Ближайшие сборы", "web_search": "🔎 Поиск", "missed": "🕰 Что я пропустил", "draft": "📝 Черновик",
          "recruit_stats": "📊 Статистика рекрутёров", "treasury_in": "➕ Приход в казну", "treasury_out": "➖ Расход из казны",
          "treasury_due": "✅ Взнос", "treasury_balance": "💰 Баланс казны", "treasury_debtors": "📋 Должники",
          "dues_set": "⚙️ Настройка взноса", "salary_rates": "💸 Ставки зарплат",
@@ -168,6 +168,7 @@ ACT_ALL = """ДЕЙСТВИЯ, доступные всем (поле "type"):
 - web_search: {"query":"что искать"} — свежие факты, новости, курсы, погода, что угодно из интернета, чего ты
   точно не знаешь. Анекдоты, шутки, тосты, стишки — рассказывай САМ в "reply", без поиска
 - missed: {"hours":1..72} — «что я пропустил», сводка семьи за последние часы (по умолчанию 12)
+- events: {"days":1..30} — ближайшие сборы семьи («какие сборы на неделе», «когда сбор», «что сегодня»)
 - market: {"query":"..."} — рынок семьи; top: {"period":"week"|"all"}; roll: {"max":2..1000000}
 - profile: {"user":id} — профиль; remind: {"minutes":1..1440,"text":"..."} — напомнить автору
 - listen — зайти в войс автора и СЛУШАТЬ команды (голое «зайди», «слушай», «залезай в войс»). Но если просят
@@ -1347,6 +1348,15 @@ class Assistant(commands.Cog):
             title_, text = await auto.draft(g, str(a.get("kind") or "announce"), str(a.get("topic") or ""))
             return (f"📝 **{title_}**\n{text}\n\n_Это черновик. Опубликовать: «Швейцар, объяви это» или `/черновик`._"
                     if text else title_)
+        if t == "events":
+            gat = bot.get_cog("Gatherings")
+            try:
+                days = max(1, min(30, int(a.get("days") or 7)))
+            except (TypeError, ValueError):
+                days = 7
+            rows = gat.upcoming(g, days) if gat else []
+            return ("📅 **Ближайшие сборы**\n" + "\n".join(rows[:15])) if rows else \
+                f"📅 Сборов на ближайшие {days} дн. нет. Объявить — «Швейцар, сбор в 20:00 …» или `/сбор`."
         if t == "car_list":
             gar = bot.get_cog("Garage")
             return await gar.speech(g, me, a, self.one(g, a)) if gar else "Автопарк не загружен."

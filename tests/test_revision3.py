@@ -282,5 +282,33 @@ class CanDo(unittest.TestCase):
         self.assertLessEqual(len(hub.abilities_text(bot, boss)), 1900)
 
 
+class GatheringsCalendar(unittest.TestCase):
+    """Сборы: отметка с лимитом мест, список ближайших."""
+
+    def test_mark_and_upcoming(self):
+        import json
+        import time
+        import types
+        from cogs import gatherings as gm
+        from core.db import DB
+        d = {"what": "Стрела", "yes": [1], "maybe": [2], "no": [], "limit": 2}
+        self.assertIsNone(gm.mark(d, 2, "yes"))
+        self.assertEqual((d["yes"], d["maybe"]), ([1, 2], []))
+        self.assertIsNotNone(gm.mark(d, 3, "yes"))  # мест нет
+        self.assertIsNone(gm.mark(d, 1, "no"))
+        self.assertEqual((d["yes"], d["no"]), ([2], [1]))
+        db = DB(":memory:")
+        t = int(time.time())
+        for mid, what, ts in ((1, "Скоро", t + 3600), (2, "Через месяц", t + 40 * 86400), (3, "Завтра", t + 86400)):
+            db.q("INSERT INTO events(message_id, guild_id, data, created_at) VALUES(?, 7, ?, '')", mid,
+                 json.dumps({"what": what, "ts": ts, "yes": [], "maybe": []}))
+        g = gm.Gatherings.__new__(gm.Gatherings)
+        g.bot = types.SimpleNamespace(db=db)
+        rows = g.upcoming(types.SimpleNamespace(id=7), 7)
+        self.assertEqual(len(rows), 2)
+        self.assertIn("Скоро", rows[0])
+        self.assertIn("Завтра", rows[1])
+
+
 if __name__ == "__main__":
     unittest.main()
