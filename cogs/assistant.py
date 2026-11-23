@@ -838,7 +838,11 @@ class Assistant(commands.Cog):
         if denied:
             what = ", ".join(dict.fromkeys(LABEL[a["type"]] for a in denied))
             text = random.choice(NOT_YOURS).format(what=what)
-            await send(content="⛔ " + text)
+            extra = {}
+            if not getattr(ctx, "voice", False) and not getattr(ctx, "dm", False):
+                from cogs.hub import cando_view
+                extra["view"] = cando_view()  # кнопка «Что я могу?»
+            await send(content="⛔ " + text, **extra)
             return re.sub(r"[^\w\s,.!?:—-]", "", text)
         if not self.bot.has(ctx.author, USERS):
             for a in plan:  # чужие профили — только тем, у кого есть права

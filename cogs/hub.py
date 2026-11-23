@@ -405,7 +405,57 @@ def plabel(p):
 
 async def deny(inter, text="⛔ Недостаточно прав."):
     if not inter.response.is_done():
-        await inter.response.send_message(text, ephemeral=True)
+        await inter.response.send_message(text, ephemeral=True, view=cando_view() if inter.guild else
+                                          discord.utils.MISSING)
+
+
+def abilities(bot, member):
+    """Что этому человеку доступно: (речью — подписи действий, разделы панели)."""
+    speech = []
+    asst = bot.get_cog("Assistant")
+    if asst:
+        from cogs.assistant import LABEL, PERMS
+        speech = [LABEL[a] for a in PERMS if a in LABEL and asst.may(member, a)]
+    sections = [f"{e} {t}" for k, (e, t, need, _) in SECTIONS.items() if can_see(bot, member, need)]
+    return list(dict.fromkeys(speech)), sections
+
+
+def abilities_text(bot, member):
+    speech, sections = abilities(bot, member)
+    out = [f"**Что ты можешь, {member.display_name}:**"]
+    if sections:
+        out.append("🎛 **Кнопками** (`/панель` и канал панели): " + ", ".join(sections))
+    if speech:
+        out.append("🗣 **Словами Швейцару** («Швейцар, …»): " + ", ".join(speech))
+    if len(out) == 1:
+        out.append("Пока только болтать со Швейцаром. Права дают роли — спроси руководство.")
+    out.append("Подробно: `/помощь`.")
+    text = "\n\n".join(out)
+    return text if len(text) <= 1900 else text[:1890] + "…"
+
+
+class CanDoButton(discord.ui.DynamicItem[discord.ui.Button], template=r"hub:cando"):
+    """«Что я могу?» под любым отказом «не по чину»: список того, что человеку доступно."""
+
+    def __init__(self):
+        super().__init__(discord.ui.Button(label="Что я могу?", emoji="❓", style=discord.ButtonStyle.secondary,
+                                           custom_id="hub:cando"))
+
+    @classmethod
+    async def from_custom_id(cls, inter, item, match):
+        return cls()
+
+    async def callback(self, inter: discord.Interaction):
+        if not isinstance(inter.user, discord.Member):
+            return await inter.response.send_message("Спроси на сервере семьи — там видно твои роли.", ephemeral=True)
+        await inter.response.send_message(abilities_text(inter.client, inter.user), ephemeral=True,
+                                          allowed_mentions=discord.AllowedMentions.none())
+
+
+def cando_view():
+    v = discord.ui.View(timeout=None)
+    v.add_item(CanDoButton())
+    return v
 
 
 async def can_run(bot, inter, cmd):
@@ -849,5 +899,5 @@ async def _wrap(x):
 
 
 async def setup(bot):
-    bot.add_dynamic_items(SectionButton, ActionButton)
+    bot.add_dynamic_items(SectionButton, ActionButton, CanDoButton)
     await bot.add_cog(Hub(bot))

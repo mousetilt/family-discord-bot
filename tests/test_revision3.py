@@ -244,5 +244,43 @@ class MorningDigest(unittest.TestCase):
         self.assertIn("**1**", lines[-1])
 
 
+class CanDo(unittest.TestCase):
+    """«Что я могу?»: рядовой видит свои разделы и речь, руководство — больше."""
+
+    def test_abilities(self):
+        import types
+        from unittest import mock
+        import discord
+        from cogs import assistant, hub
+        from core import config
+
+        def member(roles):
+            m = mock.MagicMock(spec=discord.Member)
+            m.id, m.display_name, m.roles_keys = 5, "Петя", roles
+            m.guild = types.SimpleNamespace(owner_id=1)
+            m.guild_permissions = types.SimpleNamespace(administrator=False)
+            return m
+
+        class Bot:
+            def has(self, m, keys):
+                return bool(set(m.roles_keys) & set(keys))
+
+            def get_cog(self, name):
+                if name != "Assistant":
+                    return None
+                a = assistant.Assistant.__new__(assistant.Assistant)
+                a.bot = self
+                return a
+        bot = Bot()
+        rank = member(["member"])
+        boss = member(["leader", "member"])
+        s1, p1 = hub.abilities(bot, rank)
+        s2, p2 = hub.abilities(bot, boss)
+        self.assertLess(len(p1), len(p2))
+        self.assertLess(len(s1), len(s2))
+        self.assertIn("Что ты можешь, Петя", hub.abilities_text(bot, rank))
+        self.assertLessEqual(len(hub.abilities_text(bot, boss)), 1900)
+
+
 if __name__ == "__main__":
     unittest.main()
