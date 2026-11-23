@@ -357,5 +357,5 @@ EXTENSIONS = [
     "cogs.maintenance", "cogs.families", "cogs.control", "cogs.hub",
     "cogs.treasury", "cogs.recruit", "cogs.nickcheck",
     "cogs.automation", "cogs.garage", "cogs.errorwatch", "cogs.journal", "cogs.export",
-    "cogs.forumwatch",
+    "cogs.forumwatch", "cogs.quiz",
 ]

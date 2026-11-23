@@ -74,6 +74,7 @@ MODULES = {
     }),
     "lawyer": ("⚖️ ИИ-юрист", {
         "channel": "Отвечает в канале юриста и на упоминания",
+        "quiz": "Квиз недели по законам и правилам: 5 вопросов в общем чате (суббота), итоги в объявлениях",
     }),
     "reports": ("📊 Отчёты", {
         "digest": "Сводка Главе в ЛС",
@@ -166,7 +167,7 @@ def situational(db, gid):
     return out if len(out) >= 2 else list(config.SITUATIONAL)
 
 
-DEFAULT_OFF = {"hr:auto", "hr:nick", "auto:relay", "moderation:automod", "forum"}  # "модуль" или "модуль:действие", которые по умолчанию выключены
+DEFAULT_OFF = {"hr:auto", "hr:nick", "auto:relay", "moderation:automod", "forum", "lawyer:quiz"}  # "модуль" или "модуль:действие", которые по умолчанию выключены
 
 # старые ключи feat:* (до дерева) → новое место; старые значения читаются, если новое не задано
 LEGACY = {

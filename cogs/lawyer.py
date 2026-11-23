@@ -412,6 +412,19 @@ class Lawyer(commands.Cog):
             e.add_field(name=f"📄 {h['title'][:240]}", value=quote(h["text"], 900)[:1024], inline=False)
         await inter.response.send_message(embed=e, ephemeral=True)
 
+    @kb.command(name="квиз", description="Запустить квиз по законам и правилам прямо сейчас (итоги через 3 дня)")
+    async def kb_quiz(self, inter: discord.Interaction):
+        if not self.bot.has(inter.user, KB_STAFF):
+            return await inter.response.send_message("⛔ Недостаточно прав.", ephemeral=True)
+        quiz = self.bot.get_cog("Quiz")
+        if not quiz:
+            return await inter.response.send_message("Модуль квиза не загружен.", ephemeral=True)
+        await inter.response.defer(ephemeral=True, thinking=True)
+        ok, text = await quiz.make(inter.guild, inter.user)
+        if ok and not self.bot.feature(inter.guild, "lawyer:quiz"):
+            text += "\nЧтобы квиз выходил сам каждую субботу — `/настройки` → «ИИ-юрист» → «Квиз недели»."
+        await inter.followup.send(text if ok else f"❌ {text}", ephemeral=True)
+
     @kb.command(name="правила-проекта", description="Загрузить основные правила игрового проекта (с открытых страниц)")
     async def kb_project(self, inter: discord.Interaction):
         if not self.bot.has(inter.user, KB_STAFF):
