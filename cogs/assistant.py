@@ -1432,7 +1432,7 @@ class Assistant(commands.Cog):
                             pass
                         if music and who.voice and who.voice.channel:
                             await music.announce(g, [who.voice.channel.id], f"Напоминаю: {text}")
-                    asyncio.create_task(later())
+                    self.bot.spawn(later())
                     out.append(f"⏰ Напомню через {mins} мин.")
                 elif t in ("post", "unwarn", "expel", "kick", "ban", "nick"):
                     m = self.one(g, a)
@@ -1636,7 +1636,7 @@ class Assistant(commands.Cog):
                         out.append(f"❌ Не пойду: {why}.")
                     else:
                         report_to = self.report_target(g, a) or me
-                        asyncio.create_task(self.ask_voice(message, g, target, question, report_to))
+                        self.bot.spawn(self.ask_voice(message, g, target, question, report_to))
                         out.append(f"🎤 Иду к {target.display_name} в {target.voice.channel.mention}, спрошу — "
                                    f"ответ пришлю в ЛС {'тебе' if report_to.id == me.id else report_to.display_name}.")
                 elif t == "music_play" and music:

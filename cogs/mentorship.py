@@ -369,7 +369,7 @@ class Mentorship(commands.Cog):
                               message.guild.id, ch.id)
         if not row or row["newbie_id"] != message.author.id:
             return
-        asyncio.create_task(self.ai_answer_later(message, row))
+        self.bot.spawn(self.ai_answer_later(message, row))
 
     async def ai_answer_later(self, message, row):
         await asyncio.sleep(self.AI_WAIT)

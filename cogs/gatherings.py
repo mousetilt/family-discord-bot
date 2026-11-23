@@ -403,7 +403,7 @@ class Gatherings(commands.Cog):
         music = self.bot.get_cog("Music")
         if music:
             place = f" Место: {where}." if where else ""
-            asyncio.create_task(music.announce(guild, [c.id for c in music.voice_targets(guild)],
+            self.bot.spawn(music.announce(guild, [c.id for c in music.voice_targets(guild)],
                                                text=f"Внимание, семья! Объявлен сбор: {what}. Время: {when}.{place} "
                                                     "Отметьтесь в канале сборов."))
             auto = self.bot.get_cog("Automation")
@@ -416,7 +416,7 @@ class Gatherings(commands.Cog):
                     targets = [c.id for c in music.voice_targets(guild)]
                     await music.announce(guild, targets, siren=False,
                                          text=f"Сбор семьи начинается! {what}.{place} Все, кто отметился, — на выход!")
-                asyncio.create_task(later())
+                self.bot.spawn(later())
         return msg
 
 

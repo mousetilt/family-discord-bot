@@ -190,7 +190,7 @@ class Security(commands.Cog):
                                          "входа — высокая. Выключить: `/защита рейд выключить`.")
             music = self.bot.get_cog("Music")
             if music:
-                asyncio.create_task(music.alarm(g, "Внимание! Тревога! На сервер семьи идёт рейд. "
+                self.bot.spawn(music.alarm(g, "Внимание! Тревога! На сервер семьи идёт рейд. "
                                                    "Руководству срочно проверить Discord."))
         if self.raid_active(g):
             age = (now() - member.created_at).days

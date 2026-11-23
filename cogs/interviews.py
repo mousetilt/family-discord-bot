@@ -129,7 +129,7 @@ class Interviews(commands.Cog):
         g = member.guild
         app = self.app(member)
         if not app:
-            asyncio.create_task(self.greet(member, None, None))  # голос — вне блокировки, чтобы не тормозить переносы
+            self.bot.spawn(self.greet(member, None, None))  # голос — вне блокировки, чтобы не тормозить переносы
             return
         reviewer = g.get_member(app["reviewer_id"]) if app["reviewer_id"] else None
         rooms = self.rooms(g)
@@ -140,7 +140,7 @@ class Interviews(commands.Cog):
             room, rec = self.free_room(g)
             if room and await self.move(member, room, rec, app):
                 return
-        asyncio.create_task(self.greet(member, app, reviewer))
+        self.bot.spawn(self.greet(member, app, reviewer))
 
     async def on_staff_room(self, staff, room):
         waiting = self.bot.ch(staff.guild, "waiting")

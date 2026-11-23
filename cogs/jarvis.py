@@ -298,7 +298,7 @@ class Listener:
                         # «слушаю», а в войсе меня нет (выкинули, оборвалась связь) — честно выключаемся,
                         # чтобы /швейцар потом включил всё с чистого листа
                         log.warning("Голосовой Швейцар: 20 с нет связи с войсом — выключаю прослушивание")
-                        asyncio.create_task(self.cog.stop(self.guild, "потерял связь с голосовым каналом"))
+                        self.bot.spawn(self.cog.stop(self.guild, "потерял связь с голосовым каналом"))
                         return
                     await asyncio.sleep(0.5)
                     continue
@@ -458,7 +458,7 @@ class Listener:
                         continue
                     self.enqueue(uid, pcm)
             if not self.temp and t - self.last_cmd > self.idle_stop:
-                asyncio.create_task(self.cog.stop(self.guild, "30 минут без команд"))
+                self.bot.spawn(self.cog.stop(self.guild, "30 минут без команд"))
                 return True
             return False
 
@@ -844,7 +844,7 @@ class Jarvis(commands.Cog):
         li = self.listeners[guild.id] = Listener(self, guild, ch.id, member.id)
         if inter is not None:
             li.inter, li.inter_at = inter, time.monotonic()
-        asyncio.create_task(self.say(guild, hello or random.choice(HELLO)))
+        self.bot.spawn(self.say(guild, hello or random.choice(HELLO)))
         return (f"🎙 Слушаю команды в {ch.mention}. Говори: «Швейцар, …». Первые 15 минут что услышал и что сделал "
                 "покажу здесь (видишь только ты), дальше — только голосом. В чат ничего не пишу.\n"
                 "Серьёзное (мут, выговор…) подтверждай голосом: «Швейцар, да» / «Швейцар, нет». "
@@ -861,7 +861,7 @@ class Jarvis(commands.Cog):
             if not li:
                 return res
         else:
-            asyncio.create_task(self.say(guild, "Веду протокол собрания. Всё, что здесь говорят, записывается."))
+            self.bot.spawn(self.say(guild, "Веду протокол собрания. Всё, что здесь говорят, записывается."))
         li.minutes = []
         li.idle_stop = max(li.idle_stop, 3 * 3600)
         return ("📝 Веду протокол в <#%d>. Все в канале предупреждены голосом. Закончить: «Швейцар, закончи протокол». "
@@ -963,7 +963,7 @@ class Jarvis(commands.Cog):
         g = member.guild
         if member.id == self.bot.user.id:
             if before.channel and not after.channel:
-                asyncio.create_task(self.kicked(g, li))  # отключили вручную или оборвалась связь
+                self.bot.spawn(self.kicked(g, li))  # отключили вручную или оборвалась связь
                 return
             if after.channel and before.channel != after.channel:
                 li.reset(after.channel.id)  # бота перенесли (или он перешёл сам) — слушаем в новом канале
@@ -977,7 +977,7 @@ class Jarvis(commands.Cog):
                 and member.id != li.owner:
             persona = self.bot.get_cog("Persona")
             if persona:
-                asyncio.create_task(persona.greet(g, member))  # иногда встречаем входящих личной фразой
+                self.bot.spawn(persona.greet(g, member))  # иногда встречаем входящих личной фразой
         if member.id == li.owner and after.channel and before.channel != after.channel \
                 and after.channel.id != li.channel_id:
             afk = self.bot.ch(g, "afk")

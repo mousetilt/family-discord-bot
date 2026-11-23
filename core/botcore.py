@@ -162,6 +162,25 @@ class FamilyBot(commands.Bot):
         global _BRAND
         _BRAND = self.brand
 
+    # ---------- фоновые задачи ----------
+    def spawn(self, coro, name=None):
+        """Фоновая задача «запустил и забыл», но под присмотром: ссылка хранится (иначе сборщик мусора может
+        прибить задачу на середине), упавшая — пишется в журнал ошибок (→ отчёт разработчику), а не теряется молча."""
+        task = asyncio.get_running_loop().create_task(coro, name=name)
+        tasks = self.__dict__.setdefault("_bg_tasks", set())
+        tasks.add(task)
+        task.add_done_callback(self._bg_done)
+        return task
+
+    def _bg_done(self, task):
+        self.__dict__.get("_bg_tasks", set()).discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("Фоновая задача %s упала", task.get_coro().__qualname__ if task.get_coro() else task.get_name(),
+                      exc_info=exc)
+
     # ---------- свой сервер и серверы союзников ----------
     @property
     def home_id(self):

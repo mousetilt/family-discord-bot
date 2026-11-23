@@ -482,7 +482,7 @@ class Lawyer(commands.Cog):
             return await inter.response.send_message("Файл больше 8 МБ.", ephemeral=True)
         await inter.response.defer(ephemeral=True, thinking=True)
         try:
-            content = read_file(file.filename, await file.read())
+            content = await asyncio.to_thread(read_file, file.filename, await file.read())  # PDF — не в цикле событий
         except Exception as e:
             return await inter.followup.send(f"❌ Не смог прочитать файл: {e}", ephemeral=True)
         if len(content) < 20:

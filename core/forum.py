@@ -453,16 +453,16 @@ class ForumClient:
             return await _get(self.session, url)
 
     async def forum_page(self, fid, page=1):
-        return parse_forum_list(await self.get(f"{BASE}/forums/{fid}/" + (f"page-{page}" if page > 1 else "")))
+        return await asyncio.to_thread(parse_forum_list, await self.get(f"{BASE}/forums/{fid}/" + (f"page-{page}" if page > 1 else "")))
 
     async def thread(self, tid, latest=False):
-        return parse_thread_page(await self.get(f"{BASE}/threads/{tid}/" + ("latest" if latest else "")))
+        return await asyncio.to_thread(parse_thread_page, await self.get(f"{BASE}/threads/{tid}/" + ("latest" if latest else "")))
 
     async def document(self, tid, max_pages=10):
         """Тема-документ (закон, указ, форма): все посты автора темы, до max_pages страниц → (название, текст)."""
         base = f"{BASE}/threads/{tid}/"
-        title, author, posts, pages = parse_thread(await self.get(base))
+        title, author, posts, pages = await asyncio.to_thread(parse_thread, await self.get(base))
         for p in range(2, min(pages, max_pages) + 1):
-            _, _, more, _ = parse_thread(await self.get(f"{base}page-{p}"), author)
+            _, _, more, _ = await asyncio.to_thread(parse_thread, await self.get(f"{base}page-{p}"), author)
             posts += more
         return title, "\n\n".join(posts).strip()

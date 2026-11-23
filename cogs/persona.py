@@ -233,7 +233,7 @@ class Persona(commands.Cog):
                 self.why.pop(m.id, None)
                 self.last_visit[g.id], self.visited[m.id] = t, t
                 log.warning("Проведать: захожу к %s в «%s»", m.display_name, ch.name)
-                asyncio.create_task(self.visit(g, m, ch))
+                self.bot.spawn(self.visit(g, m, ch))
         for uid in [u for u in self.alone if u not in seen]:
             self.alone.pop(uid, None)
             self.why.pop(uid, None)
@@ -303,7 +303,7 @@ class Persona(commands.Cog):
             return
         if now_ts - last < CATCHUP_HOURS * 3600 or not self.bot.feature(g, "persona:catchup"):
             return
-        asyncio.create_task(self.catchup(member, min(72, (now_ts - last) // 3600)))
+        self.bot.spawn(self.catchup(member, min(72, (now_ts - last) // 3600)))
 
     async def catchup(self, member, hours):
         await asyncio.sleep(6)  # дать человеку зайти и осмотреться

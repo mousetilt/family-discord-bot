@@ -467,11 +467,11 @@ async def _fetch(s, url, max_pages):
     if m:
         base = m.group(1) + "/"
         html = await _get(s, base)
-        title, author, posts, pages = parse_thread(html)
+        title, author, posts, pages = await asyncio.to_thread(parse_thread, html)  # разбор — не в цикле событий
         for p in range(2, min(pages, max_pages) + 1):
             await asyncio.sleep(PAGE_PAUSE)
             try:
-                _, _, more, _ = parse_thread(await _get(s, f"{base}page-{p}"), author)
+                _, _, more, _ = await asyncio.to_thread(parse_thread, await _get(s, f"{base}page-{p}"), author)
                 posts += more
             except FetchBlocked:
                 raise  # не сохраняем полдокумента вместо целого — пусть останется старая версия
@@ -482,7 +482,7 @@ async def _fetch(s, url, max_pages):
             raise ValueError("Не нашёл текст в теме — возможно, она закрыта для гостей.")
         return title, content, base
     html = await _get(s, url)
-    title, content = parse_generic(html)
+    title, content = await asyncio.to_thread(parse_generic, html)
     if len(content) < 50:
         raise ValueError("На странице почти нет текста.")
     return title, content[:300000], url

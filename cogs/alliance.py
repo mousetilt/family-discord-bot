@@ -1350,7 +1350,7 @@ class Alliance(commands.Cog):
         music = self.bot.get_cog("Music")
         home = self.home()
         if music and home:
-            asyncio.create_task(music.alarm(home, f"Тревога альянса! Семья {row['family']} просит помощи. {text[:200]}"))
+            self.bot.spawn(music.alarm(home, f"Тревога альянса! Семья {row['family']} просит помощи. {text[:200]}"))
         await self.record(f"🚨 Тревога от семьи **{row['family']}**: {text[:300]}")
         await inter.followup.send("🚨 Тревога разослана всем семьям альянса.", ephemeral=True)
 

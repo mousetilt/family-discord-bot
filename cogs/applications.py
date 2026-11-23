@@ -574,7 +574,7 @@ class Applications(commands.Cog):
         db.q("UPDATE applications SET message_id=? WHERE id=?", msg.id, app_id)
         self.refresh_panel(inter.guild)
         if bot.ai_for(inter.guild).on:
-            asyncio.create_task(self.ai_review(inter.guild, app_id, msg, inter.user))
+            self.bot.spawn(self.ai_review(inter.guild, app_id, msg, inter.user))
 
     def history_facts(self, guild, a, user):
         """Проверенные факты о кандидате из НАШЕЙ базы (только этот сервер): прошлые заявки, отказы и причины, был ли
@@ -741,7 +741,7 @@ class Applications(commands.Cog):
         """Счётчики заявок на закреплённой панели канала заявок."""
         hub = self.bot.get_cog("Hub")
         if hub:
-            asyncio.create_task(hub.refresh_channel(g, "review"))
+            self.bot.spawn(hub.refresh_channel(g, "review"))
 
     # ---------- ручной приём (минуя экзамен) ----------
     async def manual_accept(self, g, by, member, nick=None, static=None):

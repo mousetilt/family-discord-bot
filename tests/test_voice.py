@@ -32,10 +32,9 @@ class Catchup(unittest.TestCase):
 
     def run_event(self, persona, member, before, after):
         import asyncio
-        from unittest import mock
         started = []
-        with mock.patch("asyncio.create_task", lambda coro: (started.append(coro), coro.close())):
-            asyncio.run(persona.on_voice_state_update(member, before, after))
+        persona.bot.spawn = lambda coro, name=None: (started.append(coro), coro.close())
+        asyncio.run(persona.on_voice_state_update(member, before, after))
         return started
 
     def test_trigger(self):

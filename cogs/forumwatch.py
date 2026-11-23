@@ -229,7 +229,7 @@ class AccountModal(discord.ui.Modal, title="Общий аккаунт форум
             "Первая проверка уже идёт (первый раз — дольше: смотрю последние 30 дней).\n"
             "Пароль и сессия хранятся зашифрованными (ключ — в окружении хоста, не в базе), бот только читает форум.",
             ephemeral=True)
-        asyncio.create_task(cog.check_safe(g, manual=True))
+        cog.bot.spawn(cog.check_safe(g, manual=True))
 
 
 class ForumWatch(commands.Cog):
@@ -1135,7 +1135,7 @@ class ForumWatch(commands.Cog):
                 pass
             except Exception:  # noqa: BLE001
                 log.exception("forumwatch: свежая проверка — отчёт не собрался")
-        asyncio.create_task(run())
+        self.bot.spawn(run())
         return "🔄 Запустил свежую проверку форума — допишу сюда через пару минут."
 
     def remember(self, g, fid, it, cutoff):

@@ -310,5 +310,32 @@ class GatheringsCalendar(unittest.TestCase):
         self.assertIn("Завтра", rows[1])
 
 
+class Spawn(unittest.TestCase):
+    """bot.spawn: упавшая фоновая задача попадает в журнал ошибок, ссылка не теряется."""
+
+    def test_error_logged(self):
+        import logging
+        from core.botcore import FamilyBot
+
+        async def boom():
+            raise RuntimeError("упал")
+
+        async def ok():
+            return 1
+
+        async def run():
+            bot = FamilyBot.__new__(FamilyBot)
+            t1, t2 = bot.spawn(boom()), bot.spawn(ok())
+            self.assertEqual(len(bot._bg_tasks), 2)
+            await asyncio.gather(t1, t2, return_exceptions=True)
+            await asyncio.sleep(0)
+            return bot
+
+        with self.assertLogs("family-bot", level=logging.ERROR) as cm:
+            bot = asyncio.run(run())
+        self.assertTrue(any("boom" in m for m in cm.output))
+        self.assertEqual(len(bot._bg_tasks), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
