@@ -61,7 +61,7 @@ MENTOR_DAYS = _int("MENTOR_DAYS", 7)
 MARKET_DAYS = _int("MARKET_DAYS", 7)
 GATHER_UTC_OFFSET = _int("GATHER_UTC_OFFSET", 3)   # часовой пояс времени сборов: 3 = Москва
 WARN_DAYS = _int("WARN_DAYS", 7)                   # выговор снимается сам через столько дней без новых (0 — никогда)
-DIGEST_DAYS = _int("DIGEST_DAYS", 2)               # сводка Главе в ЛС раз в столько суток (0 — выключить)
+DIGEST_DAYS = _int("DIGEST_DAYS", 1)               # сводка Главе в ЛС раз в столько суток (0 — выключить)
 
 ASSETS = BASE_DIR / "assets"
 FONTS = ASSETS / "fonts"

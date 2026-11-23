@@ -206,5 +206,43 @@ class CommandGroups(unittest.TestCase):
             self.assertIn(cmd, qn, f"кнопка панели {key} ведёт на несуществующую команду /{cmd}")
 
 
+class MorningDigest(unittest.TestCase):
+    """Утренняя сводка: сборы на сутки, новые дела форума."""
+
+    def test_today_and_forum(self):
+        import json
+        import time
+        import types
+        from cogs import daily
+        from cogs.forumwatch import SCHEMA as FSCHEMA
+        from core.db import DB
+        db = DB(":memory:")
+        db.c.executescript(FSCHEMA)
+        t = int(time.time())
+        db.q("INSERT INTO events(message_id, guild_id, data, created_at) VALUES(1, 7, ?, '')",
+             json.dumps({"what": "Стрела", "ts": t + 3600, "yes": [1, 2]}))
+        db.q("INSERT INTO events(message_id, guild_id, data, created_at) VALUES(2, 7, ?, '')",
+             json.dumps({"what": "Через неделю", "ts": t + 7 * 86400, "yes": []}))
+        db.q("INSERT INTO forum_cases(guild_id, thread_id, title, url, role, status, created_ts) "
+             "VALUES(7, 5, 'Иск к Ульянову', 'https://f/5', 'defendant', 'pending', ?)", t)
+
+        class FW:
+            def case_status(self, g, c):
+                return c["status"]
+
+        bot = types.SimpleNamespace(db=db, get_cog=lambda n: FW() if n == "ForumWatch" else None,
+                                    feature=lambda g, k: True)
+        d = daily.Daily.__new__(daily.Daily)
+        d.bot = bot
+        g = types.SimpleNamespace(id=7)
+        today = d.today_events(g)
+        self.assertEqual(len(today), 1)
+        self.assertIn("Стрела", today[0])
+        self.assertIn("идут: 2", today[0])
+        lines = d.forum_lines(g, "2000-01-01T00:00:00+00:00")
+        self.assertIn("Иск к Ульянову", lines[0])
+        self.assertIn("**1**", lines[-1])
+
+
 if __name__ == "__main__":
     unittest.main()

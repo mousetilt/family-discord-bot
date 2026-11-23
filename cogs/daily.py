@@ -427,6 +427,12 @@ class Daily(commands.Cog):
             e.add_field(name=f"⚠️ На грани неактива ({len(risky)})",
                         value="\n".join(f"{m.mention} — {r}" for m, r in risky[:8])[:1000]
                         + "\nНаписать им: «Швейцар, кто на грани неактива» → кнопка «Написать им в ЛС»", inline=False)
+        today = self.today_events(guild)
+        if today:
+            e.add_field(name=f"📅 Ближайшие сутки ({len(today)})", value="\n".join(today)[:1024], inline=False)
+        forum = self.forum_lines(guild, since)
+        if forum:
+            e.add_field(name="⚖️ Суды и жалобы", value="\n".join(forum)[:1024], inline=False)
         warns = db.all("SELECT user_id, COUNT(*) n FROM warns WHERE guild_id=? AND active=1 GROUP BY user_id "
                        "ORDER BY n DESC", gid)
         if warns:
@@ -448,6 +454,55 @@ class Daily(commands.Cog):
         e.set_footer(text=f"Сводка приходит раз в {every or '—'} сут. · {bot.brand(guild, config.FOOTER)}")
         return e
 
+    def today_events(self, guild):
+        """Сборы и отложенные объявления на ближайшие 24 часа — строками."""
+        import json
+        t0 = int(now().timestamp())
+        out = []
+        for r in self.bot.db.all("SELECT message_id, data FROM events WHERE guild_id=?", guild.id):
+            try:
+                d = json.loads(r["data"])
+            except (TypeError, ValueError):
+                continue
+            ts = d.get("ts")
+            if isinstance(ts, int) and t0 - 600 <= ts <= t0 + 86400:
+                out.append((ts, f"📣 <t:{ts}:t> {str(d.get('what', 'сбор'))[:60]} — идут: {len(d.get('yes') or [])}"))
+        try:
+            for r in self.bot.db.all("SELECT title, text, run_at FROM scheduled WHERE guild_id=? AND status='wait' "
+                                     "AND run_at BETWEEN ? AND ?", guild.id, t0, t0 + 86400):
+                out.append((r["run_at"], f"🗓 <t:{r['run_at']}:t> объявление: {(r['title'] or r['text'] or '')[:60]}"))
+        except Exception:  # noqa: BLE001 — модуля автоматизации может не быть
+            pass
+        return [s for _, s in sorted(out)][:8]
+
+    def forum_lines(self, guild, since_iso):
+        """Новые дела на форуме за период и сколько ещё на рассмотрении против семьи."""
+        fw = self.bot.get_cog("ForumWatch")
+        if not fw or not self.bot.feature(guild, "forum"):
+            return []
+        try:
+            border = int(parse_dt(since_iso).timestamp())
+            rows = self.bot.db.all("SELECT * FROM forum_cases WHERE guild_id=? AND role='defendant'", guild.id)
+        except Exception:  # noqa: BLE001
+            return []
+        fresh = [r for r in rows if (r["created_ts"] or 0) >= border]
+        open_ = [r for r in rows if fw.case_status(guild, r) == "pending"]
+        out = [f"🆕 [{(r['title'] or 'дело')[:60]}]({r['url']})" if r["url"] else f"🆕 {(r['title'] or 'дело')[:60]}"
+               for r in fresh[:5]]
+        if open_:
+            out.append(f"⏳ На рассмотрении против семьи: **{len(open_)}**")
+        return out
+
+    def digest_view(self, guild):
+        """Кнопки-ссылки на каналы: работают и в ЛС (там у кнопок действий нет сервера)."""
+        v = discord.ui.View(timeout=None)
+        for key, label in (("review", "📥 Заявки"), ("appeals", "📬 Обращения"), ("forumwatch", "⚖️ Суды"),
+                           ("botcmd", "🔧 Бот-команды")):
+            c = self.bot.ch(guild, key)
+            if c:
+                v.add_item(discord.ui.Button(label=label, url=c.jump_url))
+        return v if v.children else None
+
     async def digest(self, guild):
         every = self.bot.num(guild, "digest_days")
         if every <= 0 or not self.bot.feature(guild, "reports:digest"):
@@ -462,15 +517,18 @@ class Daily(commands.Cog):
         if not targets and guild.owner:
             targets = [guild.owner]
         e = self.build_digest(guild)
+        v = self.digest_view(guild)
         for m in targets:
-            await safe_dm(m, embed=e)
+            await safe_dm(m, embed=e, **({"view": v} if v else {}))
 
     @app_commands.command(name="сводка", description="Сводка по семье: заявки, обращения, сроки, неактив, выговоры")
     @app_commands.default_permissions(manage_messages=True)
     async def digest_cmd(self, inter: discord.Interaction):
         if not self.bot.has(inter.user, config.LEAD):
             return await inter.response.send_message("⛔ Только для руководства.", ephemeral=True)
-        await inter.response.send_message(embed=self.build_digest(inter.guild), ephemeral=True)
+        v = self.digest_view(inter.guild)
+        await inter.response.send_message(embed=self.build_digest(inter.guild), ephemeral=True,
+                                          **({"view": v} if v else {}))
 
 
 async def setup(bot):
