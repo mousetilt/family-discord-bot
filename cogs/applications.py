@@ -807,6 +807,10 @@ class Applications(commands.Cog):
         cur = db.one("SELECT status FROM applications WHERE id=?", app_id)
         if not cur or cur["status"] not in OPEN:  # пока писали причину, заявку уже принял/отклонил другой
             return await inter.response.send_message("Заявка уже закрыта.", ephemeral=True)
+        try:  # ЛС и журнал дольше 3 с — сначала отвечаем Discord, иначе 10062 Unknown interaction
+            await inter.response.defer()
+        except discord.HTTPException:
+            pass
         db.q("UPDATE applications SET status='denied', reviewer_id=?, deny_reason=?, decided_at=? WHERE id=?",
              inter.user.id, reason, now_iso(), app_id)
         self.stat(inter.guild, app_id, inter.user.id, "denied")
@@ -818,7 +822,14 @@ class Applications(commands.Cog):
         self.refresh_panel(inter.guild)
         await bot.log(inter.guild, f"❌ Заявка №{app_id} (<@{a['user_id']}>) отклонена — {inter.user.mention}: {reason}",
                       "hrlog", config.RED)
-        await inter.response.edit_message(embed=app_embed(bot, a, member, inter.guild), view=app_view(app_id, True))
+        try:
+            if inter.message:
+                await inter.message.edit(embed=app_embed(bot, a, member, inter.guild), view=app_view(app_id, True))
+            else:
+                await inter.edit_original_response(embed=app_embed(bot, a, member, inter.guild),
+                                                   view=app_view(app_id, True))
+        except discord.HTTPException:
+            pass
 
     # ---------- команды ----------
     @app_commands.default_permissions(move_members=True)

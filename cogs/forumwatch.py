@@ -16,6 +16,7 @@ import logging
 import re
 import time
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -549,6 +550,9 @@ class ForumWatch(commands.Cog):
     async def check_safe(self, g, manual=False):
         try:
             return await self.check(g, manual)
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:  # форум не ответил — сеть, не баг; следующий цикл повторит
+            log.warning("forumwatch: форум не ответил (%s)", type(e).__name__)
+            return "⏳ Форум не ответил вовремя — попробую в следующий раз."
         except Exception:  # noqa: BLE001
             log.exception("forumwatch: проверка упала")
             return "❌ Проверка упала — ошибка ушла разработчику."
