@@ -65,5 +65,66 @@ class PublicUrl(unittest.TestCase):
                 asyncio.run(check_public_url(u))
 
 
+class Health(unittest.TestCase):
+    """/семья проверка: находит проблемы и предлагает правильную кнопку."""
+
+    def make(self, built=True, keys=None):
+        import types
+        from core.ai import AI
+        from core.db import DB
+        db = DB(":memory:")
+        perms = types.SimpleNamespace(administrator=True)
+        top = types.SimpleNamespace(position=99)
+        guild = types.SimpleNamespace(guild_id=7, id=7, roles=[], channels=[],
+                                      me=types.SimpleNamespace(guild_permissions=perms, top_role=top))
+        if built:
+            db.gset(7, "role:leader", 1)
+
+        class Bot:
+            intents = types.SimpleNamespace(members=True)
+
+            def __init__(self):
+                self.db = db
+
+            def feature(self, g, k):
+                return k in ("lawyer", "forum")
+
+            def role(self, g, k):
+                return object() if k != "treasurer" else None
+
+            def ch(self, g, k):
+                return None if k == "news" else object()
+
+            def is_home(self, g):
+                return False
+
+            def ai_for(self, g):
+                return AI(db, keys=keys or {}, scope=7)
+        return Bot(), guild
+
+    def test_not_built(self):
+        from core import health
+        bot, g = self.make(built=False)
+        items = health.check(bot, g)
+        self.assertTrue(any(i.fix == "wizard" and i.level == health.BAD for i in items))
+
+    def test_problems(self):
+        from core import health
+        bot, g = self.make()
+        items = health.check(bot, g)
+        fixes = {i.fix for i in items if i.level != health.OK}
+        self.assertTrue({"ai", "build", "profile"} <= fixes, fixes)
+        text = health.render(items)
+        self.assertIn("форума", text)
+        self.assertIn("База юриста", text)
+        self.assertTrue(health.summary(items).startswith("❌"))
+
+    def test_ai_ok(self):
+        from core import health
+        bot, g = self.make(keys={"groq": "q", "gemini": "g"})
+        items = health.check(bot, g)
+        self.assertFalse(any(i.fix == "ai" for i in items))
+
+
 if __name__ == "__main__":
     unittest.main()

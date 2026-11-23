@@ -5,6 +5,7 @@
 /семья профиль    — название семьи, родительный падеж, игровой сервер, титул для пиара.
 /семья роли       — привязать УЖЕ существующие роли сервера к ролям бота (бот подсказывает по названиям);
                     привязанные роли /настройка не пересоздаёт и их права не трогает.
+/семья проверка   — всё, что мешает боту работать, одним экраном + кнопки «исправить» (core/health.py).
 /семья отключить  — выключить (данные не удаляются, можно подключить обратно)."""
 import logging
 import re
@@ -14,7 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from core import config
+from core import config, health
 from core.family import FIELDS
 
 log = logging.getLogger("family-bot.families")
@@ -87,6 +88,66 @@ class ProfileModal(discord.ui.Modal, title="Профиль семьи"):
         await inter.response.send_message(
             f"✅ Профиль сохранён: семья **{vals['name']}** (семья {vals['gen']}), сервер **{vals['server']}**, "
             f"титул «{vals['title']}».\nДальше: `/семья роли` (если роли уже есть) → `/настройка`.", ephemeral=True)
+
+
+# ─────────────── проверка («здоровье» семьи) ───────────────
+FIXES = {"wizard": "🧙 Мастер настройки", "profile": "📝 Профиль", "roles": "🎭 Роли", "build": "🏗 Собрать сервер",
+         "ai": "🔑 Ключ ИИ"}
+
+
+def health_embed(bot, guild, items):
+    e = discord.Embed(title=f"🩺 Проверка — {health.summary(items)}", description=health.render(items),
+                      color=0xE53935 if any(i.level == health.BAD for i in items) else
+                      0xFDD835 if any(i.level == health.WARN for i in items) else 0x43A047)
+    e.set_footer(text="Кнопки ниже исправляют то, что можно исправить отсюда. Остальное — подсказка в строке.")
+    return e
+
+
+class HealthView(discord.ui.View):
+    def __init__(self, bot, guild, items):
+        super().__init__(timeout=600)
+        self.bot = bot
+        need = [f for f in FIXES if any(i.fix == f for i in items)]
+        for f in need[:4]:
+            b = discord.ui.Button(label=FIXES[f], style=discord.ButtonStyle.primary)
+            b.callback = self.make(f)
+            self.add_item(b)
+        again = discord.ui.Button(label="🔄 Проверить снова", style=discord.ButtonStyle.secondary)
+        again.callback = self.again
+        self.add_item(again)
+
+    async def interaction_check(self, inter):
+        if can_manage(self.bot, inter):
+            return True
+        await inter.response.send_message("⛔ Только для Главы, заместителя или владельца сервера.", ephemeral=True)
+        return False
+
+    async def again(self, inter):
+        items = health.check(self.bot, inter.guild)
+        await inter.response.edit_message(embed=health_embed(self.bot, inter.guild, items),
+                                          view=HealthView(self.bot, inter.guild, items))
+
+    def make(self, fix):
+        async def run(inter):
+            bot, g = self.bot, inter.guild
+            if fix == "profile":
+                return await inter.response.send_modal(ProfileModal(bot, g))
+            if fix == "roles":
+                return await inter.response.send_message(render_map(bot, g), view=RoleMapView(bot, g), ephemeral=True,
+                                                         allowed_mentions=discord.AllowedMentions.none())
+            if fix == "ai":
+                from cogs.control import KeyModal
+                return await inter.response.send_modal(KeyModal(bot))
+            setup = bot.get_cog("ServerSetup")
+            if not setup:
+                return await inter.response.send_message("Модуль сборки сервера не загружен.", ephemeral=True)
+            if fix == "build":
+                if not inter.user.guild_permissions.administrator:
+                    return await inter.response.send_message("⛔ Собрать сервер может только администратор.",
+                                                             ephemeral=True)
+                return await setup.build(inter)
+            return await setup.open_wizard(inter)
+        return run
 
 
 # ─────────────── привязка ролей ───────────────
@@ -411,6 +472,17 @@ class Families(commands.Cog):
             return await inter.response.send_message("⛔ Только для Главы, заместителя или владельца сервера.",
                                                      ephemeral=True)
         await inter.response.send_modal(ProfileModal(self.bot, inter.guild))
+
+    @group.command(name="проверка", description="Что мешает боту работать у семьи — и кнопки, чтобы исправить")
+    async def health_cmd(self, inter: discord.Interaction):
+        if not self.bot.is_family(inter.guild):
+            return await inter.response.send_message("Сначала подключи семью: `/семья подключить`.", ephemeral=True)
+        if not can_manage(self.bot, inter):
+            return await inter.response.send_message("⛔ Только для Главы, заместителя или владельца сервера.",
+                                                     ephemeral=True)
+        items = health.check(self.bot, inter.guild)
+        await inter.response.send_message(embed=health_embed(self.bot, inter.guild, items),
+                                          view=HealthView(self.bot, inter.guild, items), ephemeral=True)
 
     @group.command(name="роли", description="Привязать существующие роли сервера к ролям бота")
     async def roles(self, inter: discord.Interaction):

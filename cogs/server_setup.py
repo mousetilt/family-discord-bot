@@ -537,15 +537,18 @@ class WizardView(discord.ui.View):
         await inter.response.send_modal(KeyModal(bot))
 
     async def s_audit(self, inter):
-        lines, _ = audit(inter.client, inter.guild)
-        v = discord.ui.View(timeout=600)
+        from cogs.families import HealthView, health_embed
+        from core import health
+        items = health.check(inter.client, inter.guild)  # полная проверка, как /семья проверка
+        v = HealthView(inter.client, inter.guild, items)
         b = discord.ui.Button(label="Права по каналам", emoji="🔐", style=discord.ButtonStyle.secondary)
 
         async def perms(i):
             await self.cog.perms_cmd.callback(self.cog, i)
         b.callback = perms
         v.add_item(b)
-        await inter.response.send_message("**🔐 Проверка сервера**\n" + "\n".join(lines), view=v, ephemeral=True)
+        await inter.response.send_message(embed=health_embed(inter.client, inter.guild, items), view=v,
+                                          ephemeral=True)
 
     async def s_build(self, inter):
         if not inter.user.guild_permissions.administrator:
