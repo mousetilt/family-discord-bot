@@ -8,7 +8,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from core import config
-from core.botcore import guarded, now, now_iso, safe_dm, staff_only
+from core.botcore import answer_after, guarded, now, now_iso, safe_dm, staff_only
 
 
 LIMIT_ACTS = {"expel": ("Исключить", "🚪", discord.ButtonStyle.danger),
@@ -312,7 +312,7 @@ class Staff(commands.Cog):
     @app_commands.command(name="отпуск", description="Уйти в отпуск (не будешь считаться неактивным)")
     @app_commands.rename(days="дней", reason="причина")
     async def vacation(self, inter: discord.Interaction, days: app_commands.Range[int, 1, 60], reason: str):
-        await inter.response.send_message(await self.start_vacation(inter.guild, inter.user, days, reason), ephemeral=True)
+        await answer_after(inter, self.start_vacation(inter.guild, inter.user, days, reason), ephemeral=True)
 
     async def start_vacation(self, guild, member, days, reason):
         """Отпуск (команда, кнопка и речь «ухожу в отпуск на неделю»). → текст ответа."""
@@ -343,7 +343,7 @@ class Staff(commands.Cog):
     @app_commands.default_permissions(manage_messages=True)  # участникам — кнопкой (панель) или речью
     @app_commands.command(name="вернулся", description="Вернуться из отпуска")
     async def back(self, inter: discord.Interaction):
-        await inter.response.send_message(await self.end_vacation(inter.guild, inter.user), ephemeral=True)
+        await answer_after(inter, self.end_vacation(inter.guild, inter.user), ephemeral=True)
 
     @tasks.loop(hours=1)
     @guarded

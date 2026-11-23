@@ -16,7 +16,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from core import config
-from core.botcore import guarded, staff_only
+from core.botcore import answer_after, guarded, staff_only
 
 log = logging.getLogger("family-bot.nick")
 NAME = r"[A-Za-zА-Яа-яЁё]+(?:-[A-Za-zА-Яа-яЁё]+)?"
@@ -75,7 +75,7 @@ class NickModal(discord.ui.Modal, title="Ник на сервере семьи")
         self.add_item(self.nick)
 
     async def on_submit(self, inter: discord.Interaction):
-        await inter.response.send_message(await self.cog.fix_from_dm(inter.user, self.nick.value, self.gid),
+        await answer_after(inter, self.cog.fix_from_dm(inter.user, self.nick.value, self.gid),
                                           ephemeral=inter.guild is not None)
 
 
@@ -116,7 +116,7 @@ class NickUseButton(discord.ui.DynamicItem[discord.ui.Button], template=r"nick:u
         if not nick:
             return await inter.response.send_message("Не нашёл ник из анкеты — нажми «Указать ник».",
                                                      ephemeral=inter.guild is not None)
-        await inter.response.send_message(await cog.apply(m, nick, "готовый ник из анкеты"),
+        await answer_after(inter, cog.apply(m, nick, "готовый ник из анкеты"),
                                           ephemeral=inter.guild is not None)
 
 

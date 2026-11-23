@@ -22,6 +22,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from core import config
+from core.botcore import guarded
 from core.family import set_module
 from core.forum import (BASE, HEAD_TITLES, KIND_ICON, LAW_SECTIONS, ROLE_RANK, SECTIONS, STATUS, ForumClient,
                         LoginError, analyze, case_number, find_person, norm, status_from, surname_rx, surname_stem,
@@ -1393,6 +1394,7 @@ class ForumWatch(commands.Cog):
                 pass
 
     @tasks.loop(minutes=1)
+    @guarded
     async def watch_loop(self):
         db = self.bot.db
         for g in list(self.bot.home_guilds):

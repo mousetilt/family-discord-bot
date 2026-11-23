@@ -31,7 +31,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from core import config
-from core.botcore import guarded
+from core.botcore import answer_after, guarded
 
 log = logging.getLogger("family-bot.maintenance")
 REMOTE_CHANGELOG = "https://raw.githubusercontent.com/mousetilt/family-discord-bot/main/data/changelog.json"
@@ -541,6 +541,7 @@ class Maintenance(commands.Cog):
     async def status_cmd(self, inter: discord.Interaction):
         if not self._allowed(inter):
             return await self._deny(inter)
+        await inter.response.defer(ephemeral=True, thinking=True)  # git log — до 5 с
         ai = self.bot.ai_for(inter.guild)  # на домашнем — с учётом ключей из /ии ключ
         lines = [f"**Состояние «{self.bot.user.display_name}»**"]
         lines.append(f"⏱ Аптайм: {_fmt_uptime(time.time() - START_TS)}")
@@ -584,7 +585,7 @@ class Maintenance(commands.Cog):
             lines.append(ml)
         lines.append(self.host_line())
         lines.append(self.health_line())
-        await inter.response.send_message("\n".join(lines), ephemeral=True, view=host_view())
+        await inter.followup.send("\n".join(lines), ephemeral=True, view=host_view())
 
     # ---------- перезапуск ----------
     @app_commands.command(name="перезапуск", description="Перезапустить бота (руководство)")

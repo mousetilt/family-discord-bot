@@ -81,6 +81,21 @@ def guarded(fn):
 _BRAND = None  # FamilyBot.brand — подставляет профиль семьи в текст ЛС участнику сервера
 
 
+async def answer_after(inter, coro, ephemeral=True, **kwargs):
+    """Ответ, который считается дольше 3 с (ЛС, журнал, панели): сначала defer, потом текст из coro.
+    Иначе Discord отвечает 10062 Unknown interaction, а человек видит «Приложение не отвечает»."""
+    if not inter.response.is_done():
+        try:
+            await inter.response.defer(ephemeral=ephemeral, thinking=True)
+        except discord.HTTPException:
+            pass
+    text = await coro
+    try:
+        await inter.followup.send(text, ephemeral=ephemeral, **kwargs)
+    except discord.HTTPException:
+        pass
+
+
 async def safe_dm(user, *args, **kwargs):
     try:
         if _BRAND and isinstance(user, discord.Member):

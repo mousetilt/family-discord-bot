@@ -15,7 +15,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from core import config
-from core.botcore import fmt_hours, guarded, now, now_iso, parse_dt, safe_dm, staff_only
+from core.botcore import answer_after, fmt_hours, guarded, now, now_iso, parse_dt, safe_dm, staff_only
 from core.people import INACTIVE_DAYS, is_inactive  # noqa: F401 — одна мерка «неактива» (отчёт, people, перевод)
 
 log = logging.getLogger("family-bot.mentor")
@@ -908,11 +908,11 @@ class Mentorship(commands.Cog):
         self.bot.db.gset(inter.guild, "probation:days", int(days))
         self.bot.db.gset(inter.guild, "set:probation_days", int(days))  # то же число, что в /настройки → «Числа»
         auto = self.bot.feature(inter.guild, "hr:auto")
-        await self.bot.log(inter.guild, f"⚙️ Испытательный срок: **{days} дн.** ({inter.user.mention})", "hrlog")
         await inter.response.send_message(
             f"✅ Испытательный срок — **{days} дн.** (для тех, кого примут дальше; у текущих срок не меняется).\n"
             f"По окончании бот {'сам переводит в 👥 Члены семьи, если экзамен сдан и выговоров нет' if auto else 'спрашивает решение у наставника и кадровика'}"
             " — переключается в `/настройки` → «Кадры».", ephemeral=True)
+        await self.bot.log(inter.guild, f"⚙️ Испытательный срок: **{days} дн.** ({inter.user.mention})", "hrlog")
 
     @group.command(name="список", description="Новички на испытательном сроке")
     @staff_only(config.MENTORS + ["recruiter"])

@@ -14,7 +14,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from core import config
-from core.botcore import staff_only
+from core.botcore import answer_after, staff_only
 
 log = logging.getLogger("family-bot.garage")
 GARAGE = config.LEAD + ["senior", "treasurer"]
@@ -212,7 +212,7 @@ class Garage(commands.Cog):
                     note: str = None):
         if not await self.gate(inter):
             return
-        await inter.response.send_message(await self.add(inter.guild, inter.user, model, plate, member, note),
+        await answer_after(inter, self.add(inter.guild, inter.user, model, plate, member, note),
                                           ephemeral=True)
 
     @group.command(name="передать", description="Передать машину участнику (или вернуть в общий гараж)")
@@ -225,7 +225,7 @@ class Garage(commands.Cog):
             return
         v = await self._car(inter, car)
         if v:
-            await inter.response.send_message(await self.give(inter.guild, inter.user, v, member), ephemeral=True)
+            await answer_after(inter, self.give(inter.guild, inter.user, v, member), ephemeral=True)
 
     @group.command(name="статус", description="Машина в строю или в ремонте (можно сразу списать ремонт из казны)")
     @app_commands.rename(car="машина", status="статус", note="заметка", cost="ремонт_стоил")
@@ -240,7 +240,7 @@ class Garage(commands.Cog):
             return
         v = await self._car(inter, car)
         if v:
-            await inter.response.send_message(await self.set_status(inter.guild, inter.user, v, status.value, note, cost),
+            await answer_after(inter, self.set_status(inter.guild, inter.user, v, status.value, note, cost),
                                               ephemeral=True)
 
     @group.command(name="списать", description="Убрать машину из автопарка (продана, разбита…)")
@@ -252,7 +252,7 @@ class Garage(commands.Cog):
             return
         v = await self._car(inter, car)
         if v:
-            await inter.response.send_message(await self.set_status(inter.guild, inter.user, v, "gone", reason),
+            await answer_after(inter, self.set_status(inter.guild, inter.user, v, "gone", reason),
                                               ephemeral=True)
 
     @group.command(name="история", description="Кто и когда ездил на машине")

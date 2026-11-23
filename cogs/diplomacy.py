@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from core import config
-from core.botcore import guarded, now, now_iso, parse_dt, staff_only
+from core.botcore import answer_after, guarded, now, now_iso, parse_dt, staff_only
 
 log = logging.getLogger("family-bot.diplo")
 STATUS_CHOICES = [app_commands.Choice(name=f"{e} {n}", value=k) for k, (e, n, _) in config.RELATIONS.items()]
@@ -192,7 +192,7 @@ class Diplomacy(commands.Cog):
     @app_commands.choices(status=STATUS_CHOICES)
     @staff_only(config.DIPLO)
     async def rel_set(self, inter: discord.Interaction, family: str, status: app_commands.Choice[str], note: str = None):
-        await inter.response.send_message(await self.set_relation(inter.guild, family, status.value, note, inter.user),
+        await answer_after(inter, self.set_relation(inter.guild, family, status.value, note, inter.user),
                                           ephemeral=True)
 
     async def set_relation(self, guild, family, status, note, by):
@@ -218,8 +218,8 @@ class Diplomacy(commands.Cog):
     @staff_only(config.DIPLO)
     async def rel_del(self, inter: discord.Interaction, family: str):
         self.bot.db.q("DELETE FROM relations WHERE guild_id=? AND lower(family)=lower(?)", inter.guild.id, family)
-        await self.update_board(inter.guild)
         await inter.response.send_message("🗑 Убрано.", ephemeral=True)
+        await self.update_board(inter.guild)
 
     # ---------- переговорные ----------
     async def open_room(self, inter, family, who, purpose):
@@ -306,6 +306,7 @@ class Diplomacy(commands.Cog):
 
     async def create_treaty(self, inter, family, title, terms, days):
         bot = self.bot
+        await inter.response.defer(ephemeral=True, thinking=True)  # пост + доска — дольше 3 с
         until = (now() + dt.timedelta(days=days)).isoformat() if days else None
         cur = bot.db.q("INSERT INTO treaties(guild_id, family, title, terms, until, created_by, created_at) "
                        "VALUES(?,?,?,?,?,?,?)", inter.guild.id, family, title, terms, until, inter.user.id, now_iso())
@@ -321,7 +322,7 @@ class Diplomacy(commands.Cog):
             bot.db.q("UPDATE treaties SET message_id=? WHERE id=?", m.id, tid)
         bot.emit(inter.guild, "treaty", family=family, title=title, by=inter.user)
         await self.update_board(inter.guild)
-        await inter.response.send_message(f"✅ Договор №{tid} заключён.", ephemeral=True)
+        await inter.followup.send(f"✅ Договор №{tid} заключён.", ephemeral=True)
 
     @treaty.command(name="расторгнуть", description="Расторгнуть договор")
     @app_commands.rename(tid="номер", reason="причина")

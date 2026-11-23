@@ -18,7 +18,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from core import config
-from core.botcore import guarded, now, safe_dm
+from core.botcore import answer_after, guarded, now, safe_dm
 from core.parse import fmt_amount as fmt, parse_amount  # noqa: F401 — их берут и другие коги
 
 log = logging.getLogger("family-bot.treasury")
@@ -86,8 +86,9 @@ class OverdraftView(discord.ui.View):
     @discord.ui.button(label="Да, провести (казна уйдёт в минус)", style=discord.ButtonStyle.danger, emoji="⚠️")
     async def yes(self, inter, _):
         self.stop()
+        await inter.response.defer()
         text = await self.cog.spend(inter.guild, inter.user, self.amount, self.reason)
-        await inter.response.edit_message(content=text, view=None)
+        await inter.edit_original_response(content=text, view=None)
 
     @discord.ui.button(label="Отмена", style=discord.ButtonStyle.secondary)
     async def no(self, inter, _):
@@ -826,7 +827,7 @@ class Treasury(commands.Cog):
     async def c_in(self, inter: discord.Interaction, amount: str, reason: str, member: discord.Member = None):
         n = await self._amount(inter, amount)
         if n:
-            await inter.response.send_message(await self.deposit(inter.guild, inter.user, n, reason, member),
+            await answer_after(inter, self.deposit(inter.guild, inter.user, n, reason, member),
                                               ephemeral=True)
 
     @group.command(name="расход", description="Расход из казны (вирты)")
@@ -842,7 +843,7 @@ class Treasury(commands.Cog):
             return await inter.response.send_message(
                 f"⚠️ В казне {fmt(bal)}, а расход {fmt(n)} — казна уйдёт в минус. Точно?",
                 view=OverdraftView(self, inter.user.id, n, reason), ephemeral=True)
-        await inter.response.send_message(await self.spend(inter.guild, inter.user, n, reason), ephemeral=True)
+        await answer_after(inter, self.spend(inter.guild, inter.user, n, reason), ephemeral=True)
 
     @app_commands.command(name="сдал", description="Сообщить казне: я сдал взнос или оплатил штраф (можно со скрином)")
     @app_commands.rename(what="что", amount="сумма", shot="скрин")
@@ -876,7 +877,7 @@ class Treasury(commands.Cog):
             n = await self._amount(inter, amount)
             if not n:
                 return
-        await inter.response.send_message(await self.take_due(inter.guild, inter.user, member, n), ephemeral=True)
+        await answer_after(inter, self.take_due(inter.guild, inter.user, member, n), ephemeral=True)
 
     @group.command(name="должники", description="Кто не сдал членский взнос за текущий период")
     @treasury_only()
@@ -940,8 +941,8 @@ class Treasury(commands.Cog):
         n = await self._amount(inter, amount)
         if n:
             text = self.set_dues(inter.guild, n, period.value)
-            await self.journal(inter.guild, f"{text}\nНастроил: {inter.user.mention}")
             await inter.response.send_message(text, ephemeral=True)
+            await self.journal(inter.guild, f"{text}\nНастроил: {inter.user.mention}")
 
     # ---------- штрафы ----------
     @group.command(name="штраф", description="Выписать штраф участнику (в ЛС придёт уведомление)")
@@ -954,7 +955,7 @@ class Treasury(commands.Cog):
             return await inter.response.send_message("Боту штраф не выписать 🙂", ephemeral=True)
         n = await self._amount(inter, amount)
         if n:
-            await inter.response.send_message(await self.fine(inter.guild, inter.user, member, n, reason),
+            await answer_after(inter, self.fine(inter.guild, inter.user, member, n, reason),
                                               ephemeral=True)
 
     @group.command(name="штрафы", description="Кто не оплатил штрафы")
@@ -970,7 +971,7 @@ class Treasury(commands.Cog):
     @treasury_only()
     async def c_fine_paid(self, inter: discord.Interaction, member: discord.Member, fid: int = None):
         if await self.gate(inter, "fines"):
-            await inter.response.send_message(await self.fine_paid(inter.guild, inter.user, member, fid),
+            await answer_after(inter, self.fine_paid(inter.guild, inter.user, member, fid),
                                               ephemeral=True)
 
     @group.command(name="штраф-отменить", description="Отменить ошибочный штраф по номеру")
@@ -978,7 +979,7 @@ class Treasury(commands.Cog):
     @treasury_only()
     async def c_fine_cancel(self, inter: discord.Interaction, fid: int):
         if await self.gate(inter, "fines"):
-            await inter.response.send_message(await self.fine_cancel(inter.guild, inter.user, fid), ephemeral=True)
+            await answer_after(inter, self.fine_cancel(inter.guild, inter.user, fid), ephemeral=True)
 
     # ---------- зарплаты ----------
     @group.command(name="ставки", description="Ставки зарплат по ролям и сколько уйдёт на выплату")
@@ -998,8 +999,8 @@ class Treasury(commands.Cog):
         if n is None:
             return
         text = self.set_rate(inter.guild, role.value, n)
-        await self.journal(inter.guild, f"{text}\nНастроил: {inter.user.mention}")
         await inter.response.send_message(text, ephemeral=True)
+        await self.journal(inter.guild, f"{text}\nНастроил: {inter.user.mention}")
 
     @group.command(name="зарплата", description="Выплатить зарплату всем по ставкам (с подтверждением)")
     @treasury_only()
@@ -1029,7 +1030,7 @@ class Treasury(commands.Cog):
         if n > self.balance(inter.guild.id):
             return await inter.response.send_message(self.pay_preview(inter.guild, pairs, reason),
                                                      view=PayView(self, inter.user.id, pairs, reason), ephemeral=True)
-        await inter.response.send_message(await self.payout(inter.guild, inter.user, pairs, reason), ephemeral=True)
+        await answer_after(inter, self.payout(inter.guild, inter.user, pairs, reason), ephemeral=True)
 
     @group.command(name="выплатить-роли", description="Выплатить всем с ролью по одной сумме (организаторам, рекрутерам…)")
     @app_commands.rename(role="роль", amount="сумма", reason="за_что")
