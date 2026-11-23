@@ -71,6 +71,9 @@ class AI:
         self.dead = set() # (провайдер, модель), которых у провайдера больше нет
         self._no_json = set()  # модели Groq без JSON-режима — им шлём обычный запрос
         self._no_search = set()  # модели Gemini без поиска Google (для grounded)
+        # дневной лимит вызовов Claude (платный): ставит bot.ai_for из «Чисел» семьи; 0 — без лимита.
+        # Кончился — Claude молча выпадает из цепочки, отвечают бесплатные
+        self.claude_limit, self.claude_scope = 0, scope
         # бесплатные ИИ как подстраховка: кончился лимит / упал основной — отвечает следующий. Claude запасным
         # не ставим (платный — только по явному выбору основным); у Claude запасные — Gemini, затем Groq.
         self.backups = [p for p in FREE if p != self.provider and self.keys.get(p)] if self.provider else []
@@ -138,11 +141,28 @@ class AI:
         row = self.db.one("SELECT calls FROM ai_usage WHERE day=?", self._day_key())
         return row["calls"] if row else 0
 
-    def _count(self):
-        key = self._day_key()
+    def _check(self):
         if self.used_today() >= config.AI_DAILY_LIMIT:
             raise AIUnavailable("Дневной лимит запросов к ИИ исчерпан — завтра снова заработает")
+
+    def _bump(self, key):
         self.db.q("INSERT INTO ai_usage(day, calls) VALUES(?,1) ON CONFLICT(day) DO UPDATE SET calls=calls+1", key)
+
+    def _count(self):
+        """Учёт удачного ответа (неудачные попытки и лимиты провайдера дневной лимит не едят)."""
+        self._check()
+        self._bump(self._day_key())
+
+    def _claude_key(self):
+        return f"claude:{dt.date.today().isoformat()}:{self.claude_scope or 0}"
+
+    def claude_used(self):
+        row = self.db.one("SELECT calls FROM ai_usage WHERE day=?", self._claude_key())
+        return row["calls"] if row else 0
+
+    def claude_left(self):
+        """Сколько вызовов Claude осталось на сегодня (None — без лимита)."""
+        return None if not self.claude_limit else max(0, self.claude_limit - self.claude_used())
 
     async def probe(self, provider):
         """Проверка ключа одним крошечным запросом → None (всё ок) или текст ошибки."""
@@ -183,8 +203,13 @@ class AI:
             raise AIUnavailable("ИИ не подключён. Руководство может вставить бесплатный ключ Groq или Gemini "
                                 "командой /ии ключ" if self.own_keys else
                                 "ИИ не подключён. Бесплатный ключ: console.groq.com или aistudio.google.com")
-        self._count()
+        self._check()
         chain = self.chain(smart, light)
+        if self.claude_left() == 0 and any(p == "claude" for p, _ in chain):
+            chain = [pm for pm in chain if pm[0] != "claude"]
+            if not chain:
+                raise AIUnavailable("Дневной лимит Claude исчерпан (/настройки → Числа). Завтра снова, а чтобы "
+                                    "отвечал бесплатный ИИ — добавь ключ Gemini или Groq: /ии ключ")
         if images:  # картинки понимают Gemini (бесплатно) и Claude; без них — честный отказ
             chain = [pm for pm in chain if pm[0] in VISION]
             if not chain:
@@ -205,6 +230,9 @@ class AI:
                 if images:
                     opts["images"] = images
                 text = await getattr(self, f"_{prov}")(model, system, prompt, max_tokens, **opts)
+                self._bump(self._day_key())
+                if prov == "claude":
+                    self._bump(self._claude_key())
                 return (text or "").strip()
             except _ModelMissing as e:
                 last_err = e

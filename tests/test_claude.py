@@ -119,6 +119,55 @@ class Fallback(unittest.TestCase):
             run(free.ask("s", "p", images=[("image/png", b"x")]))
 
 
+class DailyLimit(unittest.TestCase):
+    """Дневной лимит Claude (/настройки → Числа): кончился — отвечают бесплатные; неудачи лимит не едят."""
+
+    def setUp(self):
+        self.ai = AI(DB(":memory:"), keys={"gemini": "g", "claude": "c"}, scope=5, primary="claude")
+        self.ai.claude_limit = 2
+        self.calls = []
+
+        async def claude(*a, **k):
+            self.calls.append("claude")
+            return "claude"
+
+        async def gemini(*a, **k):
+            self.calls.append("gemini")
+            return "gemini"
+        self.patch = [mock.patch.object(self.ai, "_claude", claude), mock.patch.object(self.ai, "_gemini", gemini)]
+        for p in self.patch:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patch:
+            p.stop()
+
+    def test_limit_falls_back(self):
+        self.assertEqual([run(self.ai.ask("s", "p")) for _ in range(3)], ["claude", "claude", "gemini"])
+        self.assertEqual(self.ai.claude_used(), 2)
+        self.assertEqual(self.ai.claude_left(), 0)
+
+    def test_no_limit(self):
+        self.ai.claude_limit = 0
+        self.assertIsNone(self.ai.claude_left())
+        self.assertEqual({run(self.ai.ask("s", "p")) for _ in range(4)}, {"claude"})
+
+    def test_failure_not_counted(self):
+        async def bad(*a, **k):
+            raise ai_mod._RateLimited("rate")
+        with mock.patch.object(self.ai, "_claude", bad):
+            run(self.ai.ask("s", "p"))
+        self.assertEqual(self.ai.claude_used(), 0)
+        self.assertEqual(self.ai.used_today(), 1)  # ответил gemini — один удачный вызов
+
+    def test_only_claude_exhausted(self):
+        solo = AI(DB(":memory:"), keys={"claude": "c"}, scope=5)
+        solo.claude_limit = 1
+        solo.db.q("INSERT INTO ai_usage(day, calls) VALUES(?, 1)", solo._claude_key())
+        with self.assertRaises(AIUnavailable):
+            run(solo.ask("s", "p"))
+
+
 class Payload(unittest.TestCase):
     """Запрос к Anthropic: заголовки, картинки, effort, разбор ответа и отказа — без сети."""
 

@@ -355,6 +355,10 @@ class Control(commands.Cog):
                 lines.append("\nБез ключа ИИ-функции (Швейцар, юрист, ИИ-модерация, голос) не работают. Ключ бесплатный — "
                              "`/ии ключ`. Голосовым командам нужен именно Groq.")
         lines.append(f"📈 Запросов сегодня: {ai.used_today()}/{config.AI_DAILY_LIMIT}")
+        if ai.keys.get("claude"):
+            lim = ai.claude_limit
+            lines.append(f"💸 Claude сегодня: {ai.claude_used()}" + (f"/{lim}" if lim else " (без лимита)") +
+                         " — лимит: /настройки → Числа → ИИ")
         await inter.response.send_message("\n".join(lines), ephemeral=True)
 
     @ai_group.command(name="основной", description="Какой ИИ главный у семьи (по умолчанию — бесплатный)")

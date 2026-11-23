@@ -200,6 +200,11 @@ class FamilyBot(commands.Bot):
         остальные — только свои ключи (/ии ключ), иначе ИИ выключен."""
         if guild is None:
             return self.ai
+        ai = self._ai_for(guild)
+        ai.claude_limit, ai.claude_scope = self.num(guild, "claude_daily"), guild_id_of(guild)
+        return ai
+
+    def _ai_for(self, guild):
         gid = guild_id_of(guild)
         keys = {p: self.db.gget(gid, f"ai:{p}") for p in KEYED}
         keys = {p: k for p, k in keys.items() if k}
