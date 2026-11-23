@@ -6,6 +6,8 @@
 /семья роли       — привязать УЖЕ существующие роли сервера к ролям бота (бот подсказывает по названиям);
                     привязанные роли /настройка не пересоздаёт и их права не трогает.
 /семья проверка   — всё, что мешает боту работать, одним экраном + кнопки «исправить» (core/health.py).
+/семья экспорт    — настройки семьи файлом (без ключей и ID этого сервера); /семья импорт — загрузить их
+                    (переезд на новый сервер, готовая настройка от другой семьи; core/portable.py).
 /семья отключить  — выключить (данные не удаляются, можно подключить обратно)."""
 import logging
 import re
@@ -15,7 +17,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from core import config, health
+import io
+
+from core import config, health, portable
 from core.family import FIELDS
 
 log = logging.getLogger("family-bot.families")
@@ -152,6 +156,34 @@ class HealthView(discord.ui.View):
                 return await setup.build(inter)
             return await setup.open_wizard(inter)
         return run
+
+
+# ─────────────── импорт настроек ───────────────
+class ImportConfirm(discord.ui.View):
+    def __init__(self, bot, user_id, data):
+        super().__init__(timeout=300)
+        self.bot, self.user_id, self.data = bot, user_id, data
+
+    async def interaction_check(self, inter):
+        return inter.user.id == self.user_id
+
+    @discord.ui.button(label="Применить", style=discord.ButtonStyle.danger, emoji="📥")
+    async def yes(self, inter: discord.Interaction, _):
+        self.stop()
+        n = portable.apply(self.bot.db, inter.guild, self.data)
+        log.warning("Импорт настроек семьи «%s»: %d ключей (%s)", inter.guild.name, n, inter.user)
+        await inter.response.edit_message(content=f"✅ Применено настроек: **{n}**. Панели обновляю. Проверить, всё ли "
+                                                  "на месте: `/семья проверка`.", view=None)
+        try:
+            from cogs.control import refresh_after_settings
+            await refresh_after_settings(self.bot, inter.guild)
+        except Exception:  # noqa: BLE001 — настройки уже записаны, панели обновятся при следующей сборке
+            log.exception("Импорт настроек: панели не обновились")
+
+    @discord.ui.button(label="Отмена", style=discord.ButtonStyle.secondary)
+    async def no(self, inter: discord.Interaction, _):
+        self.stop()
+        await inter.response.edit_message(content="Отменил — ничего не менял.", view=None)
 
 
 # ─────────────── привязка ролей ───────────────
@@ -487,6 +519,41 @@ class Families(commands.Cog):
         items = health.check(self.bot, inter.guild)
         await inter.response.send_message(embed=health_embed(self.bot, inter.guild, items),
                                           view=HealthView(self.bot, inter.guild, items), ephemeral=True)
+
+    @group.command(name="экспорт", description="Настройки семьи файлом: для переезда или чтобы поделиться (без ключей)")
+    async def export_cmd(self, inter: discord.Interaction):
+        if not self.bot.is_family(inter.guild):
+            return await inter.response.send_message("Сначала подключи семью: `/семья подключить`.", ephemeral=True)
+        if not can_manage(self.bot, inter):
+            return await inter.response.send_message("⛔ Только для Главы, заместителя или владельца сервера.",
+                                                     ephemeral=True)
+        payload = portable.export(self.bot.db, inter.guild.id, self.bot.family(inter.guild)["name"])
+        n = len(payload["settings"])
+        await inter.response.send_message(
+            f"📤 Настройки семьи: **{n}** ({portable.describe(payload['settings']) or 'пусто'}). Ключей ИИ, паролей и "
+            "ID ролей/каналов этого сервера в файле нет. Загрузить на другом сервере: `/семья импорт`.",
+            file=discord.File(io.BytesIO(portable.dumps(payload)), filename="настройки-семьи.json"), ephemeral=True)
+
+    @group.command(name="импорт", description="Загрузить настройки семьи из файла /семья экспорт")
+    @app_commands.rename(upload="файл")
+    async def import_cmd(self, inter: discord.Interaction, upload: discord.Attachment):
+        if not self.bot.is_family(inter.guild):
+            return await inter.response.send_message("Сначала подключи семью: `/семья подключить`.", ephemeral=True)
+        if not can_manage(self.bot, inter):
+            return await inter.response.send_message("⛔ Только для Главы, заместителя или владельца сервера.",
+                                                     ephemeral=True)
+        if upload.size > portable.MAX_BYTES:
+            return await inter.response.send_message("❌ Файл слишком большой для настроек.", ephemeral=True)
+        try:
+            data, src = portable.parse(await upload.read())
+        except (ValueError, discord.HTTPException) as e:
+            return await inter.response.send_message(f"❌ Не могу прочитать: {e}.", ephemeral=True)
+        if not data:
+            return await inter.response.send_message("В файле нет настроек, которые можно перенести.", ephemeral=True)
+        await inter.response.send_message(
+            f"📥 В файле{f' семьи «{src}»' if src else ''}: **{len(data)}** настроек ({portable.describe(data)}). "
+            "Они заменят текущие с теми же названиями, остальное не тронется. Применить?",
+            view=ImportConfirm(self.bot, inter.user.id, data), ephemeral=True)
 
     @group.command(name="роли", description="Привязать существующие роли сервера к ролям бота")
     async def roles(self, inter: discord.Interaction):

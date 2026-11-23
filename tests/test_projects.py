@@ -67,5 +67,36 @@ class Projects(unittest.TestCase):
         self.assertLessEqual(len(family.FIELDS), 5)  # окно Discord — максимум 5 полей
 
 
+class Portable(unittest.TestCase):
+    """Экспорт/импорт настроек: без секретов и ID сервера, файл чужого формата не принимается."""
+
+    def test_roundtrip(self):
+        from core import portable
+        a, b = DB(":memory:"), DB(":memory:")
+        for k, v in (("mod:forum", "0"), ("set:warn_limit", "4"), ("text:rules", "Правила"), ("family:name", "Петровы"),
+                     ("family:project", "Majestic RP"), ("ai:gemini", "SECRET"), ("forum:pass", "x"),
+                     ("role:leader", "123"), ("ch:news", "456"), ("panel:rules", "789"), ("alias:5", "Петя")):
+            a.gset(1, k, v)
+        payload = portable.export(a, 1, "Петровы")
+        raw = portable.dumps(payload)
+        self.assertNotIn(b"SECRET", raw)
+        data, src = portable.parse(raw)
+        self.assertEqual(src, "Петровы")
+        self.assertEqual(set(data), {"mod:forum", "set:warn_limit", "text:rules", "family:name", "family:project",
+                                     "alias:5"})
+        self.assertEqual(portable.apply(b, 2, data), 6)
+        self.assertEqual(b.gget(2, "set:warn_limit"), "4")
+        self.assertIsNone(b.gget(2, "role:leader"))
+
+    def test_rejects(self):
+        from core import portable
+        for raw in (b"not json", b'{"a": 1}', b'{"format": "family-bot-settings", "version": 99, "settings": {}}'):
+            with self.assertRaises(ValueError):
+                portable.parse(raw)
+        data, _ = portable.parse(b'{"format": "family-bot-settings", "version": 1, '
+                                 b'"settings": {"ai:claude": "k", "dev:gh_token": "t", "set:x": "1"}}')
+        self.assertEqual(data, {"set:x": "1"})
+
+
 if __name__ == "__main__":
     unittest.main()
