@@ -209,6 +209,11 @@ class Listener:
         self.inter_at = 0
         self.pending = None     # (plan, ctx, monotonic) — ждём «Швейцар, да/нет»
         self.minutes = None     # протокол собрания: [(unix, user_id, текст)] — записываем всех, а не только команды
+        # Звук берём штатным слушателем discord.py (его поток сам читает UDP-сокет войса) — пакеты кладём сюда.
+        # Раньше читали сокет сами через loop.sock_recv с таймаутом: после переподключения номер старого сокета
+        # доставался другому соединению, и отменённое чтение роняло asyncio (RuntimeError, issue #5).
+        self.inbox = asyncio.Queue(maxsize=1000)
+        self.sub = None      # (VoiceConnectionState, callback) — на каком соединении висит наш слушатель
         self.running = True
         self.tasks = [asyncio.create_task(self.reader()), asyncio.create_task(self.flusher()),
                       asyncio.create_task(self.worker())]
@@ -231,8 +236,44 @@ class Listener:
 
     def stop(self):
         self.running = False
+        self.unsubscribe()
         for t in self.tasks:
             t.cancel()
+
+    def subscribe(self, vc):
+        """Повесить слушатель пакетов на текущее голосовое соединение (после переподключения — на новое)."""
+        conn = getattr(vc, "_connection", None)
+        if conn is None or not hasattr(conn, "add_socket_listener"):
+            return False
+        if self.sub and self.sub[0] is conn:
+            return True
+        self.unsubscribe()
+        loop, q = asyncio.get_running_loop(), self.inbox
+
+        def put(data):
+            try:
+                q.put_nowait(data)
+            except asyncio.QueueFull:
+                pass  # не успеваем разбирать — лишнее выкидываем, а не копим память
+
+        def cb(data):  # вызывается из потока discord.py
+            try:
+                loop.call_soon_threadsafe(put, data)
+            except RuntimeError:
+                pass  # цикл уже закрыт (бот выключается)
+
+        conn.add_socket_listener(cb)
+        self.sub = (conn, cb)
+        return True
+
+    def unsubscribe(self):
+        if self.sub:
+            conn, cb = self.sub
+            self.sub = None
+            try:
+                conn.remove_socket_listener(cb)
+            except Exception:
+                pass
 
     @property
     def music(self):
@@ -283,7 +324,12 @@ class Listener:
         ws._jarvis_li = self
 
     async def reader(self):
-        loop = asyncio.get_running_loop()
+        try:
+            await self._reader()
+        finally:
+            self.unsubscribe()
+
+    async def _reader(self):
         lost = None  # с какого момента нет связи с войсом
         while self.running:
             try:
@@ -309,7 +355,12 @@ class Listener:
                     if self.key is not None:
                         self.reset()  # войс переподключился: старые ключи и номера голосов больше не годятся
                     self.key = key
-                data = await asyncio.wait_for(loop.sock_recv(vc.socket, 2048), 1.0)
+                    while not self.inbox.empty():  # пакеты старого соединения — со старым ключом
+                        self.inbox.get_nowait()
+                if not self.subscribe(vc):
+                    await asyncio.sleep(1)
+                    continue
+                data = await asyncio.wait_for(self.inbox.get(), 1.0)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
