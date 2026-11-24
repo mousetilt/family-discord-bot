@@ -496,8 +496,16 @@ class Applications(commands.Cog):
         s.answers.append(i)
         s.idx += 1
         if s.idx < len(s.questions):
-            return await inter.response.edit_message(embed=self.question_embed(s, inter.guild),
-                                                     view=QuestionView(self, s))
+            try:
+                return await inter.response.edit_message(embed=self.question_embed(s, inter.guild),
+                                                         view=QuestionView(self, s))
+            except discord.NotFound:
+                # Discord не принял ответ (бот опоздал на 3 с — 10062): экран остался на этом вопросе. Ответ
+                # откатываем — человек просто нажмёт ещё раз, а не застрянет на вопросе, который уже «засчитан»
+                s.answers.pop()
+                s.idx -= 1
+                log.info("Экзамен: кнопка не успела (10062), ответ откатил — %s", inter.user)
+                return
         await self.finish(inter, s)
 
     async def finish(self, inter: discord.Interaction, s: ExamSession):

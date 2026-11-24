@@ -337,5 +337,45 @@ class Spawn(unittest.TestCase):
         self.assertEqual(len(bot._bg_tasks), 0)
 
 
+class Issue3and4(unittest.TestCase):
+    """#3 обрыв сети — не баг; #4 кнопка экзамена не успела (10062) — ответ откатывается, человек жмёт снова."""
+
+    def test_transient(self):
+        import aiohttp
+        from cogs.errorwatch import transient
+        try:
+            try:
+                raise FileNotFoundError(2, "No such file")
+            except FileNotFoundError as e:
+                raise aiohttp.ClientConnectorError(None, OSError("x")) from e
+        except Exception as e:  # noqa: BLE001
+            info = (type(e), e, e.__traceback__)
+        self.assertTrue(transient(info))
+        self.assertFalse(transient((KeyError, KeyError("x"), None)))
+        self.assertFalse(transient(None))
+
+    def test_exam_rollback(self):
+        import types
+        from unittest import mock
+        import discord
+        from cogs import applications as am
+
+        class Resp:
+            async def edit_message(self, **kw):
+                raise discord.NotFound(mock.MagicMock(status=404), {"code": 10062, "message": "Unknown interaction"})
+
+        cog = am.Applications.__new__(am.Applications)
+        cog.bot = mock.MagicMock()
+        s = types.SimpleNamespace(user_id=5, expired=False, answers=[], idx=0, time_min=10, training=False,
+                                  questions=[{"q": "a", "options": ["1", "2"], "topic": "t", "correct": 0}] * 3)
+        inter = types.SimpleNamespace(user=types.SimpleNamespace(id=5), guild=None, response=Resp())
+
+        async def go():
+            with mock.patch.object(am, "QuestionView", lambda *a: None),                     mock.patch.object(am.Applications, "question_embed", lambda *a: None):
+                await cog.answer(inter, s, 1)
+        asyncio.run(go())
+        self.assertEqual((s.idx, s.answers), (0, []))
+
+
 if __name__ == "__main__":
     unittest.main()

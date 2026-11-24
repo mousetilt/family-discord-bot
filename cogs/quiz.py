@@ -171,14 +171,21 @@ class Quiz(commands.Cog):
         if inter.user.id != run["user"]:
             return await inter.response.send_message("Это не твой квиз.", ephemeral=True)
         q = run["qs"][run["i"]]
+        before = (run["score"], len(run["wrong"]))
         if idx == 0:
             run["score"] += 1
         else:
             run["wrong"].append(f"❌ {q['q'][:120]}\n✅ {q['options'][0]}" + (f" — {q['why']}" if q.get("why") else ""))
         run["i"] += 1
         if run["i"] < len(run["qs"]):
-            return await inter.response.edit_message(content=("✅ Верно!\n\n" if idx == 0 else "❌ Мимо.\n\n")
-                                                     + self.render(run), view=QuestionView(self, run))
+            try:
+                return await inter.response.edit_message(content=("✅ Верно!\n\n" if idx == 0 else "❌ Мимо.\n\n")
+                                                         + self.render(run), view=QuestionView(self, run))
+            except discord.NotFound:  # 10062: экран не сменился — откат, человек нажмёт ещё раз
+                run["i"] -= 1
+                run["score"] = before[0]
+                del run["wrong"][before[1]:]
+                return
         total = len(run["qs"])
         try:
             self.bot.db.q("INSERT INTO quiz_answers(quiz_id, guild_id, user_id, score, total, ts) VALUES(?,?,?,?,?,?)",

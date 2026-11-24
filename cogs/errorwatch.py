@@ -28,6 +28,22 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_REPO = "mousetilt/family-discord-bot"
 NOISE = ("Attempting a reconnect", "Disconnected from voice", "Shard ID None", "WebSocket closed",
          "Can't keep up", "heartbeat blocked")
+def transient(exc_info):
+    """Кратковременный обрыв сети хостинга (не достучались, соединение сброшено, 5xx Discord) — не баг кода.
+    Долгий простой и так ловит сторож (maintenance.watchdog), отчёт разработчику тут не нужен."""
+    import asyncio
+
+    import aiohttp
+    exc = exc_info[1] if exc_info and len(exc_info) > 1 else None
+    seen = 0
+    while exc is not None and seen < 6:
+        if isinstance(exc, (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError, aiohttp.ClientOSError,
+                            asyncio.TimeoutError, ConnectionResetError, discord.DiscordServerError)):
+            return True
+        exc, seen = exc.__cause__ or exc.__context__, seen + 1
+    return False
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bot_errors(
     sig TEXT PRIMARY KEY, title TEXT, sample TEXT, count INTEGER DEFAULT 1, first_ts INTEGER, last_ts INTEGER,
@@ -85,6 +101,8 @@ class ErrorCollector(logging.Handler):
 
     def emit(self, record):
         try:
+            if transient(record.exc_info):
+                return
             text = record.getMessage()
             if any(n in text for n in NOISE) or record.name.startswith("family-bot.errors") or \
                     ("Task was destroyed but it is pending" in text and "coro=<Event.wait()" in text):
