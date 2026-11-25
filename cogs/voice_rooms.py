@@ -1,13 +1,47 @@
 # -*- coding: utf-8 -*-
 """Личные голосовые комнаты: зашёл в «➕ Создать комнату» → своя комната; опустела → удалилась."""
 import asyncio
+import logging
+import time
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+bot_log = logging.getLogger("bot.voice_rooms")
+
 OWNER_PERMS = dict(view_channel=True, connect=True, speak=True, manage_channels=True, move_members=True,
                    mute_members=True)
+# Перенесли в войс, куда человеку нельзя (друга семьи — в семейный): даём говорить, пока он там
+GUEST_PERMS = dict(view_channel=True, connect=True, speak=True, stream=True, use_voice_activation=True)
+GUEST_MIN = dict(view_channel=True, connect=True, speak=True)  # если у бота самого нет права на стрим
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS voice_grants(
+    channel_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    ts INTEGER NOT NULL,
+    PRIMARY KEY(channel_id, user_id)
+);
+"""
+
+
+def needs_grant(member, channel, afk_id=None):
+    """Человека перенесли туда, куда сам он зайти не мог, и говорить он там не может → выдать доступ.
+    Сам зашёл (есть право входа), а говорить нельзя — значит, канал так задуман (AFK, «Мероприятие»): не трогаем.
+    Тайм-аут (мут) и личный запрет на этот канал — наказание, его не обходим."""
+    if member.bot or not isinstance(channel, discord.VoiceChannel):
+        return False
+    if afk_id and channel.id == afk_id or member.guild.afk_channel and channel.id == member.guild.afk_channel.id:
+        return False
+    if member.is_timed_out():
+        return False
+    own = channel.overwrites.get(member)
+    if own is not None and (own.speak is False or own.connect is False):
+        return False
+    p = channel.permissions_for(member)
+    return not p.speak and not (p.view_channel and p.connect)
 
 
 class VoiceRooms(commands.Cog):
@@ -16,6 +50,45 @@ class VoiceRooms(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        bot.db.c.executescript(SCHEMA)
+
+    async def grant(self, member, channel):
+        """Перенесли в «чужой» войс → может говорить. Отметка в базе — чтобы снять доступ на выходе (и после
+        перезапуска бота)."""
+        bot = self.bot
+        if not bot.is_family(member.guild) or not bot.feature(member.guild, "voice:moved"):
+            return False
+        afk = bot.ch(member.guild, "afk")
+        if not needs_grant(member, channel, afk.id if afk else None):
+            return False
+        why = "Перенесли в войс — может говорить, пока он здесь"
+        try:
+            try:
+                await channel.set_permissions(member, overwrite=discord.PermissionOverwrite(**GUEST_PERMS), reason=why)
+            except discord.Forbidden:  # Discord не даёт выдать право, которого нет у самого бота
+                await channel.set_permissions(member, overwrite=discord.PermissionOverwrite(**GUEST_MIN), reason=why)
+        except discord.HTTPException as e:
+            bot_log.warning("Доступ в войс %s для %s: %s", channel.id, member.id, e)
+            return False
+        bot.db.q("INSERT OR REPLACE INTO voice_grants(channel_id, guild_id, user_id, ts) VALUES(?,?,?,?)",
+                 channel.id, member.guild.id, member.id, int(time.time()))
+        return True
+
+    async def revoke(self, guild, channel_id, user_id):
+        """Снять выданный доступ (вышел из войса). Личные права, которые поставил не бот, не трогаем."""
+        self.bot.db.q("DELETE FROM voice_grants WHERE channel_id=? AND user_id=?", channel_id, user_id)
+        ch = guild.get_channel(channel_id) if guild else None
+        member = guild.get_member(user_id) if guild else None
+        if not ch or not member:
+            return
+        own = ch.overwrites.get(member)
+        if own is None or own.pair() not in (discord.PermissionOverwrite(**GUEST_PERMS).pair(),
+                                             discord.PermissionOverwrite(**GUEST_MIN).pair()):
+            return  # права уже поменяли руками — оставляем как есть
+        try:
+            await ch.set_permissions(member, overwrite=None, reason="Вышел из войса — временный доступ снят")
+        except discord.HTTPException as e:
+            bot_log.warning("Снять доступ в войс %s для %s: %s", channel_id, user_id, e)
 
     async def create_room(self, member):
         bot, guild = self.bot, member.guild
@@ -52,6 +125,12 @@ class VoiceRooms(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
+        # выданный перенесённым доступ: кто уже вышел, пока бот лежал, — снимаем
+        for row in self.bot.db.all("SELECT channel_id, guild_id, user_id FROM voice_grants"):
+            g = self.bot.get_guild(row["guild_id"])
+            m = g.get_member(row["user_id"]) if g else None
+            if not (m and m.voice and m.voice.channel and m.voice.channel.id == row["channel_id"]):
+                await self.revoke(g, row["channel_id"], row["user_id"])
         for row in self.bot.db.all("SELECT channel_id FROM temp_voice"):
             ch = self.bot.get_channel(row["channel_id"])
             if ch is None:
@@ -63,6 +142,11 @@ class VoiceRooms(commands.Cog):
     async def on_voice_state_update(self, member, before, after):
         if before.channel == after.channel:
             return
+        if before.channel and self.bot.db.one("SELECT 1 FROM voice_grants WHERE channel_id=? AND user_id=?",
+                                              before.channel.id, member.id):
+            await self.revoke(member.guild, before.channel.id, member.id)
+        if after.channel:
+            await self.grant(member, after.channel)
         creator = self.bot.ch(member.guild, "creator")
         if not member.bot and after.channel and creator and after.channel.id == creator.id:
             await self.create_room(member)

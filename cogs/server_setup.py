@@ -99,7 +99,7 @@ def find_category(bot, guild, cat):
 # Каналы, добавленные после первой сборки сервера: при старте бот создаёт их сам (один раз, без «Собрать сервер»).
 # Значение — модуль, без которого канал не нужен. Удалили канал руками — второй раз не создаём (флаг auto:<key>).
 AUTO_CHANNELS = {"panel": None, "treasury_log": "treasury", "garage": "garage", "audit": "journal", "voice_log": "journal",
-                 "forumwatch": "forum"}
+                 "forumwatch": "forum", "friends_voice": None}
 OPTIONAL_CHANNELS = {"forumwatch": "forum"}  # при сборке сервера — только если модуль включён
 
 
@@ -123,10 +123,15 @@ async def ensure_new_channels(bot, guild):
             try:
                 if not ch:
                     ow = build_overwrites(guild, R, extra.get("view", cat["view"]), extra.get("send", cat["send"]),
-                                          kind=ctype)
+                                          kind=ctype, connect=extra.get("connect"), speak=extra.get("speak"))
                     ow = {t: p for t, p in ow.items() if t is not None}  # роль удалили — просто без неё
-                    ch = await guild.create_text_channel(name, category=category, overwrites=ow,
-                                                         topic=extra.get("topic"), reason="Новый канал бота")
+                    if ctype == "voice":
+                        ch = await guild.create_voice_channel(name, category=category, overwrites=ow,
+                                                              user_limit=extra.get("limit", 0),
+                                                              reason="Новый канал бота")
+                    else:
+                        ch = await guild.create_text_channel(name, category=category, overwrites=ow,
+                                                             topic=extra.get("topic"), reason="Новый канал бота")
                     made.append(name)
             except discord.HTTPException as e:
                 log.warning("Новый канал %s на %s: %s", key, guild.name, e)
