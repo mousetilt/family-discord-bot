@@ -62,6 +62,7 @@ class AnnounceModal(discord.ui.Modal, title="Объявление"):
 
     async def on_submit(self, inter: discord.Interaction):
         bot = inter.client
+        await inter.response.defer(ephemeral=True, thinking=True)  # сразу: публикация бывает дольше 3 с (10062, #6)
         c = bot.ch(inter.guild, "news") or inter.channel
         e = bot.embed(f"📢 {self.head.value}", self.body.value, config.GOLD, inter.guild)
         e.set_author(name=inter.user.display_name, icon_url=inter.user.display_avatar.url)
@@ -69,8 +70,8 @@ class AnnounceModal(discord.ui.Modal, title="Объявление"):
         news = bot.role(inter.guild, "n_news")
         content = "@everyone" if self.ping_everyone else (news.mention if news else None)
         await c.send(content=content, embed=e, allowed_mentions=discord.AllowedMentions(everyone=True, roles=True))
-        await inter.response.send_message("✅ Опубликовано." + (" Зачитываю в голосовых каналах…" if self.voice else ""),
-                                          ephemeral=True)
+        await inter.followup.send("✅ Опубликовано." + (" Зачитываю в голосовых каналах…" if self.voice else ""),
+                                  ephemeral=True)
         music = bot.get_cog("Music")
         if self.voice and music:
             await music.announce(inter.guild, [c.id for c in music.voice_targets(inter.guild)],

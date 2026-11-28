@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import random
+import types
 
 import discord
 from discord import app_commands
@@ -158,18 +159,53 @@ class ApplyPanel(discord.ui.View):
                                           ephemeral=True)
 
 
+FORM_ID = "appform:v1"   # окно анкеты (шаг 1)
+SIT_ID = "appsit:"       # окно «вопросы о себе» (шаг 3): appsit:<номер заявки>
+
+
+def modal_values(data):
+    """{custom_id: value} из ответа окна Discord (поля в строках или в «подписях» — ищем вглубь)."""
+    out = {}
+
+    def walk(x):
+        if isinstance(x, dict):
+            if "custom_id" in x and isinstance(x.get("value"), str):
+                out[x["custom_id"]] = x["value"]
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    walk((data or {}).get("components") or [])
+    return out
+
+
+def step3_pending(a, exam_on):
+    """Заявка дошла до шага 3 (тест сдан или выключен), но «вопросы о себе» не отправлены."""
+    if not a or a["status"] != "exam" or a["situational"]:
+        return False
+    return bool(a["exam_total"]) or not exam_on
+
+
+# Окна заявки разбирает слушатель Applications.on_interaction по постоянному custom_id — а не объект окна в памяти
+# бота: так анкета не теряется, если человек писал её дольше 20 минут или бот за это время перезапустился
+# (/бот обновить). Раньше в обоих случаях Discord показывал «что-то пошло не так», и заявка к нам не приходила.
 class ApplicationModal(discord.ui.Modal, title="Шаг 1 из 3 · Анкета"):
-    nick = discord.ui.TextInput(label="Ник в игре (Имя_Фамилия)", placeholder="Ivan_Ivanov", max_length=32)
-    static = discord.ui.TextInput(label="Static ID", placeholder="123456", max_length=10)
+    nick = discord.ui.TextInput(label="Ник в игре (Имя_Фамилия)", placeholder="Ivan_Ivanov", max_length=32,
+                                custom_id="nick")
+    static = discord.ui.TextInput(label="Static ID", placeholder="123456", max_length=10, custom_id="static")
     age_exp = discord.ui.TextInput(label="Возраст (реальный) и сколько играешь", placeholder="19 лет, играю 4 месяца",
-                                   max_length=100)
+                                   max_length=100, custom_id="age_exp")
     reason = discord.ui.TextInput(label="Почему именно мы? Где состоял раньше?", style=discord.TextStyle.paragraph,
-                                  max_length=800)
+                                  max_length=800, custom_id="reason")
     online = discord.ui.TextInput(label="Онлайн в день и в какое время", placeholder="3-4 часа, вечером",
-                                  max_length=100)
+                                  max_length=100, custom_id="online")
+
+    def __init__(self):
+        super().__init__(timeout=6 * 3600, custom_id=FORM_ID)  # таймаут — только чистка памяти
 
     async def on_submit(self, inter: discord.Interaction):
-        await inter.client.get_cog("Applications").anketa_submitted(inter, self)
+        pass  # ответ даёт Applications.on_interaction
 
 
 class StartExamView(discord.ui.View):
@@ -202,31 +238,62 @@ class QuestionView(discord.ui.View):
         return cb
 
 
-class SituationalStartView(discord.ui.View):
-    def __init__(self, cog, app_id):
-        super().__init__(timeout=1800)
-        self.cog, self.app_id = cog, app_id
+class Step3Button(discord.ui.DynamicItem[discord.ui.Button], template=r"appstep3:(?P<id>\d+)"):
+    """«Ответить на вопросы» — постоянная кнопка: работает и через час, и после перезапуска бота."""
 
-    @discord.ui.button(label="Ответить на вопросы", emoji="✍️", style=discord.ButtonStyle.primary)
-    async def go(self, inter: discord.Interaction, _):
-        await inter.response.send_modal(SituationalModal(self.cog, self.app_id, inter.client.situational(inter.guild)))
+    def __init__(self, app_id):
+        super().__init__(discord.ui.Button(label="Ответить на вопросы", emoji="✍️",
+                                           style=discord.ButtonStyle.primary, custom_id=f"appstep3:{app_id}"))
+        self.app_id = app_id
+
+    @classmethod
+    async def from_custom_id(cls, inter, item, match):
+        return cls(int(match["id"]))
+
+    async def callback(self, inter: discord.Interaction):
+        a = inter.client.db.one("SELECT user_id, status FROM applications WHERE id=?", self.app_id)
+        if not a or a["user_id"] != inter.user.id:
+            return await inter.response.send_message("Это не твоя заявка.", ephemeral=True)
+        if a["status"] != "exam":
+            return await inter.response.send_message("Эта заявка уже отправлена или закрыта — посмотреть: "
+                                                     "«Где моя заявка?».", ephemeral=True)
+        await inter.response.send_modal(SituationalModal(self.app_id, inter.client.situational(inter.guild)))
+
+
+def step3_view(app_id):
+    v = discord.ui.View(timeout=None)
+    v.add_item(Step3Button(app_id))
+    return v
+
+
+def situational_pool(pool):
+    return list(pool or config.SITUATIONAL)
 
 
 class SituationalModal(discord.ui.Modal):
-    def __init__(self, cog, app_id, pool=None):
-        super().__init__(title="Шаг 3 из 3 · Вопросы о тебе", timeout=1200)
-        self.cog, self.app_id = cog, app_id
-        self.qs = random.sample(pool or config.SITUATIONAL, 2)  # вопросы семьи — /настройки → «Тексты»
-        self.inputs = []
-        for label, ph in self.qs:
-            ti = discord.ui.TextInput(label=label[:45], placeholder=ph[:100], style=discord.TextStyle.paragraph,
-                                      min_length=10, max_length=700)
-            self.add_item(ti)
-            self.inputs.append(ti)
+    def __init__(self, app_id, pool=None):
+        super().__init__(title="Шаг 3 из 3 · Вопросы о тебе", timeout=6 * 3600, custom_id=f"{SIT_ID}{app_id}")
+        pool = situational_pool(pool)  # вопросы семьи — /настройки → «Тексты»
+        for k in random.sample(range(len(pool)), min(2, len(pool))):
+            label, ph = pool[k]
+            # номер вопроса в custom_id: по нему слушатель восстановит текст вопроса
+            self.add_item(discord.ui.TextInput(label=label[:45], placeholder=ph[:100], custom_id=f"q{k}",
+                                               style=discord.TextStyle.paragraph, min_length=10, max_length=700))
 
     async def on_submit(self, inter: discord.Interaction):
-        answers = [{"q": f"{l}. {p}", "a": ti.value} for (l, p), ti in zip(self.qs, self.inputs)]
-        await self.cog.submit(inter, self.app_id, answers)
+        pass  # ответ даёт Applications.on_interaction
+
+
+def situational_answers(values, pool):
+    """Ответы окна шага 3 → [{q, a}] (вопрос — по номеру в custom_id)."""
+    pool, out = situational_pool(pool), []
+    for cid, val in values.items():
+        if not cid.startswith("q") or not cid[1:].isdigit():
+            continue
+        k = int(cid[1:])
+        label, ph = pool[k] if k < len(pool) else ("Вопрос", "")
+        out.append({"q": f"{label}. {ph}" if ph else label, "a": val})
+    return out
 
 
 class AppAction(discord.ui.DynamicItem[discord.ui.Button], template=r"app:(?P<action>[a-z]+):(?P<id>\d+)"):
@@ -302,6 +369,9 @@ class Applications(commands.Cog):
                 return "недавно"
         st, rev = a["status"], f"<@{a['reviewer_id']}>" if a["reviewer_id"] else None
         head = f"📄 Заявка №{a['id']} · {STATUS.get(st, (st,))[0]}\n"
+        if st == "exam" and step3_pending(a, self.bot.feature(g, "hr:exam")):
+            return head + ("⚠️ Заявка ещё НЕ отправлена: остался последний шаг — 2 вопроса о себе. Жми «📨 Подать "
+                           "заявку» — продолжишь с этого места.")
         if st == "exam":
             return head + "Ты начал анкету, но тест не закончил. Жми «📨 Подать заявку» и пройди заново."
         if st == "exam_failed":
@@ -354,7 +424,11 @@ class Applications(commands.Cog):
                 elif not db.gget(g, f"app:nudged:{a['id']}"):
                     db.gset(g, f"app:nudged:{a['id']}", 1)
                     m = g.get_member(a["user_id"])
-                    if m:
+                    if m and step3_pending(a, self.bot.feature(g, "hr:exam")):
+                        await safe_dm(m, f"📨 Твоя заявка в семью {config.FAMILY} ещё не отправлена: остался последний "
+                                         "шаг — 2 вопроса о себе. Нажми «📨 Подать заявку» на сервере — продолжишь с "
+                                         "этого места.")
+                    elif m:
                         await safe_dm(m, f"📨 Ты начал заявку в семью {config.FAMILY}, но не прошёл тест до конца. "
                                          "Вернись на сервер и нажми «📨 Подать заявку» — начнёшь заново, это быстро.")
 
@@ -418,6 +492,14 @@ class Applications(commands.Cog):
             return await inter.response.send_message("⏳ У тебя уже идёт тест — продолжи в открытом окне.",
                                                      ephemeral=True)
         gid = inter.guild.id
+        half = db.one("SELECT * FROM applications WHERE guild_id=? AND user_id=? AND status='exam' "
+                      "ORDER BY id DESC LIMIT 1", gid, u.id)
+        if step3_pending(half, bot.feature(inter.guild, "hr:exam")):
+            return await inter.response.send_message(
+                embed=bot.embed(f"📄 Заявка №{half['id']} почти готова",
+                                "Анкета сохранена" + (" и тест сдан" if half["exam_total"] else "") +
+                                ". Остался последний шаг — ответь на 2 вопроса о себе, и заявка уйдёт к нам.",
+                                config.GREEN, inter.guild), view=step3_view(half["id"]), ephemeral=True)
         pending = db.one(f"SELECT id FROM applications WHERE guild_id=? AND user_id=? AND status IN {OPEN}", gid, u.id)
         if pending:
             return await inter.response.send_message(f"⏳ Твоя заявка №{pending['id']} уже на рассмотрении.",
@@ -437,8 +519,37 @@ class Applications(commands.Cog):
                                                      ephemeral=True)
         await inter.response.send_modal(ApplicationModal())
 
-    async def anketa_submitted(self, inter: discord.Interaction, m: ApplicationModal):
+    @commands.Cog.listener()
+    async def on_interaction(self, inter: discord.Interaction):
+        """Окна заявки (шаги 1 и 3) — по постоянному custom_id, см. ApplicationModal."""
+        if inter.type != discord.InteractionType.modal_submit or not inter.guild:
+            return
+        cid = str((inter.data or {}).get("custom_id") or "")
+        if cid != FORM_ID and not cid.startswith(SIT_ID):
+            return
+        vals = modal_values(inter.data)
+        try:
+            if cid == FORM_ID:
+                await self.anketa_submitted(inter, vals)
+            elif cid[len(SIT_ID):].isdigit():
+                await self.submit(inter, int(cid[len(SIT_ID):]),
+                                  situational_answers(vals, self.bot.situational(inter.guild)))
+        except Exception:
+            log.exception("Окно заявки %s от %s", cid, inter.user)
+            if not inter.response.is_done():
+                try:
+                    await inter.response.send_message("⚠️ Не получилось сохранить — нажми ещё раз. Если повторится, "
+                                                      "напиши руководству.", ephemeral=True)
+                except discord.HTTPException:
+                    pass
+
+    async def anketa_submitted(self, inter: discord.Interaction, vals: dict):
         bot, db, u = self.bot, self.bot.db, inter.user
+
+        class F:  # поле анкеты: .value, как у TextInput
+            def __init__(self, v):
+                self.value = (v or "").strip() or "—"
+        m = types.SimpleNamespace(**{k: F(vals.get(k)) for k in ("nick", "static", "age_exp", "reason", "online")})
         static = m.static.value.strip()
         if not static.isdigit():
             return await inter.response.send_message("❌ Static ID должен состоять только из цифр.", ephemeral=True)
@@ -461,7 +572,7 @@ class Applications(commands.Cog):
         if not questions:
             return await inter.response.send_message(
                 embed=bot.embed("✅ Анкета сохранена", "Последний шаг — ответь на 2 вопроса о себе.", config.GREEN),
-                view=SituationalStartView(self, app_id), ephemeral=True)
+                view=step3_view(app_id), ephemeral=True)
         s = ExamSession(u.id, app_id, questions, attempt, conf=conf)
         self.sessions[(inter.guild.id if inter.guild else 0, u.id)] = s
         e = bot.embed("✅ Анкета сохранена · Шаг 2 из 3 — тест",
@@ -561,13 +672,16 @@ class Applications(commands.Cog):
         e = bot.embed("✅ Тест сдан!",
                       f"Результат: **{score}/{total}**.\n\n**Шаг 3 из 3.** Ответь на 2 вопроса о себе — честно и "
                       "развёрнуто, ответы прочитает отдел кадров.", config.GREEN, inter.guild)
-        await inter.response.edit_message(embed=e, view=SituationalStartView(self, s.app_id))
+        await inter.response.edit_message(embed=e, view=step3_view(s.app_id))
 
     async def submit(self, inter: discord.Interaction, app_id, answers):
         bot, db = self.bot, self.bot.db
         a = db.one("SELECT * FROM applications WHERE id=?", app_id)
-        if not a or a["status"] not in ("exam",):
-            return await inter.response.send_message("Эта заявка уже отправлена или устарела.", ephemeral=True)
+        if not a or a["user_id"] != inter.user.id or a["guild_id"] != inter.guild.id:
+            return await inter.response.send_message("Это не твоя заявка.", ephemeral=True)
+        if a["status"] not in ("exam",):
+            return await inter.response.send_message("Эта заявка уже отправлена или устарела — посмотреть: "
+                                                     "«Где моя заявка?».", ephemeral=True)
         review = bot.ch(inter.guild, "review")
         if not review:
             return await inter.response.send_message("Канал заявок не настроен — сообщи руководству.", ephemeral=True)
@@ -987,5 +1101,5 @@ class Applications(commands.Cog):
 
 async def setup(bot):
     bot.add_view(ApplyPanel())
-    bot.add_dynamic_items(AppAction)
+    bot.add_dynamic_items(AppAction, Step3Button)
     await bot.add_cog(Applications(bot))
